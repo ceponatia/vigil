@@ -7,6 +7,14 @@
  * (`docs/resilience.md` §4). Anything that is not a recognised constraint
  * violation is re-thrown: an unreachable database or a syntax error is a
  * real failure and must not be reported as a routine refusal.
+ *
+ * **The error that arrives is not the error Postgres raised.** drizzle-orm
+ * wraps every failed query in its own error and hangs the driver's error off
+ * `cause`, sometimes more than one level deep ("Caused by: Caused by: …" in
+ * a stack). Reading `code` off the object that was thrown finds nothing, so
+ * every refusal would look like an unrecognised failure and be re-thrown —
+ * which is exactly what CI run 34721798208 showed for every constraint in
+ * this schema. These helpers walk the `cause` chain instead.
  */
 
 export const PG_UNIQUE_VIOLATION = "23505";
@@ -21,29 +29,46 @@ export const PG_NUMERIC_VALUE_OUT_OF_RANGE = "22003";
 /** Raised by the append-only trigger on the journal tables. */
 export const PG_RAISE_EXCEPTION = "P0001";
 
+/** Deep enough for drizzle's wrapping; bounded so a cyclic cause cannot spin. */
+const MAX_CAUSE_DEPTH = 8;
+
 type PostgresErrorLike = {
   readonly code?: unknown;
   readonly constraint?: unknown;
-  readonly message?: unknown;
+  readonly cause?: unknown;
 };
 
-function asPostgresError(error: unknown): PostgresErrorLike | null {
-  return typeof error === "object" && error !== null ? (error as PostgresErrorLike) : null;
-}
+/**
+ * The first error in the `cause` chain that carries a SQLSTATE. Returning
+ * the whole shape rather than one field keeps `code` and `constraint` read
+ * from the *same* error: a wrapper that carried one and the driver error the
+ * other would otherwise produce a confident, wrong mapping.
+ */
+function postgresError(error: unknown): PostgresErrorLike | null {
+  let candidate: unknown = error;
 
-function stringField(error: unknown, read: (shape: PostgresErrorLike) => unknown): string | null {
-  const shape = asPostgresError(error);
-  if (shape === null) {
-    return null;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth += 1) {
+    if (typeof candidate !== "object" || candidate === null) {
+      return null;
+    }
+    // `object` has no properties in common with an all-optional type, so
+    // this is an assertion rather than an assignment.
+    const shape = candidate as PostgresErrorLike;
+    if (typeof shape.code === "string") {
+      return shape;
+    }
+    candidate = shape.cause;
   }
-  const value = read(shape);
-  return typeof value === "string" ? value : null;
+
+  return null;
 }
 
 export function postgresErrorCode(error: unknown): string | null {
-  return stringField(error, (shape) => shape.code);
+  const shape = postgresError(error);
+  return shape !== null && typeof shape.code === "string" ? shape.code : null;
 }
 
 export function postgresConstraintName(error: unknown): string | null {
-  return stringField(error, (shape) => shape.constraint);
+  const shape = postgresError(error);
+  return shape !== null && typeof shape.constraint === "string" ? shape.constraint : null;
 }

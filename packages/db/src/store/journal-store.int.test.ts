@@ -69,6 +69,22 @@ describe("postJournalEntry", () => {
     expect(await netBaseOf(`holdings|available|${TEST_ASSET}`)).toBe(FUNDED_BASE);
   });
 
+  it("applies a credit to a holdings account that can afford it — catches the balance projection being written as one upsert, where Postgres checks the proposed (debit 0, credit N) row before resolving the conflict and rejects every spend, fee, and sell leg as an overspend however well funded the account is", async () => {
+    expect((await postJournalEntry(db, fundingEntry("entry-funds-a-fee", FUNDED_BASE))).outcome).toBe("posted");
+
+    const fee = await postJournalEntry(
+      db,
+      storeEntry("entry-affordable-fee", "fee", [
+        debitOf(counterFamily("fees"), FUNDED_BASE / 4n),
+        creditOf(heldIn("available"), FUNDED_BASE / 4n),
+      ]),
+    );
+
+    expect(fee.outcome).toBe("posted");
+    expect(await netBaseOf(`holdings|available|${TEST_ASSET}`)).toBe(FUNDED_BASE - FUNDED_BASE / 4n);
+    expect(await netBaseOf(`fees|-|${TEST_ASSET}`)).toBe(FUNDED_BASE / 4n);
+  });
+
   it("refuses a posting that would credit a holdings account below zero and rolls the whole entry back — catches a check constraint surfacing as a crash instead of a diagnostic, and a half-applied entry whose journal and projection disagree", async () => {
     expect((await postJournalEntry(db, fundingEntry("entry-funded", FUNDED_BASE))).outcome).toBe("posted");
 

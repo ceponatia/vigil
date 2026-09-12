@@ -82,6 +82,13 @@ export type StoreEntry = {
   readonly lines: readonly StoreLine[];
 };
 
+/** What one entry adds to one account's running totals. */
+type AccountDelta = {
+  readonly line: StoreLine;
+  readonly debitBase: bigint;
+  readonly creditBase: bigint;
+};
+
 export type StoredBalance = {
   readonly accountKey: string;
   readonly accountFamily: AccountFamilyValue;
@@ -282,34 +289,58 @@ export async function postJournalEntry(db: VigilDatabase, entry: StoreEntry): Pr
         })),
       );
 
-      // Sorted by account key so two transactions touching the same pair of
-      // accounts always take their row locks in the same order; unsorted
-      // upserts deadlock instead of queueing.
-      const ordered = [...entry.lines].sort((left, right) =>
-        compareAccountKeys(accountKeyFor(left.account), accountKeyFor(right.account)),
-      );
+      // One row per account the entry touches, in account-key order: an
+      // entry may post to the same account twice, and two transactions that
+      // take their row locks in different orders deadlock instead of
+      // queueing.
+      const deltas = new Map<string, AccountDelta>();
+      for (const line of entry.lines) {
+        const key = accountKeyFor(line.account);
+        const current = deltas.get(key) ?? { line, debitBase: 0n, creditBase: 0n };
+        deltas.set(key, {
+          line: current.line,
+          debitBase: current.debitBase + (line.direction === "debit" ? line.amountBase : 0n),
+          creditBase: current.creditBase + (line.direction === "credit" ? line.amountBase : 0n),
+        });
+      }
+      const ordered = [...deltas.entries()].sort(([left], [right]) => compareAccountKeys(left, right));
 
-      for (const line of ordered) {
+      // Ensure the rows exist, then add to them — deliberately two
+      // statements rather than one `ON CONFLICT DO UPDATE`.
+      //
+      // Postgres checks a table's CHECK constraints against the tuple an
+      // INSERT proposes, *before* it resolves the conflict. An upsert that
+      // credits a holdings account therefore proposes (debit 0, credit N),
+      // which fails `ledger_balances_holdings_never_negative` no matter how
+      // well funded the account is — so every spend, fee, and sell leg would
+      // be rejected as an overspend. Seeding (0, 0) and then updating puts
+      // the constraint back on the merged row, which is the balance the rule
+      // is actually about.
+      await tx
+        .insert(ledgerBalances)
+        .values(
+          ordered.map(([key, delta]) => ({
+            accountKey: key,
+            accountFamily: delta.line.account.family,
+            holdingsState: delta.line.account.holdingsState,
+            assetId: delta.line.account.assetId,
+            assetScale: delta.line.scale,
+            debitBase: 0n,
+            creditBase: 0n,
+            lastRecordedAt: recordedAt,
+          })),
+        )
+        .onConflictDoNothing({ target: ledgerBalances.accountKey });
+
+      for (const [key, delta] of ordered) {
         await tx
-          .insert(ledgerBalances)
-          .values({
-            accountKey: accountKeyFor(line.account),
-            accountFamily: line.account.family,
-            holdingsState: line.account.holdingsState,
-            assetId: line.account.assetId,
-            assetScale: line.scale,
-            debitBase: line.direction === "debit" ? line.amountBase : 0n,
-            creditBase: line.direction === "credit" ? line.amountBase : 0n,
+          .update(ledgerBalances)
+          .set({
+            debitBase: sql`${ledgerBalances.debitBase} + ${delta.debitBase.toString()}::numeric`,
+            creditBase: sql`${ledgerBalances.creditBase} + ${delta.creditBase.toString()}::numeric`,
             lastRecordedAt: recordedAt,
           })
-          .onConflictDoUpdate({
-            target: ledgerBalances.accountKey,
-            set: {
-              debitBase: sql`${ledgerBalances.debitBase} + excluded.debit_base`,
-              creditBase: sql`${ledgerBalances.creditBase} + excluded.credit_base`,
-              lastRecordedAt: sql`excluded.last_recorded_at`,
-            },
-          });
+          .where(eq(ledgerBalances.accountKey, key));
       }
 
       return { outcome: "posted", entryId: entry.entryId };
