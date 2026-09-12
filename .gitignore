@@ -1,0 +1,61 @@
+# Dependencies and build output
+node_modules/
+.next/
+*.tsbuildinfo
+next-env.d.ts
+
+# Environment files — everything except the checked-in example
+.env
+.env.*
+!.env.example
+
+# Local-only data and generated artifacts
+data/
+eval-output/
+private/
+
+# The private design handoff: personal-portfolio and archived-prompt
+# material must never be committed. Sanitized, general requirements live in
+# docs/product.md instead.
+/Crypto_Trading_Repo_Project_Handoff.md
+
+# Agent worktrees and local session state
+.claude/worktrees/
+.codex/worktrees/
+.claude/settings.local.json
+
+# Test/lint caches and coverage output
+.vitest-cache/
+coverage/
+
+# Python bytecode caches (evaluation/ML worker tooling)
+__pycache__/
+*.pyc
+
+# Local Playwright/browser-automation scratch (may embed live UI state)
+.playwright-mcp/
+
+# Secret-shaped files — these should never exist in the tree, but the
+# pattern stays here as a second line of defense alongside the preflight hook
+*.pem
+*.key
+*.p12
+*.keystore
+id_rsa*
+id_ed25519*
+seed*
+mnemonic*
+*.secret
+
+# No raster imagery enters git: screenshots and evaluation renders belong in
+# gitignored eval-output/, never committed. If the UI ever needs a real
+# asset (a logo, an icon), carve it back in with a `!` negation here.
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.avif
+*.bmp
+*.tif
+*.tiff

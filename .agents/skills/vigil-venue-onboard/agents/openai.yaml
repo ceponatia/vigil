@@ -1,0 +1,7 @@
+interface:
+  display_name: "Vigil Venue Onboarding"
+  short_description: "Onboard vigil exchanges, chains, protocols, routers, and signer providers with capability evidence"
+  default_prompt: "Use $vigil-venue-onboard to onboard or revise this venue with primary-source and account/chain-observed evidence, correct docs/capabilities.md classification, and no change to trading authority or stage."
+
+policy:
+  allow_implicit_invocation: true

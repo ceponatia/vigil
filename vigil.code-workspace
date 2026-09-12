@@ -1,0 +1,215 @@
+{
+  // Vigil — VS Code workspace. Open via File > Open Workspace from File…
+  "folders": [
+    {
+      "name": "vigil",
+      "path": "."
+    }
+  ],
+  "settings": {
+    // ── Explorer: file nesting ─────────────────────────────────────────────
+    // Nesting patterns live in .vscode/settings.json. Folder settings take
+    // precedence over workspace settings for that object, so don't duplicate
+    // explorer.fileNesting.patterns here.
+    //
+    // explorer.fileNesting.expand is workspace-scoped and therefore must live
+    // here rather than in the folder's .vscode/settings.json.
+    "explorer.fileNesting.expand": false,
+    // ── TypeScript ────────────────────────────────────────────────────────
+    "js/ts.tsdk.path": "node_modules/typescript/lib",
+    "js/ts.tsdk.promptToUseWorkspaceVersion": true,
+    // ── Lint / format (no prettier in this repo — ESLint is the tool) ────
+    "eslint.useFlatConfig": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll.eslint": "explicit"
+    },
+    // ── pnpm ──────────────────────────────────────────────────────────────
+    "npm.packageManager": "pnpm",
+    // ── Noise control ─────────────────────────────────────────────────────
+    // data/, eval-output/ and private/ are gitignored local output: market
+    // recordings, evaluation artifacts and screenshots, private notes. They
+    // never belong in search results or the file watcher.
+    "files.exclude": {
+      "**/.next": true,
+      "**/tsconfig.tsbuildinfo": true
+    },
+    "search.exclude": {
+      "**/.next": true,
+      "pnpm-lock.yaml": true,
+      "drizzle/meta": true,
+      "data": true,
+      "eval-output": true,
+      "private": true
+    },
+    "files.watcherExclude": {
+      "**/.next/**": true,
+      "**/data/**": true,
+      "**/eval-output/**": true
+    }
+  },
+  "extensions": {
+    "recommendations": [
+      "dbaeumer.vscode-eslint",
+      "vitest.explorer",
+      "ms-azuretools.vscode-docker",
+      "EditorConfig.EditorConfig"
+    ]
+  },
+  "launch": {
+    "configurations": [
+      {
+        // The deterministic trading runtime under the Node debugger. It
+        // starts in PAPER mode; the runtime refuses any other mode from
+        // configuration (docs/policy.md).
+        "name": "Trading runtime: debug",
+        "type": "node-terminal",
+        "request": "launch",
+        "command": "pnpm dev:trading"
+      },
+      {
+        // Starts `pnpm dev:control` (port 3300) with the server debugger
+        // attached, then opens Chrome with the client debugger once Next
+        // reports ready.
+        "name": "Control app: debug full stack",
+        "type": "node-terminal",
+        "request": "launch",
+        "command": "pnpm dev:control",
+        "serverReadyAction": {
+          "pattern": "- Local:.+(https?://.+)",
+          "uriFormat": "%s",
+          "action": "debugWithChrome",
+          "killOnServerStop": true
+        }
+      },
+      {
+        "name": "Control app: debug server-side",
+        "type": "node-terminal",
+        "request": "launch",
+        "command": "pnpm dev:control"
+      },
+      {
+        // Attach to an already-running `pnpm dev:control`.
+        "name": "Control app: debug client-side",
+        "type": "chrome",
+        "request": "launch",
+        "url": "http://localhost:3300",
+        "webRoot": "${workspaceFolder}/apps/control"
+      },
+      {
+        // Debug the test file open in the editor (unit or .int.test —
+        // integration files need the dev Postgres running: `pnpm db:up`).
+        "name": "Vitest: debug current file",
+        "type": "node",
+        "request": "launch",
+        "program": "${workspaceFolder}/node_modules/vitest/vitest.mjs",
+        "args": [
+          "run",
+          "${relativeFile}"
+        ],
+        "cwd": "${workspaceFolder}",
+        "autoAttachChildProcesses": true,
+        "smartStep": true,
+        "console": "integratedTerminal",
+        "skipFiles": [
+          "<node_internals>/**"
+        ]
+      }
+    ]
+  },
+  "tasks": {
+    "version": "2.0.0",
+    // The test, typecheck and lint tasks are for the owner's editor. Agents
+    // never run them on this machine — CI is the gate (AGENTS.md), and the
+    // repository's preflight hook refuses those commands from an agent shell.
+    "tasks": [
+      {
+        "label": "dev: trading runtime",
+        "type": "shell",
+        "command": "pnpm dev:trading",
+        "isBackground": true,
+        "problemMatcher": []
+      },
+      {
+        "label": "dev: control app",
+        "type": "shell",
+        "command": "pnpm dev:control",
+        "isBackground": true,
+        "problemMatcher": []
+      },
+      {
+        "label": "test (pure)",
+        "type": "shell",
+        "command": "pnpm test",
+        "group": {
+          "kind": "test",
+          "isDefault": true
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "test (integration — needs Postgres)",
+        "type": "shell",
+        "command": "pnpm test:int",
+        "group": "test",
+        "problemMatcher": []
+      },
+      {
+        "label": "typecheck",
+        "type": "shell",
+        "command": "pnpm typecheck",
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+        "problemMatcher": [
+          "$tsc"
+        ]
+      },
+      {
+        "label": "lint",
+        "type": "shell",
+        "command": "pnpm lint",
+        "problemMatcher": [
+          "$eslint-stylish"
+        ]
+      },
+      {
+        "label": "lint: import cycles",
+        "type": "shell",
+        "command": "pnpm lint:cycles",
+        "problemMatcher": []
+      },
+      {
+        "label": "db: start (docker)",
+        "type": "shell",
+        "command": "pnpm db:up",
+        "problemMatcher": []
+      },
+      {
+        "label": "db: stop (docker)",
+        "type": "shell",
+        "command": "pnpm db:down",
+        "problemMatcher": []
+      },
+      {
+        "label": "db: generate migration",
+        "type": "shell",
+        "command": "pnpm db:generate",
+        "problemMatcher": []
+      },
+      {
+        "label": "db: migrate",
+        "type": "shell",
+        "command": "pnpm db:migrate",
+        "problemMatcher": []
+      },
+      {
+        "label": "db: studio",
+        "type": "shell",
+        "command": "pnpm db:studio",
+        "isBackground": true,
+        "problemMatcher": []
+      }
+    ]
+  }
+}

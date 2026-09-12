@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # typescript-eslint 8.70.0 requires a TypeScript range below 6.1.0; a
+      # major TypeScript bump here would break `pnpm lint` until
+      # typescript-eslint is upgraded first. Track that upgrade as its own
+      # change rather than letting Dependabot open a PR that cannot pass CI.
+      - dependency-name: "typescript"
+        update-types:
+          - "version-update:semver-major"
+      # eslint-plugin-import, eslint-plugin-react and eslint-plugin-jsx-a11y
+      # (dependencies of eslint-config-next) declare an ESLint <=9 peer range.
+      # Upgrade ESLint to 10 in one deliberate change together with them.
+      - dependency-name: "eslint"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "@eslint/js"
+        update-types:
+          - "version-update:semver-major"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

@@ -1,0 +1,79 @@
+name: Research or evaluation
+description: A question to answer or a comparison to run, rather than something to build.
+labels: ["research"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Research earns its keep by changing a decision. If no result would change what happens
+        next, it is reading, not work — and probably does not need an issue.
+
+        Research never places a trade or moves funds. It can read market data, retrieve evidence,
+        and produce a proposal or a recommendation; it never holds a private key, a trade
+        credential, or the ability to raise a limit.
+
+        Project fields are set on the [board](https://github.com/users/ceponatia/projects/TODO) after filing.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: The question
+      description: One question, stated so that an answer is recognizable when it arrives.
+      placeholder: Does the numeric candidate's entry-zone width beat the current default across the fixed replay corpus?
+    validations:
+      required: true
+
+  - type: textarea
+    id: decision
+    attributes:
+      label: What decision this unblocks
+      description: |
+        Name the thing that is waiting. If the answer would not move a default, settle a ruling, or
+        unblock another issue, say that plainly — it may still be worth doing, but it should be
+        filed knowing that.
+    validations:
+      required: true
+
+  - type: textarea
+    id: method
+    attributes:
+      label: Method
+      description: |
+        How the answer gets produced — corpus, fixtures, instruments, number of runs, what is held
+        constant, and whether comparisons are blinded. If an instrument does not exist yet, say so:
+        building it is part of the work.
+    validations:
+      required: true
+
+  - type: textarea
+    id: bar
+    attributes:
+      label: What result would change the answer
+      description: |
+        Pre-register the bar before running. State what counts as a win, what counts as a null
+        result, and what happens on a null — a comparison with no stated bar tends to end in a
+        shrug.
+      placeholder: Adopt the challenger only if it wins on at least 6 of 10 replay fixtures with no regression on the risk checks.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: owner-spend
+    attributes:
+      label: Does this need owner spend
+      description: Paid or credentialed runs need the owner to authorize and usually to execute them.
+      options:
+        - "No"
+        - "Yes — paid LLM/provider calls"
+        - "Yes — paid data or RPC"
+        - "Yes — read-only venue credentials"
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Prior results, evidence documents, the specs involved, related issues.
+    validations:
+      required: false

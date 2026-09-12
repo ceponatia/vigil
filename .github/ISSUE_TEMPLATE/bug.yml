@@ -1,0 +1,104 @@
+name: Bug
+description: Something behaves wrong, breaks, or degrades when it should not.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Project fields — Status, Horizon, Phase, Area, Priority — are set on the
+        [board](https://github.com/users/ceponatia/projects/TODO) after filing. Don't guess them here.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The observed behavior, in plain English.
+      placeholder: The candidate's entry zone stayed valid past its stated expiry and a paper order was placed against it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: Numbered steps. If it is intermittent, say how often it happens and what seems to trigger it.
+      placeholder: |
+        1. Run the replay fixture for the staged position plan
+        2. Let the candidate's expiry pass without a fill
+        3. Advance the clock and re-evaluate the candidate
+        4. The candidate is still treated as live instead of MISSED
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operating-mode
+    attributes:
+      label: Operating mode
+      description: The mode this was observed in.
+      options:
+        - PAPER
+        - SHADOW
+        - LIVE
+        - Not applicable
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Data
+        - Ledger/Risk
+        - Execution
+        - Research
+        - Evaluation
+        - UI/Ops
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: money-or-credential-at-risk
+    attributes:
+      label: Was money or a credential at risk
+      description: |
+        Answer honestly even under PAPER — the question is whether the defect *would* have
+        touched real funds or a credential outside its intended boundary, not whether it
+        happened to today. Answering "Possibly" or "Yes" means also pausing the affected
+        authority and notifying the owner directly, not just filing this issue.
+      options:
+        - "No"
+        - "Paper only"
+        - "Possibly"
+        - "Yes"
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Reason codes, intent/attempt IDs, diagnostics
+      description: |
+        Reason codes, the intent or attempt ID involved, a degraded default that fired,
+        console or server output. This system prefers degrading to failing, so a bug often
+        shows up as a diagnostic or a WAIT/MISSED reason rather than a hard error.
+    validations:
+      required: false
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        Timestamps, journal/intent IDs, replay fixture name, screenshots. Never paste secrets,
+        keys, seed phrases, or personal balances — sanitize before attaching.
+    validations:
+      required: false

@@ -1,0 +1,306 @@
+name: CI
+
+# CI is the only gate on this repository — there is no local pre-push check.
+# A draft PR runs nothing (see the draft guard on `changes` and `verify`
+# below); marking a PR ready for review runs every applicable job; the
+# aggregate `verify` check is the required status on `main` and `prod`.
+#
+# Every job repeats its own fixed setup (checkout, pnpm, Node, install)
+# rather than sharing a prebuilt environment, which keeps each job legible
+# and independently re-runnable at the cost of repeating the install on
+# every job — an accepted tradeoff at this repository's size.
+#
+# No job in this workflow needs a secret. `VIGIL_MODE` is pinned to `PAPER`
+# and no venue, RPC, data-provider, or LLM credential is read anywhere —
+# CI proves the paper path, never live trading capability. Nothing here
+# should ever need `secrets.*`; if a future job seems to need one, that job
+# does not belong in pull-request CI.
+#
+# Two gates that do not exist yet, on purpose:
+#   - No production build job: no build target (dashboard host, container
+#     image, or otherwise) has been chosen. It is added with the hosting
+#     decision.
+#   - No documentation-check job: `scripts/check-docs.mjs` does not exist
+#     yet. It is added with that script, following the reference workflow's
+#     zero-install docs job shape.
+#
+# `pnpm test` fails when a workspace has no test files at all — that is
+# Vitest's own default, not a bug here — so the first code PR that adds a
+# package must land with at least one test, or the `unit tests` job fails
+# on an empty suite.
+# Branch model: `main` is the development/integration branch; `prod` is the
+# release branch. A PR into `prod` is a promotion and always runs every gate.
+# There is deliberately no `push` trigger: PR CI is the gate for `main`, a
+# promotion PR is the gate for `prod`, and `gh workflow run CI --ref main` is
+# the deliberate full verification. A push trigger would only add a duplicate
+# run of what the PR already proved.
+on:
+  pull_request:
+    branches: [main, prod]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  VIGIL_MODE: PAPER
+  CI: true
+
+jobs:
+  changes:
+    name: classify changes
+    # Draft gate for the whole workflow: every other job `needs` this one
+    # (directly or transitively through `verify`), so skipping it here skips
+    # the entire suite for draft PRs. `push` and `workflow_dispatch` carry no
+    # `pull_request.draft` field, so the condition only ever suppresses a
+    # pull_request event on a draft PR.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      code: ${{ steps.classify.outputs.code }}
+      integration: ${{ steps.classify.outputs.integration }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          # `workflow_dispatch` is the deliberate full-verification run, and a
+          # PR into `prod` is a promotion — a release candidate — so both run
+          # everything applicable regardless of what actually changed.
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || ( "$EVENT_NAME" == "pull_request" && "$BASE_REF" == "prod" ) ]]; then
+            {
+              echo "docs_only=false"
+              echo "code=true"
+              echo "integration=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # `--no-renames`: with rename detection on, a file moved from a code
+          # path into a documentation path is listed only at its destination,
+          # which would misclassify a code removal as documentation-only.
+          # Without it, both sides of a rename are listed and both face the
+          # path rules below.
+          zero_sha="0000000000000000000000000000000000000000"
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" == "$zero_sha" ]]; then
+            git diff-tree --no-commit-id --name-only --no-renames -r "$HEAD_SHA" > changed-files.txt
+          else
+            git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA" > changed-files.txt
+          fi
+
+          echo "Changed files:"
+          sed 's/^/  /' changed-files.txt
+
+          docs_only=true
+          code=false
+          integration=false
+
+          while IFS= read -r path; do
+            [[ -z "$path" ]] && continue
+
+            # `code` starts the code gates whenever a non-documentation path
+            # moved; `docs_only` is the whole-PR verdict that lets them stand
+            # down. A mixed PR sets `code` and leaves `docs_only` false.
+            case "$path" in
+              docs/*|*.md|.github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE.md)
+                ;;
+              *)
+                docs_only=false
+                code=true
+                ;;
+            esac
+
+            # ---- `integration` -------------------------------------------
+            # The one job that needs a database: it brings up Docker Compose
+            # for Postgres, runs migrations from zero, and exercises the
+            # Postgres-backed suites (`*.int.test.ts`) plus the replay and
+            # fault-injection fixtures. It is the slowest gate, so it stays
+            # conditional on paths that can actually affect persistence,
+            # migration, or cross-package wiring.
+            #
+            # Shape: a short list of VALIDATED EXCLUSIONS would go first, then
+            # BROAD FALLBACKS — same direction as the classifier this is
+            # adapted from. There are no exclusions yet because nothing has
+            # been checked against what `pnpm test:int` actually executes; every
+            # pattern below is a fallback. A stale or over-broad glob here
+            # fails OPEN (the job simply runs when it need not), which is the
+            # safe direction for a financial-authority codebase — the
+            # unsafe direction is a new persistence-affecting path landing
+            # with no exclusion and no fallback catching it. ORDER MATTERS
+            # once exclusions exist: a bash `case` takes the first matching
+            # arm and `*` matches `/`, so every exclusion must precede its
+            # fallback.
+            case "$path" in
+              packages/db/*|packages/ledger/*|apps/trading/*|drizzle/*|docker-compose*.yml|drizzle.config.ts|vitest.config.ts|package.json|pnpm-lock.yaml|pnpm-workspace.yaml|*.int.test.ts|tests/replay/*|tests/fault-injection/*)
+                integration=true
+                ;;
+            esac
+          done < changed-files.txt
+
+          {
+            echo "docs_only=$docs_only"
+            echo "code=$code"
+            echo "integration=$integration"
+          } >> "$GITHUB_OUTPUT"
+
+  lint:
+    name: lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: ESLint
+        run: pnpm lint
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+
+  static:
+    name: static checks
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Circular-import check
+        run: pnpm lint:cycles
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Copy-paste threshold
+        run: pnpm jscpd
+
+  unit:
+    name: unit tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Pure test suite
+        run: pnpm test
+
+  integration:
+    name: integration
+    needs: changes
+    if: needs.changes.outputs.integration == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Start Postgres
+        run: docker compose up -d --wait
+      - name: Apply migrations from zero
+        run: pnpm db:migrate
+        env:
+          DATABASE_URL: postgresql://vigil:vigil_dev_password@localhost:5436/vigil_dev
+      - name: Postgres-backed integration suite
+        run: pnpm test:int
+        env:
+          DATABASE_URL: postgresql://vigil:vigil_dev_password@localhost:5436/vigil_dev
+      - name: Stop Postgres
+        if: always()
+        run: docker compose down -v
+
+  verify:
+    name: verify
+    # always() so one failed gate can't hide behind a skipped dependent, but
+    # never on drafts — a draft must show no `verify` at all, not a green one.
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    needs:
+      - changes
+      - lint
+      - static
+      - unit
+      - integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every applicable gate
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          STATIC_RESULT: ${{ needs.static.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          CODE: ${{ needs.changes.outputs.code }}
+          INTEGRATION: ${{ needs.changes.outputs.integration }}
+        run: |
+          set -euo pipefail
+          failed=0
+
+          # A gate the classifier enabled must have SUCCEEDED — `skipped` or
+          # `cancelled` there means the check never ran, and a check that
+          # never ran is not a pass. A gate the classifier did not enable is
+          # allowed to be skipped and nothing else. The classifier itself
+          # must succeed: when it fails, every output is empty and every gate
+          # skips, which this rule turns into a red `verify` instead of a
+          # green one.
+          gate() {
+            local name="$1" applicable="$2" result="$3"
+            if [[ "$applicable" == "true" ]]; then
+              if [[ "$result" != "success" ]]; then
+                echo "Required gate '$name' ended with: $result"
+                failed=1
+              fi
+            elif [[ "$result" != "skipped" && "$result" != "success" ]]; then
+              echo "Gate '$name' ended with: $result"
+              failed=1
+            fi
+          }
+
+          gate "classify changes" true "$CHANGES_RESULT"
+          gate "lint" "$CODE" "$LINT_RESULT"
+          gate "static checks" "$CODE" "$STATIC_RESULT"
+          gate "unit tests" "$CODE" "$UNIT_RESULT"
+          gate "integration" "$INTEGRATION" "$INTEGRATION_RESULT"
+
+          if [[ "$failed" != "0" ]]; then
+            exit 1
+          fi
+
+          if [[ "$DOCS_ONLY" == "true" ]]; then
+            echo "Documentation-only change"
+          else
+            echo "All applicable CI gates passed."
+          fi

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Vigil Database Changes"
+  short_description: "Review vigil schema, data, and database operations"
+  default_prompt: "Use $vigil-db-change to prepare and review this vigil database change through verified migration and target evidence."
+
+policy:
+  allow_implicit_invocation: true

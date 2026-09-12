@@ -1,0 +1,44 @@
+{
+  "name": "vigil",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.26.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev:trading": "pnpm --filter @vigil/trading dev",
+    "dev:control": "pnpm --filter @vigil/control dev",
+    "lint": "eslint . --max-warnings 0",
+    "lint:fix": "eslint . --fix",
+    "lint:cycles": "madge --circular --extensions ts,tsx apps packages",
+    "typecheck": "pnpm -r --workspace-concurrency=1 run typecheck",
+    "test": "vitest run --project unit",
+    "test:int": "vitest run --no-file-parallelism --project integration",
+    "jscpd": "jscpd",
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  },
+  "devDependencies": {
+    "@eslint/js": "catalog:",
+    "@types/node": "catalog:",
+    "@types/pg": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "dotenv": "catalog:",
+    "drizzle-kit": "catalog:",
+    "drizzle-orm": "catalog:",
+    "eslint": "catalog:",
+    "eslint-config-next": "catalog:",
+    "globals": "catalog:",
+    "jscpd": "catalog:",
+    "madge": "catalog:",
+    "pg": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vitest": "catalog:"
+  }
+}

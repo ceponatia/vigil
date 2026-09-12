@@ -1,0 +1,63 @@
+name: Decision needed
+description: Something genuinely undecided is blocking progress and needs an owner ruling.
+labels: ["decision-needed"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when work cannot safely proceed past a fork without a ruling — not for a
+        preference that a developer could just as well settle. Project fields are set on the
+        [board](https://github.com/users/ceponatia/projects/TODO) after filing.
+
+  - type: textarea
+    id: decision
+    attributes:
+      label: The decision
+      description: One sentence, stated so a ruling is recognizable when it arrives.
+      placeholder: "Which chain hosts the first on-chain venue adapter: Base or Solana?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: Options with tradeoffs
+      description: Each real option, with what it costs and what it buys. Do not omit "do nothing yet".
+    validations:
+      required: true
+
+  - type: textarea
+    id: blocked
+    attributes:
+      label: What is blocked until it is made
+      description: The specific issues, slices, or gates that cannot proceed without this ruling.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safe-default
+    attributes:
+      label: Safe default meanwhile
+      description: |
+        What the code does today in the absence of this decision. Must not be LIVE-enabling —
+        the absence of a ruling can never itself grant live authority, credentials, or funds.
+      placeholder: No adapter is selected; the paper adapter remains the only executable path and no signer package exists yet.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence needed to decide
+      description: What would need to be true, measured, or verified before the owner can rule on this.
+    validations:
+      required: false
+
+  - type: input
+    id: decider
+    attributes:
+      label: Who decides
+      description: Defaults to the owner unless explicitly delegated.
+      value: The owner
+    validations:
+      required: true

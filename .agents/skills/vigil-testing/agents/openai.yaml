@@ -1,0 +1,7 @@
+interface:
+  display_name: "Vigil Testing Decisions"
+  short_description: "Choose vigil test coverage and report CI evidence"
+  default_prompt: "Use $vigil-testing to decide the smallest meaningful coverage for this vigil change and report what CI actually verifies."
+
+policy:
+  allow_implicit_invocation: true

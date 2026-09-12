@@ -1,0 +1,20 @@
+# Normalize line endings across platforms. Text files are stored LF in git
+# and checked out LF everywhere, regardless of each machine's core.autocrlf
+# setting. This keeps shell hooks, scripts, and diffs deterministic on both
+# Linux/macOS and Windows checkouts.
+* text=auto eol=lf
+
+# Binary assets — never touch line endings.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.avif  binary
+*.bmp   binary
+*.tif   binary
+*.tiff  binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.pdf   binary

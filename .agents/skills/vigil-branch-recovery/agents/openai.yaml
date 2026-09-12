@@ -1,0 +1,7 @@
+interface:
+  display_name: "Vigil Branch Recovery"
+  short_description: "Classify and recover stale Vigil branch work"
+  default_prompt: "Use $vigil-branch-recovery to classify this stale Vigil branch, preserve recoverable work, and prepare a safe cleanup decision."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,37 @@
+{
+  // Compiler options that are true of EVERY project in this workspace — the
+  // language level and the strictness contract, nothing else.
+  //
+  // Deliberately absent: `lib`, `types`, `jsx`, and `paths`. Each project
+  // owns the environment it actually targets, so a package cannot acquire
+  // DOM globals, ambient `@types/*`, or an application's `@/` alias just by
+  // extending this file — a workspace package's own tsconfig.json states
+  // its `lib` and `types` explicitly, and only apps/control (the one Next.js
+  // project) adds `jsx` and `paths`.
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    // Reading past the end of an array or an indexed record produces
+    // `undefined` at runtime; this option makes the type checker say so,
+    // which matters most where a lookup miss is a financial-authority bug
+    // rather than a UI nuisance.
+    "noUncheckedIndexedAccess": true,
+    // An object literal cannot both declare an optional property and assign
+    // it the value `undefined` unless it says so explicitly — closes a gap
+    // where "optional" and "present but undefined" silently mean the same
+    // thing in a money or intent record.
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    // Every import/export of a type must say so (`import type`) so a
+    // type-only reference can never be mistaken for a value the runtime
+    // needs to keep, and `isolatedModules` below can transpile file-by-file.
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true
+  }
+}

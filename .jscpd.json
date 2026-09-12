@@ -1,0 +1,16 @@
+{
+  "path": ["apps", "packages", "tests"],
+  "pattern": "**/*.{ts,tsx}",
+  "minTokens": 70,
+  "threshold": 3,
+  "reporters": ["threshold"],
+  "gitignore": true,
+  "absolute": false,
+  "ignore": [
+    "**/*.d.ts",
+    "**/.next/**",
+    "**/node_modules/**",
+    "**/drizzle/**",
+    "**/coverage/**"
+  ]
+}

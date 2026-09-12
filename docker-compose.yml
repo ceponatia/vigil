@@ -1,0 +1,22 @@
+# Local development and CI only. The hosted target (managed Postgres vs. a
+# self-run instance, provider, region) is an owner decision not yet made.
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: vigil-postgres
+    environment:
+      POSTGRES_USER: vigil
+      POSTGRES_PASSWORD: vigil_dev_password
+      POSTGRES_DB: vigil_dev
+    ports:
+      - "127.0.0.1:5436:5432"
+    volumes:
+      - vigil_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vigil -d vigil_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  vigil_postgres_data:

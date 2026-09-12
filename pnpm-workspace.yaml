@@ -1,0 +1,67 @@
+# The repository root is NOT a workspace package (it carries no `exports`,
+# ships no source under `src/`, and nothing ever depends on it). It exists
+# only to hold shared devDependencies, the catalog below, and the root
+# scripts that fan out over the real packages with `pnpm -r`. Keeping it out
+# of `packages` means `pnpm -r` never tries to typecheck or test "the root".
+packages:
+  - "apps/*"
+  - "packages/*"
+
+
+# Every version every manifest in this workspace pins is declared exactly
+# once here; a package.json references it as "catalog:" rather than
+# retyping (and risking drift on) a version string. Bumping a dependency is
+# then a one-line change in this file instead of a grep across manifests.
+catalog:
+  # ESLint 10 is released, but eslint-plugin-import, eslint-plugin-react and
+  # eslint-plugin-jsx-a11y (pulled in by eslint-config-next) still declare an
+  # ESLint <=9 peer range; upgrade ESLint together with them.
+  typescript: 6.0.3
+  vitest: 5.0.0
+  "@vitest/coverage-v8": 5.0.0
+  eslint: 9.39.5
+  "@eslint/js": 9.39.5
+  typescript-eslint: 8.70.0
+  eslint-config-next: 16.3.4
+  globals: 17.12.0
+  zod: 4.6.2
+  drizzle-orm: 0.45.2
+  drizzle-kit: 0.31.10
+  pg: 8.23.0
+  "@types/pg": ^8.15.0
+  "@types/node": 24.13.4
+  tsx: 4.23.13
+  dotenv: 17.4.2
+  pino: 10.3.1
+  madge: 8.0.0
+  jscpd: 5.2.0
+  next: 16.3.4
+  react: 19.3.0
+  react-dom: 19.3.0
+  "@types/react": ^19.2.0
+  "@types/react-dom": ^19.2.0
+
+# Supply-chain protection: pnpm refuses to install a package version
+# published less than this many minutes ago (1440 = 24h). A newly published
+# version is the likeliest place for a compromised maintainer account or a
+# hijacked publish token to show up; waiting a day gives the ecosystem time
+# to notice and yank it before it ever reaches this repository.
+minimumReleaseAge: 1440
+
+# pnpm blocks install/postinstall/preinstall lifecycle scripts for every
+# dependency by default. Add a package's name here only as a proven,
+# deliberate exception, never as a blanket allowance. The two below are
+# native-binary packages whose install script only verifies the platform
+# binary shipped as an optional dependency: esbuild (tsx, drizzle-kit, and
+# Vitest's bundler) and unrs-resolver (the import resolver eslint-config-next
+# uses).
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true
+
+# Known-safe peer mismatches, each with the reason it is safe. madge only uses
+# `typescript` to parse import statements through the stable compiler API, so
+# TypeScript 6 satisfies it despite the stale `^5.4.4` peer range.
+peerDependencyRules:
+  allowedVersions:
+    "madge>typescript": "6"

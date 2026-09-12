@@ -1,0 +1,143 @@
+name: Feature or plan
+description: A thing to build. Use this for anything that would once have been a plan document.
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Implementation stages become **sub-issues** of this one, created when the work actually
+        starts; dependencies use GitHub's blocked-by relationship rather than prose.
+
+        Project fields — Status, Horizon, Phase, Area, Priority — are set on the
+        [board](https://github.com/users/ceponatia/projects/TODO) after filing. Don't guess them here.
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: |
+        One sentence, in the form: **The owner / An operator / A developer can `<do something
+        concrete>` so that `<observable consequence>`.** Name a person, not a system. Promise
+        something observable — never "more robust", "cleaner", or "better". Internal work gets an
+        honest internal outcome about a developer or the owner; don't invent an end-user benefit
+        this system does not have.
+      placeholder: An operator can see a candidate move from proposed to WAIT/MISSED so that a missed entry is never silently rewritten into a late buy.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and authoritative requirements
+      description: |
+        Requirement IDs from `docs/product.md`, capability rows from `docs/capabilities.md`, and
+        any open decision this issue depends on or feeds. Link the canonical doc section, not this
+        issue's own restatement of it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-state
+    attributes:
+      label: Current state
+      description: |
+        What exists today, and what does not. If something is built but not yet accepted — waiting
+        on a review, a replay, or a capability gate — say so and name what it waits on. Built is not
+        accepted.
+      placeholder: Nothing built yet. / The reservation path is implemented but has not run against the integration suite.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and delivery order
+      description: |
+        What gets built, in the order it lands. Each item should be something a person could pick
+        up and finish. These become sub-issues once work starts, so write them as deliverables
+        rather than as a design discussion.
+    validations:
+      required: true
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: Adjacent ideas intentionally deferred, and anything this must not break.
+    validations:
+      required: false
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: |
+        Existing issues or capabilities this needs, as GitHub blocked-by relations where possible.
+        Distinguish hard blockers (cannot start or cannot merge without) from optional context.
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: |
+        A checklist. Keep it proportional to the risk and scope of this specific slice — do not
+        manufacture a long generic checklist for a small change.
+      placeholder: |
+        - [ ] Observable behavior and supporting test/evidence.
+        - [ ] Relevant failure/recovery behavior.
+        - [ ] Canonical documentation updated if behavior changed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: |
+        Commands, fixture or replay name, the CI job that covers this, or a specific safe manual
+        check. Name what actually runs, not what could in principle be run.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety-boundary
+    attributes:
+      label: Safety / cost boundary
+      description: |
+        What authority, credentials, live funds, or paid services this explicitly does NOT enable.
+        If this issue could plausibly be read as enabling LIVE trading or spending, say directly
+        that it does not.
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and rulings
+      description: |
+        Load-bearing product boundaries, and any decision already made. Date owner rulings:
+        `Owner ruling (2026-08-26): …`
+    validations:
+      required: false
+
+  - type: textarea
+    id: open-questions
+    attributes:
+      label: Open questions
+      description: |
+        Anything genuinely undecided. Add the `decision-needed` label if this issue cannot move
+        until the owner rules on one of them.
+    validations:
+      required: false
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: |
+        Specs and system docs that stay in the repo — link them; they are the technical truth this
+        issue implements. Related issues and PRs by number.
+    validations:
+      required: false

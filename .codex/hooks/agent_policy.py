@@ -1,0 +1,1 @@
+../../.claude/hooks/agent_policy.py

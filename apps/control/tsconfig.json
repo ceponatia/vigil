@@ -1,0 +1,17 @@
+{
+  // The Next.js application project. It owns everything environment-specific
+  // that tsconfig.base.json deliberately omits: the Next TypeScript plugin,
+  // JSX, the DOM libraries, and the `@/` alias — no workspace package
+  // inherits any of this by extending the base.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "jsx": "react-jsx",
+    "plugins": [{ "name": "next" }],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["next-env.d.ts", "src/**/*.ts", "src/**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}

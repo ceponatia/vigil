@@ -1,0 +1,7 @@
+interface:
+  display_name: "Vigil Agent Build"
+  short_description: "Build Vigil issues with delegated Codex agents"
+  default_prompt: "Use $vigil-agent-build to implement this Vigil issue with scoped Codex agents and safe integration."
+
+policy:
+  allow_implicit_invocation: true

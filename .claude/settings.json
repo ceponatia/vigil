@@ -1,0 +1,63 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(pnpm test)",
+      "Bash(pnpm test *)",
+      "Bash(pnpm run test)",
+      "Bash(pnpm run test *)",
+      "Bash(pnpm lint)",
+      "Bash(pnpm lint *)",
+      "Bash(pnpm run lint)",
+      "Bash(pnpm run lint *)",
+      "Bash(pnpm typecheck)",
+      "Bash(pnpm typecheck *)",
+      "Bash(pnpm run typecheck)",
+      "Bash(pnpm run typecheck *)",
+      "Bash(pnpm verify)",
+      "Bash(pnpm verify *)",
+      "Bash(pnpm run verify)",
+      "Bash(pnpm run verify *)",
+      "Bash(pnpm -r *)",
+      "Bash(pnpm vitest)",
+      "Bash(pnpm vitest *)",
+      "Bash(pnpm exec vitest)",
+      "Bash(pnpm exec vitest *)",
+      "Bash(npx vitest)",
+      "Bash(npx vitest *)",
+      "Bash(vitest)",
+      "Bash(vitest *)",
+      "Bash(scripts/verify.sh)",
+      "Bash(scripts/verify.sh *)",
+      "Bash(./scripts/verify.sh)",
+      "Bash(./scripts/verify.sh *)",
+      "Bash(bash scripts/verify.sh)",
+      "Bash(bash scripts/verify.sh *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/preflight.py\"",
+            "timeout": 20,
+            "statusMessage": "vigil preflight"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent_policy.py\"",
+            "timeout": 10,
+            "statusMessage": "vigil agent policy"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,76 @@
+name: Technical debt
+description: Code, docs, or tooling that works but is costing something to live with.
+labels: ["technical-debt"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Debt is worth filing when leaving it costs something real — slower changes, a trap for the
+        next reader, a gate that no longer guards. "This could be nicer" is not debt.
+
+        Project fields are set on the [board](https://github.com/users/ceponatia/projects/TODO) after filing.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong
+      description: The actual state, not the fix.
+      placeholder: 12 fixtures under tests/fixtures reference an asset identity shape that packages/contracts no longer exports.
+    validations:
+      required: true
+
+  - type: textarea
+    id: where
+    attributes:
+      label: Where it lives
+      description: |
+        Paths, and roughly how much there is. A count or a per-area breakdown makes this actionable
+        months from now; "various files" does not.
+      placeholder: |
+        packages/ledger — 9
+        packages/policy — 4
+        apps/trading — 2
+    validations:
+      required: true
+
+  - type: textarea
+    id: cost
+    attributes:
+      label: What it costs to leave alone
+      description: |
+        Who trips over this, and how. A stale reference that sends a reader somewhere that no
+        longer exists is a real cost; an inelegant-but-clear implementation usually is not.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: blast-radius
+    attributes:
+      label: Blast radius of the fix
+      options:
+        - One file or a single module
+        - One subsystem
+        - Cross-cutting — many files, mechanical
+        - Cross-cutting — many files, needs judgment per site
+    validations:
+      required: true
+
+  - type: textarea
+    id: approach
+    attributes:
+      label: Suggested approach
+      description: |
+        If you already know how it should be done, say so — including anything that would make a
+        naive fix wrong, such as a find-and-replace that would mangle a schema or drop meaning.
+    validations:
+      required: false
+
+  - type: textarea
+    id: moot-if
+    attributes:
+      label: What would make this unnecessary
+      description: |
+        Some debt disappears if another decision goes a certain way. If that is true here, say what
+        would moot it, so nobody pays it down the week before it stops mattering.
+    validations:
+      required: false

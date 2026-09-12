@@ -1,0 +1,7 @@
+interface:
+  display_name: "Vigil Board Operations"
+  short_description: "Manage Vigil issues, PR links, and board state"
+  default_prompt: "Use $vigil-board to perform the requested Vigil issue, pull request, or project-board lifecycle operation."
+
+policy:
+  allow_implicit_invocation: true

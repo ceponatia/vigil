@@ -1,0 +1,7 @@
+interface:
+  display_name: "Vigil Issues and Docs"
+  short_description: "Write issues and durable vigil documentation"
+  default_prompt: "Use $vigil-docs to turn this request into the appropriate vigil issue or durable documentation."
+
+policy:
+  allow_implicit_invocation: true

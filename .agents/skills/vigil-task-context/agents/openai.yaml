@@ -1,0 +1,7 @@
+interface:
+  display_name: "Vigil Task Context"
+  short_description: "Prepare compact fresh-context task briefs"
+  default_prompt: "Use $vigil-task-context to prepare a compact, verified brief for a fresh agent or resumed session."
+
+policy:
+  allow_implicit_invocation: true

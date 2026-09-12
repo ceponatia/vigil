@@ -1,0 +1,7 @@
+interface:
+  display_name: "Vigil PR Review"
+  short_description: "Review Vigil CI, comments, and merge readiness"
+  default_prompt: "Use $vigil-pr-review to inspect this Vigil pull request and carry its authorized CI and review work to a truthful completion."
+
+policy:
+  allow_implicit_invocation: true

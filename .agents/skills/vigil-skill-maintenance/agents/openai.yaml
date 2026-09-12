@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vigil Skill Maintenance"
+  short_description: "Audit skill discovery, routing, and helper behavior"
+  default_prompt: "Use $vigil-skill-maintenance to audit the changed Vigil skills and verify their discovery, routing, and helper behavior."
+policy:
+  allow_implicit_invocation: true

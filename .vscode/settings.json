@@ -1,0 +1,20 @@
+{
+  // ── Explorer: file nesting — the single source of truth ────────────────
+  // Kept here (folder settings) rather than a *.code-workspace file: folder
+  // settings apply whether or not the repo is opened via a workspace file,
+  // and take precedence when both exist. Note: setting `patterns` replaces
+  // VS Code's defaults entirely, so this list must stay complete rather than
+  // only listing additions.
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.expand": false,
+  "explorer.fileNesting.patterns": {
+    "*.ts": "${capture}.test.ts, ${capture}.int.test.ts, ${capture}.*.test.ts",
+    "*.tsx": "${capture}.test.ts, ${capture}.test.tsx, ${capture}.*.test.ts",
+    "package.json": "pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc, eslint.config.*, vitest.config.*, drizzle.config.*, .gitignore",
+    "next.config.ts": "next-env.d.ts",
+    "tsconfig.json": "tsconfig.*.json, tsconfig.tsbuildinfo",
+    "docker-compose.yml": "docker-compose.*.yml",
+    ".env.example": ".env, .env.*",
+    "README.md": "AGENTS.md, CLAUDE.md"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  // The repository-root project: root-level config files only
+  // (drizzle.config.ts, vitest.config.ts, eslint.config.mjs) plus any
+  // top-level test helpers under tests/. Every app and package owns its own
+  // tsconfig.json; root `pnpm typecheck` runs this project and then
+  // recurses over the workspace (`pnpm -r run typecheck`), so nothing here
+  // needs to reach into apps/ or packages/ by path.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["esnext"],
+    "types": ["node"]
+  },
+  "include": ["*.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "apps", "packages"]
+}

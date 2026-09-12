@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Vigil Development board
+    url: https://github.com/users/ceponatia/projects/8
+    about: Where work state lives — Status, Horizon, Phase, Area and Priority are set here after an issue is filed.
