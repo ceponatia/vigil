@@ -35,20 +35,16 @@ None. `zod` is the only runtime dependency.
 ## Planned modules
 
 - `asset-identity` — chain/contract-address identity, never a bare ticker.
-- `money` — present as of BOOT-01: the decimal-string wire type
-  (`decimalStringSchema`, `DecimalString`); formatting rules are not yet
-  built.
+- `money` — the decimal-string wire type (`decimalStringSchema`,
+  `DecimalString`, `DECIMAL_STRING_PATTERN`); no formatting or arithmetic.
 - `timestamps` — the full timestamp family listed above, and freshness math.
 - `research-packet` — the evidence bundle a research worker hands to policy.
 - `trade-proposal` — a candidate before it is checked or approved.
 - `approved-economic-intent` — the immutable, once-consumable approved unit.
 - `reason-codes` — the enumerated reasons a candidate resolves the way it does.
-- `operating-modes` — present as of BOOT-01: the PAPER / SHADOW / LIVE /
-  PAUSED vocabulary (`operatingModeSchema`, `OperatingMode`); transitions
-  between modes are not yet built.
+- `operating-mode` — the PAPER / SHADOW / LIVE / PAUSED vocabulary
+  (`OPERATING_MODES`, `operatingModeSchema`, `OperatingMode`); no transitions.
 
 ## Status
 
-`money` and `operating-modes` exist as of planning ID BOOT-01. The
-remaining modules above arrive under their own already-assigned planning
-IDs as those slices land.
+`money` and `operating-mode` exist. The other modules above are planned.

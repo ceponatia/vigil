@@ -19,7 +19,7 @@ describe("operatingModeSchema", () => {
     expect(OPERATING_MODES.length).toBeGreaterThan(0);
   });
 
-  it.each(OPERATING_MODES)("registry member %s parses to itself", (mode: OperatingMode) => {
+  it.each(OPERATING_MODES)("registry member %s parses to itself — a transforming schema would return a different value", (mode: OperatingMode) => {
     const result = operatingModeSchema.safeParse(mode);
     expect(result.success).toBe(true);
     if (result.success) {

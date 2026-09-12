@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { DECIMAL_STRING_PATTERN, decimalStringSchema } from "./money";
-import type { DecimalString } from "./money";
 
-const validInputs: DecimalString[] = [
+// Plain strings on purpose: `DecimalString` is branded, so the only way to
+// hold one is to have parsed it — which is exactly what these cases prove.
+const validInputs: readonly string[] = [
   "0",
   "1",
   "-1",
@@ -77,6 +78,22 @@ const invalidCases: ReadonlyArray<{ name: string; input: unknown; catches: strin
     catches: "a schema without a required string type would accept a missing amount as valid",
   },
   {
+    name: "-0",
+    input: "-0",
+    catches:
+      "a pattern that admits negative zero would put two spellings of one amount on the wire, and a key derived from the quantity would treat one intent as two",
+  },
+  {
+    name: "-0.0",
+    input: "-0.0",
+    catches: "a pattern that only checks the integer part for negative zero would admit -0.0",
+  },
+  {
+    name: "-0.000",
+    input: "-0.000",
+    catches: "a pattern that only checks the first fractional digit would admit -0.000",
+  },
+  {
     name: "undefined",
     input: undefined,
     catches:
@@ -94,7 +111,7 @@ const invalidStringCases = invalidCases.filter(
 
 describe("decimalStringSchema", () => {
   describe("valid decimal strings parse and round-trip unchanged", () => {
-    it.each(validInputs)("parses %s unchanged", (input) => {
+    it.each(validInputs)("parses %s unchanged — a coercing or normalizing schema would return a different string", (input) => {
       const result = decimalStringSchema.safeParse(input);
       expect(result.success).toBe(true);
       if (result.success) {
