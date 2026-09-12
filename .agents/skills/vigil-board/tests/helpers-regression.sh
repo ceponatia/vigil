@@ -39,6 +39,17 @@ grep -Fq 'already a sub-issue of #10' <<<"$output" || { echo "resume did not rec
 grep -Fq 'already blocked by #20' <<<"$output" || { echo "resume did not recognize existing blocker relation" >&2; exit 1; }
 echo 'ok  file-issue resumes without duplicates and preserves assignment'
 
+# A text field (Evidence) is written verbatim through the text mutation, and a
+# single-select pair on the same call still resolves by option name.
+state="$TMP/set-text"
+mkdir -p "$state"
+output=$(PATH="$TMP/bin:$PATH" VIGIL_BOARD_ENV="$HERE/board.env" TEST_SCENARIO=set-text TEST_STATE_DIR="$state" "$SKILL/board-set.sh" 12 Evidence "https://example.test/runs/1" Status Todo)
+grep -Fq 'Evidence: https://example.test/runs/1' <<<"$output" || { echo "board-set did not report the text value" >&2; exit 1; }
+grep -Fq 'field=F_EVIDENCE' "$state/calls" || { echo "board-set did not target the text field" >&2; exit 1; }
+grep -Fq 'text=https://example.test/runs/1' "$state/calls" || { echo "board-set did not send the text mutation" >&2; exit 1; }
+grep -Fq 'Status: Todo' <<<"$output" || { echo "board-set lost the single-select pair beside the text field" >&2; exit 1; }
+echo 'ok  board-set writes a text field alongside a single-select'
+
 # An unbootstrapped board.env (project id still a TODO placeholder) must fail
 # clearly and immediately, before any gh call, rather than guessing an id.
 state="$TMP/not-configured"

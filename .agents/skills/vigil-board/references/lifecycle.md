@@ -91,10 +91,11 @@ Assign the owner when — and only when — the next action requires the owner:
 - built work is **ready for review** — the branch/PR exists and the next step
   is the owner reviewing, flipping a draft ready, or merging. Assign the PR
   itself too;
-- a **`decision-needed`** item's only unblock is an owner ruling.
+- an issue in **Needs decision** — a `decision-needed` item whose only unblock
+  is an owner ruling.
 
-Leave unassigned: Todo, Ready, and items In progress or Blocked on a
-dependency rather than a ruling. "To be implemented" work is never assigned.
+Leave unassigned: Todo, Waiting on dependency, Ready, and In progress. "To be
+implemented" work is never assigned.
 
 When the owner acts — accepts, rules, merges — the assignment resolves itself:
 the issue closes, or (if the ruling sends it back to implementation) **remove
@@ -117,7 +118,8 @@ the owner only when the next action really is theirs. Keep drafts while
 iterating, and hand off the review/CI loop to `vigil-pr-review`. A skill does
 not itself authorize external messages or closing unfinished scope.
 
-Dependencies are native blocked-by links on the affected issue. If work is
-blocked by an owner choice, use a `decision-needed` issue. Do not use row
-order or narrative notes as dependency records. `vigil-docs` owns issue
-contents.
+Dependencies are native blocked-by links on the affected issue, and its Status
+is **Waiting on dependency** while any linked blocker is open. If work is
+blocked by an owner choice, use a `decision-needed` issue in **Needs
+decision**, assigned to the owner. Do not use row order or narrative notes as
+dependency records. `vigil-docs` owns issue contents.

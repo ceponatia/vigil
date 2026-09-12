@@ -43,6 +43,16 @@ if [ "$scenario" = file-resume ]; then
   if [ "$1" = api ] && [ "${2:-}" = -X ]; then printf '{}\n'; exit 0; fi
 fi
 
+if [ "$scenario" = set-text ]; then
+  if [ "$1" = api ] && [ "${2:-}" = graphql ] && [[ "$*" == *"n=12"* ]] && [[ "$*" == *"projectItems"* ]]; then
+    printf '{"data":{"repository":{"issue":{"id":"ISSUE_NODE","projectItems":{"nodes":[{"id":"ISSUE_ITEM","project":{"id":"TESTPROJID1234"}}]}}}}}\n'; exit 0
+  fi
+  if [ "$1" = api ] && [ "${2:-}" = graphql ] && [[ "$*" == *"fields(first:40)"* ]]; then
+    printf '[{"id":"F_EVIDENCE","name":"Evidence","dataType":"TEXT"},{"id":"F_STATUS","name":"Status","dataType":"SINGLE_SELECT","options":[{"id":"O_TODO","name":"Todo"}]}]\n'; exit 0
+  fi
+  if [ "$1" = api ] && [ "${2:-}" = graphql ]; then printf '{}\n'; exit 0; fi
+fi
+
 if [ "$scenario" = link-clear ]; then
   if [ "$1" = api ] && [ "${2:-}" = graphql ] && [[ "$*" == *"n=10"* ]] && [[ "$*" == *"issue(number"* ]]; then
     printf '{"data":{"repository":{"issue":{"id":"ISSUE_NODE","projectItems":{"nodes":[{"id":"ISSUE_ITEM","project":{"id":"TESTPROJID1234"}}]}}}}}\n'; exit 0

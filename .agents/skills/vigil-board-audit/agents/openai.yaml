@@ -1,0 +1,7 @@
+interface:
+  display_name: "Vigil Board Audit"
+  short_description: "Audit a filed batch of issues and fill missing board classification"
+  default_prompt: "Use $vigil-board-audit to audit the named batch of Vigil issues against the Vigil Development board and fill the classification and relations the filer missed."
+
+policy:
+  allow_implicit_invocation: true

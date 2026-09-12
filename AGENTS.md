@@ -100,6 +100,7 @@ escalation record or `Risk area:` line, and an explicit `model` override on a pi
 | `vigil-reviewer` | Opus | Read-only semantic review of a diff before integration or a PR: scope, fail-closed resilience, money arithmetic, idempotency and reason codes, tests at the owning layer, docs, migrations, secrets. |
 | `vigil-test-keeper` | Opus | Test reconciliation after a coding task; see Skills and work state. |
 | `vigil-issue-filer` | Sonnet | Files and classifies issues from a settled brief — parent and sub-issues, blocked-by relations, labels, board fields — through the `vigil-docs` body template and the `vigil-board` helpers. Edits no repository files; never implements; files only when the brief authorizes it. |
+| `vigil-board-auditor` | Sonnet | Runs once after a whole filing batch completes, or on request for a board sweep. Audits every issue in the batch against the board — membership, Status, Horizon, Phase, Area, Priority, labels, parent and blocked-by links, assignment — fills what the filer missed through the `vigil-board` helpers under `vigil-board-audit`, and reports the saved state. Edits no repository files; never per issue. |
 
 Escalate when the builder returns an escalation record or reports a failed attempt; a second
 plausible approach would have different architectural consequences; the root cause cannot be
@@ -128,6 +129,12 @@ per-role pins. Subagents never run on the session's own model when that model is
 - On Claude, a batch of issues is filed by the `vigil-issue-filer` role from a brief that names
   the work packages, their sources, the dependency order, the parent issue, and the board
   classification. It deduplicates before filing and reports numbers and relations as saved.
+- When that batch is complete — every issue the brief named, not each issue as it lands — the
+  parent runs `vigil-board-auditor` once over the whole batch under `vigil-board-audit`. It
+  fills the classification fields and relations the filer missed, through the `vigil-board`
+  helpers, and reports the saved state. It also runs on request for a board sweep after a
+  dependency closes or a reclassification. It never overwrites a set field, sets Done, or
+  edits a body on its own judgment.
 - `vigil-agent-build` owns delegated implementation; `vigil-testing` test placement and CI
   selection; `vigil-pr-review` CI, review, and merge.
 - `vigil-branch-recovery`: stale branches, abandoned worktrees, suspected lost work, cleanup.
@@ -145,7 +152,9 @@ per-role pins. Subagents never run on the session's own model when that model is
   `vigil-testing`'s rules and reports the CI evidence. It edits tests only.
 - GitHub issues and the Vigil Development board own plans, status, sequencing, dependencies,
   blockers, and open questions. Never create plan, roadmap, or status documents. The repository
-  owns current technical truth. An unresolved owner choice is a `decision-needed` issue.
+  owns current technical truth. An unresolved owner choice is a `decision-needed` issue. An issue
+  is at most one agent-day of work (Size S ≈ 10 min, M ≈ 1 h, L ≈ half a day, XL ≈ 1 day); larger
+  work is a parent with sub-issues.
 - Read `docs/README.md` before editing `docs/`, then the relevant system doc. Durable docs use
   present-tense rules, carry no work status, and change with the behavior they describe. Invoke
   `vigil-docs` first.

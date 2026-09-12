@@ -35,7 +35,13 @@ Procedure, in order:
    cost boundary section says PAPER-only and names what stays off.
 3. File in dependency order so `--parent` and `--blocked-by` reference real
    numbers:
-   `.agents/skills/vigil-board/file-issue.sh --title "…" --body-file <f> [--parent N] [--blocked-by M]… [--label <name>]… --status … --horizon … --phase … --area … --priority …`.
+   `.agents/skills/vigil-board/file-issue.sh --title "…" --body-file <f> [--parent N] [--blocked-by M]… [--label <name>]… --status … --horizon … --phase … --area … --priority … --size … --role …`.
+   Every leaf issue carries `--size` (S ≈ 10 min, M ≈ 1 h, L ≈ half a day,
+   XL ≈ 1 day of agent time; a slice that does not fit XL is filed as a
+   parent with sub-issues, and a parent gets no Size) and `--role` (Builder,
+   Escalation, Research, Owner). Status is `Waiting on dependency` when the
+   issue is filed behind an open blocker, `Needs decision` for a
+   decision-needed issue, `Ready` when unblocked and complete, else `Todo`.
    The issue number is the last stdout line. On a partial failure, resume
    that same issue with `--issue N` and the same options; never re-create.
 4. Read back every issue (`gh issue view N --repo "$VIGIL_BOARD_REPO" --json title,labels,body`),
@@ -54,4 +60,7 @@ provider — those are owner gates, and an issue may only name them as gates.
 Report: a table of planning ID or title → issue number and URL; the parent
 and blocked-by relations and the board fields as saved (not as requested);
 issues skipped as duplicates or as unauthorized, with the existing number;
-and anything you could not verify.
+and anything you could not verify. End with the plain list of every issue
+number in the batch: that list is the input to `vigil-board-auditor`, which
+the parent runs once over the whole batch after your report. Never spawn
+the auditor yourself, and never audit issues outside your brief.

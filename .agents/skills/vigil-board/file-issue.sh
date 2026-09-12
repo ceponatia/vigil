@@ -3,7 +3,7 @@
 #
 #   file-issue.sh --title "…" (--body-file f | --body "…") [options]
 #   file-issue.sh --issue N [classification/relation options]
-#
+# Fields: --status --horizon --phase --area --priority --size --role --evidence
 # --issue N resumes after a partial failure without creating a duplicate.
 # The issue number is always the last stdout line, including partial failures.
 set -Eeuo pipefail
@@ -44,6 +44,9 @@ while [ $# -gt 0 ]; do
     --phase) need_value "$@"; FIELDS+=(Phase "$2"); shift 2 ;;
     --priority) need_value "$@"; FIELDS+=(Priority "$2"); shift 2 ;;
     --area) need_value "$@"; FIELDS+=(Area "$2"); shift 2 ;;
+    --size) need_value "$@"; FIELDS+=(Size "$2"); shift 2 ;;
+    --role) need_value "$@"; FIELDS+=("Owning role" "$2"); shift 2 ;;
+    --evidence) need_value "$@"; FIELDS+=(Evidence "$2"); shift 2 ;;
     --assign) ASSIGN=1; shift ;;
     --help|-h) usage ;;
     *) echo "unknown argument $1" >&2; usage ;;

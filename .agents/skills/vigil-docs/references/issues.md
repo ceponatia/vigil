@@ -64,6 +64,12 @@ navigate without reading historical documents, using the structure above.
   and acceptance; do not maintain a duplicate checklist of its status.
 - Add discovered prerequisites as work items with native blocked-by relations
   on the exact dependent issue. Prose and list order are not dependency links.
+- An issue is at most one agent-day of work and carries a Size: S ≈ 10
+  minutes, M ≈ an hour, L ≈ half a day, XL ≈ a day. Size is the brief's
+  estimate of agent time, not calendar time. Work that does not fit XL is
+  filed as a parent whose sub-issues each fit a band; the parent carries no
+  Size. Split by deliverable, not by file: each sub-issue has its own
+  acceptance criteria and CI evidence.
 - A material unresolved choice belongs in a `decision-needed` issue with the
   plausible choices, consequences, and relevant code — for example, which
   venue, chain, stablecoin, or signer provider to approve. Reuse existing

@@ -1019,6 +1019,28 @@ class CheckFunctionTests(unittest.TestCase):
         self.assertIsNone(HOOK.check({"subagent_type": "vigil-issue-filer", "prompt": prompt}))
         self.assertIsNotNone(HOOK.check({"subagent_type": "general-purpose", "prompt": prompt}))
 
+    def test_board_auditor_is_pinned_to_sonnet_and_denies_a_model_override(self):
+        self.assertIn("vigil-board-auditor", HOOK.PINNED)
+        self.assertEqual(HOOK.PINNED_MODEL["vigil-board-auditor"], "sonnet")
+        deny = HOOK.check({
+            "subagent_type": "vigil-board-auditor",
+            "model": "opus",
+            "prompt": "Audit issues #3 through #11 on the board and fill what the filer missed.",
+        })
+        self.assertIsNotNone(deny)
+        self.assertIn("sonnet", deny)
+
+    def test_an_audit_assignment_naming_a_repo_file_is_allowed_on_the_auditor(self):
+        # "Update … board.env" is a build verb in imperative position next to a
+        # repository file, so an unpinned role is refused it; the auditor is
+        # pinned, so a board brief that happens to name a file is its ordinary work.
+        prompt = (
+            "Audit the batch under parent #3. Update the Horizon field where it is unset "
+            "using .agents/skills/vigil-board/board.env for the repository."
+        )
+        self.assertIsNone(HOOK.check({"subagent_type": "vigil-board-auditor", "prompt": prompt}))
+        self.assertIsNotNone(HOOK.check({"subagent_type": "general-purpose", "prompt": prompt}))
+
 
 
 class ProcessTests(unittest.TestCase):

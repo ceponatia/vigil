@@ -3,8 +3,9 @@
 
 The owner's ruling: delegated vigil roles pin their own model so the
 choice survives a missed `AGENTS.md` read — Sonnet for a bounded
-implementation slice (`vigil-builder`) and for filing issues from a
-settled brief (`vigil-issue-filer`), Opus for escalation, semantic
+implementation slice (`vigil-builder`), for filing issues from a settled
+brief (`vigil-issue-filer`), and for auditing a filed batch against the
+board (`vigil-board-auditor`), Opus for escalation, semantic
 review, and test-keeping (`vigil-escalation`, `vigil-reviewer`,
 `vigil-test-keeper`). This hook keeps a spawn from working around that:
 an explicit `model` on a pinned role, an implementation brief handed to
@@ -50,6 +51,7 @@ PINNED = {
     "vigil-reviewer",
     "vigil-test-keeper",
     "vigil-issue-filer",
+    "vigil-board-auditor",
 }
 PINNED_MODEL = {
     "vigil-builder": "sonnet",
@@ -57,6 +59,7 @@ PINNED_MODEL = {
     "vigil-reviewer": "opus",
     "vigil-test-keeper": "opus",
     "vigil-issue-filer": "sonnet",
+    "vigil-board-auditor": "sonnet",
 }
 BRIEF_MARKERS = ("## Checkout and ownership", "Owned writable paths", "# Brief:")
 # The built-in agent types that hold no edit or commit tools. A brief-shaped

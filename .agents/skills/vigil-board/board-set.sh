@@ -9,8 +9,9 @@
 #   board-set.sh 259 Horizon Next Priority High Area Data Phase "Bootstrap & Paper"
 #   board-set.sh 259                                   # just make sure it is on the board
 #
-# Single-select fields (Status, Horizon, Phase, Area, Priority) take an option
-# name, case-insensitive; the option list is queried live, never hardcoded.
+# Single-select fields (Status, Horizon, Phase, Area, Priority, Size, Owning
+# role) take an option name, case-insensitive; the option list is queried live,
+# never hardcoded. Text fields (Evidence) take the text verbatim.
 # --assign / --unassign edit the issue or PR itself (assignee from board.env):
 # the board's "the next action is the owner's" signal.
 #
@@ -104,6 +105,10 @@ if [ ${#PAIRS[@]} -gt 0 ]; then
     run gh api graphql -f project="$PROJECT_ID" -f item="$1" -f field="$2" -f opt="$3" -f query='mutation($project:ID!, $item:ID!, $field:ID!, $opt:String!) {
         updateProjectV2ItemFieldValue(input:{projectId:$project, itemId:$item, fieldId:$field, value:{singleSelectOptionId:$opt}}) { projectV2Item { id } } }' >/dev/null
   }
+  set_text() {  # item field text
+    run gh api graphql -f project="$PROJECT_ID" -f item="$1" -f field="$2" -f text="$3" -f query='mutation($project:ID!, $item:ID!, $field:ID!, $text:String!) {
+        updateProjectV2ItemFieldValue(input:{projectId:$project, itemId:$item, fieldId:$field, value:{text:$text}}) { projectV2Item { id } } }' >/dev/null
+  }
   clear_field() {  # item field
     run gh api graphql -f project="$PROJECT_ID" -f item="$1" -f field="$2" -f query='mutation($project:ID!, $item:ID!, $field:ID!) {
         clearProjectV2ItemFieldValue(input:{projectId:$project, itemId:$item, fieldId:$field}) { projectV2Item { id } } }' >/dev/null
@@ -125,7 +130,10 @@ if [ ${#PAIRS[@]} -gt 0 ]; then
         [ -n "$opt" ] || { echo "$name has no option '$value' (options: $(jq -r '[.options[].name] | join(", ")' <<<"$field"))" >&2; exit 1; }
         set_single "$item_id" "$field_id" "$opt"
         echo "  $name: $(jq -r --arg id "$opt" '.options[] | select(.id == $id) | .name' <<<"$field")" ;;
-      *) echo "$name is $dtype; this script sets single-select fields only" >&2; exit 1 ;;
+      TEXT)
+        set_text "$item_id" "$field_id" "$value"
+        echo "  $name: $value" ;;
+      *) echo "$name is $dtype; this script sets single-select and text fields only" >&2; exit 1 ;;
     esac
   }
 
