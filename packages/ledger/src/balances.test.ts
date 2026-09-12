@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { accountKey, counterAccount, holdingsAccount } from "./accounts";
 import { compareBalanceSheets, holdingsBase, netBase, rebuildBalances, type BalanceSheet } from "./balances";
 import { postEntry, reverseEntry, type JournalEntry } from "./journal";
-import { at, sheetFrom, twoLineEntry, TEST_STABLE_ASSET } from "./test-support/journal-fixtures";
+import { at, sheetFrom, twoLineEntry, TEST_PROVENANCE, TEST_STABLE_ASSET } from "./test-support/journal-fixtures";
 
 // The defect this file kills: a restart that rebuilds balances which are
 // *plausible* rather than *identical* — a replay that drops a reversal, or
@@ -25,6 +25,7 @@ describe("rebuildBalances", () => {
       recordedAt: at("2026-01-03T00:00:01.000Z"),
       correlationId: "corr-entry-1",
       idempotencyKey: "idem-entry-2",
+      provenance: TEST_PROVENANCE,
     });
     expect(reversal.outcome).toBe("valid");
     if (reversal.outcome !== "valid") {
@@ -66,6 +67,7 @@ describe("rebuildBalances", () => {
       recordedAt: at("2026-01-03T00:00:01.000Z"),
       correlationId: "corr-entry-original",
       idempotencyKey: "idem-early-reversal",
+      provenance: TEST_PROVENANCE,
     });
     expect(reversal.outcome).toBe("valid");
     if (reversal.outcome !== "valid") {

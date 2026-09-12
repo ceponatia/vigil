@@ -1,6 +1,6 @@
 import { accountKey, type HoldingsState, type LedgerAccount } from "./accounts";
 import { ledgerRefusal, type LedgerDiagnosticCode, type LedgerRefusal } from "./diagnostics";
-import { validateEntry, type JournalEntry } from "./journal";
+import { describeReversalMismatch, validateEntry, type JournalEntry } from "./journal";
 
 /**
  * Balances are a projection of the journal, never an independent record.
@@ -48,7 +48,10 @@ function rebuildRefusal(code: LedgerDiagnosticCode, detail: string, entryId: str
  */
 export function rebuildBalances(entries: readonly JournalEntry[]): RebuildResult {
   const balances = new Map<string, AccountBalance>();
-  const seenEntryIds = new Set<string>();
+  // The entries themselves, not just their ids: a reversal is checked
+  // against the postings of the entry it reverses, so the replay needs the
+  // target and not merely the knowledge that it existed.
+  const seenEntries = new Map<string, JournalEntry>();
   const seenIdempotencyKeys = new Set<string>();
   const reversedEntryIds = new Set<string>();
   const scaleByAsset = new Map<string, number>();
@@ -59,7 +62,7 @@ export function rebuildBalances(entries: readonly JournalEntry[]): RebuildResult
       return { outcome: "refused", refusal: validation.refusal, entryId: entry.entryId };
     }
 
-    if (seenEntryIds.has(entry.entryId)) {
+    if (seenEntries.has(entry.entryId)) {
       return rebuildRefusal("DUPLICATE_ENTRY_ID", `entry ${entry.entryId} appears twice in the replayed journal`, entry.entryId);
     }
 
@@ -73,21 +76,26 @@ export function rebuildBalances(entries: readonly JournalEntry[]): RebuildResult
     seenIdempotencyKeys.add(entry.idempotencyKey);
 
     if (entry.reversesEntryId !== null) {
-      const target = entry.reversesEntryId;
-      if (!seenEntryIds.has(target)) {
-        return rebuildRefusal("UNKNOWN_REVERSAL_TARGET", `entry ${target} is not in the replayed journal`, entry.entryId);
+      const targetId = entry.reversesEntryId;
+      const target = seenEntries.get(targetId);
+      if (target === undefined) {
+        return rebuildRefusal("UNKNOWN_REVERSAL_TARGET", `entry ${targetId} is not in the replayed journal`, entry.entryId);
       }
-      if (reversedEntryIds.has(target)) {
-        return rebuildRefusal("DUPLICATE_REVERSAL", `entry ${target} is reversed twice in the replayed journal`, entry.entryId);
+      if (reversedEntryIds.has(targetId)) {
+        return rebuildRefusal("DUPLICATE_REVERSAL", `entry ${targetId} is reversed twice in the replayed journal`, entry.entryId);
       }
-      reversedEntryIds.add(target);
+      const mismatch = describeReversalMismatch(target, entry);
+      if (mismatch !== null) {
+        return rebuildRefusal("REVERSAL_NOT_MIRRORED", mismatch, entry.entryId);
+      }
+      reversedEntryIds.add(targetId);
     }
 
     // Added only after the reversal check, so an entry that names itself as
     // the entry it reverses is refused here exactly as `postEntry` refuses
     // it. Adding it first would let a self-reversal replay cleanly and then
     // block the genuine reversal of that entry as a duplicate.
-    seenEntryIds.add(entry.entryId);
+    seenEntries.set(entry.entryId, entry);
 
     for (const line of entry.lines) {
       const knownScale = scaleByAsset.get(line.account.assetId);

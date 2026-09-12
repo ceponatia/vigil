@@ -1,4 +1,4 @@
-import type { LedgerRefusal } from "./diagnostics";
+import { ledgerRefusal, type LedgerRefusal } from "./diagnostics";
 import { validateEntry, type JournalEntry } from "./journal";
 
 /**
@@ -55,6 +55,11 @@ export function measurePerformance(entries: readonly JournalEntry[], assetId: st
   let realizedPnlBase = 0n;
   let feesBase = 0n;
   let highWaterBase = 0n;
+  // Base units at two different scales are not the same unit. Summing them
+  // would report a figure in no unit at all — and a drawdown measured from
+  // it could pause trading that is fine, or fail to pause trading that is
+  // not, by orders of magnitude.
+  let scale: number | null = null;
 
   for (const entry of entries) {
     const validation = validateEntry(entry);
@@ -65,6 +70,18 @@ export function measurePerformance(entries: readonly JournalEntry[], assetId: st
     for (const line of entry.lines) {
       if (line.account.assetId !== assetId) {
         continue;
+      }
+      if (scale === null) {
+        scale = line.scale;
+      } else if (scale !== line.scale) {
+        return {
+          outcome: "refused",
+          refusal: ledgerRefusal(
+            "SCALE_MISMATCH",
+            `asset ${assetId} is posted at scale ${String(scale)} and scale ${String(line.scale)}; base units at two scales cannot be summed`,
+          ),
+          entryId: entry.entryId,
+        };
       }
       const signedCreditNormal = line.direction === "credit" ? line.amountBase : -line.amountBase;
       switch (line.account.family) {

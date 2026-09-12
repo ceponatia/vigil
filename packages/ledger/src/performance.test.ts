@@ -4,7 +4,12 @@ import { counterAccount, holdingsAccount } from "./accounts";
 import { holdingsBase } from "./balances";
 import { measurePerformance, type PerformanceMeasure } from "./performance";
 import type { EntryKind, JournalEntry } from "./journal";
-import { sheetFrom, twoLineEntry, TEST_STABLE_ASSET } from "./test-support/journal-fixtures";
+import {
+  sheetFrom,
+  twoLineEntry,
+  TEST_STABLE_ASSET,
+  TEST_VOLATILE_ASSET,
+} from "./test-support/journal-fixtures";
 
 // The defect this file kills: measuring drawdown from total equity instead
 // of from the cash-flow-adjusted performance series. Under that arithmetic,
@@ -196,7 +201,7 @@ describe("measurePerformance", () => {
 
   it("measures one asset at a time and never nets two assets together — catches a measure that summed base units across assets, which is an invented exchange rate", () => {
     const stable = measureOrThrow(tradingHistory);
-    const unrelated = measurePerformance(tradingHistory, "test:volatile-18");
+    const unrelated = measurePerformance(tradingHistory, TEST_VOLATILE_ASSET);
 
     expect(unrelated.outcome).toBe("measured");
     if (unrelated.outcome === "measured") {
@@ -204,5 +209,57 @@ describe("measurePerformance", () => {
       expect(unrelated.measure.contributedBase).toBe(0n);
     }
     expect(stable.performanceBase).not.toBe(0n);
+  });
+});
+
+// Finding 6: the measure summed raw base units across entries with no
+// journal-wide scale check of its own.
+describe("scale drift", () => {
+  it("refuses to measure an asset the journal posts at two scales — catches a sum of base units in no unit at all, from which a drawdown could pause trading that is fine, or fail to pause trading that is not, by orders of magnitude", () => {
+    const drifted = measurePerformance(
+      [
+        twoLineEntry({
+          entryId: "entry-pnl-at-six",
+          kind: "realized-pnl",
+          debit: availableAccount,
+          credit: realizedPnlAccount,
+          amountBase: 5n * UNIT,
+        }),
+        twoLineEntry({
+          entryId: "entry-pnl-at-eighteen",
+          kind: "realized-pnl",
+          debit: availableAccount,
+          credit: realizedPnlAccount,
+          amountBase: 5n * UNIT,
+          scale: 18,
+        }),
+      ],
+      TEST_STABLE_ASSET,
+    );
+
+    expect(drifted.outcome).toBe("refused");
+    if (drifted.outcome === "refused") {
+      expect(drifted.refusal.reason.code).toBe("SCALE_MISMATCH");
+      expect(drifted.entryId).toBe("entry-pnl-at-eighteen");
+    }
+  });
+
+  it("ignores a second scale on an asset it was not asked about — catches a check written over the whole journal rather than the measured asset, which would refuse a perfectly good measurement because some unrelated asset uses 18 decimals", () => {
+    const measured = measurePerformance(
+      [
+        ...tradingHistory,
+        twoLineEntry({
+          entryId: "entry-other-asset",
+          kind: "contribution",
+          debit: holdingsAccount(TEST_VOLATILE_ASSET, "available"),
+          credit: counterAccount("contributed-capital", TEST_VOLATILE_ASSET),
+          amountBase: 1n,
+          scale: 18,
+        }),
+      ],
+      TEST_STABLE_ASSET,
+    );
+
+    expect(measured.outcome).toBe("measured");
   });
 });

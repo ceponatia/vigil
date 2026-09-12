@@ -5,7 +5,7 @@ import {
 } from "./accounts";
 import { holdingsBase, type BalanceSheet } from "./balances";
 import { ledgerRefusal, type LedgerDiagnosticCode, type LedgerRefusal } from "./diagnostics";
-import { buildEntry, type JournalEntry } from "./journal";
+import { buildEntry, type EntryProvenance, type JournalEntry } from "./journal";
 import { isStrictlyBefore, type IsoUtcTimestamp } from "./timestamps";
 
 /**
@@ -61,6 +61,8 @@ export type ReservationRequest = {
   readonly occurredAt: IsoUtcTimestamp;
   readonly recordedAt: IsoUtcTimestamp;
   readonly expiresAt: IsoUtcTimestamp;
+  /** What authorized and sized this hold; carried onto the posting it makes. */
+  readonly provenance: EntryProvenance;
 };
 
 export type ReservationOutcome =
@@ -150,6 +152,7 @@ export function planReservation(balances: BalanceSheet, request: ReservationRequ
     correlationId: request.correlationId,
     idempotencyKey: request.idempotencyKey,
     intentId: request.intentId,
+    provenance: request.provenance,
     lines: [
       {
         account: holdingsAccount(request.assetId, "reserved"),
@@ -191,6 +194,8 @@ export type ReleaseRequest = {
   readonly amountBase: bigint;
   readonly occurredAt: IsoUtcTimestamp;
   readonly recordedAt: IsoUtcTimestamp;
+  /** What authorized the release; carried onto the posting it makes. */
+  readonly provenance: EntryProvenance;
 };
 
 export type ReleaseOutcome =
@@ -235,6 +240,7 @@ export function planRelease(balances: BalanceSheet, request: ReleaseRequest): Re
     correlationId: request.correlationId,
     idempotencyKey: request.idempotencyKey,
     intentId: request.intentId,
+    provenance: request.provenance,
     lines: [
       {
         account: holdingsAccount(request.assetId, "available"),

@@ -20,6 +20,7 @@ export {
   postingDirectionSchema,
   ACCOUNT_FAMILIES,
   ACCOUNT_FAMILY_NORMAL_SIDE,
+  ACCOUNT_KEY_SEPARATOR,
   ASSET_ID_PATTERN,
   HOLDINGS_STATES,
   HOLDINGS_STATE_RESERVABILITY,
@@ -61,7 +62,9 @@ export type {
 
 export {
   buildEntry,
+  describeReversalMismatch,
   entryKindSchema,
+  entryProvenanceSchema,
   journalEntrySchema,
   journalLineSchema,
   parseJournalEntry,
@@ -70,9 +73,11 @@ export {
   validateEntry,
   ENTRY_KINDS,
   ENTRY_KIND_ALLOWED_FAMILIES,
+  RESERVATION_POSTING_SHAPES,
 } from "./journal";
 export type {
   EntryKind,
+  EntryProvenance,
   EntryValidation,
   JournalEntry,
   JournalEntryDraft,
