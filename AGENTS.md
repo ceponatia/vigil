@@ -216,6 +216,10 @@ per-role pins. Subagents never run on the session's own model when that model is
 
 ## Git and delivery
 
+- `main` is the development and integration branch; `prod` is the release branch and only ever
+  advances through a promotion PR from `main`, which CI treats as a full release-candidate run.
+  A ruleset blocks force-pushes and deletion on both and requires the `verify` check; repository
+  admins can bypass it, which is what lets documentation land directly on `main`.
 - Code, configuration, dependency, and workflow changes reach `main` through a branch and PR
   unless the user explicitly directs otherwise. Documentation-only changes may go directly to
   `main`. Use conventional commits.
