@@ -11,7 +11,10 @@ services:
     ports:
       - "127.0.0.1:5436:5432"
     volumes:
-      - vigil_postgres_data:/var/lib/postgresql/data
+      # postgres:18+ stores data in a major-version subdirectory under
+      # /var/lib/postgresql and refuses to start when a volume sits at the
+      # pre-18 path /var/lib/postgresql/data ("unused mount/volume", exit 1).
+      - vigil_postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U vigil -d vigil_dev"]
       interval: 5s

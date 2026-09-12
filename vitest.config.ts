@@ -52,6 +52,11 @@ export default defineConfig({
           environment: "node",
           include: ["**/*.int.test.ts"],
           exclude: [...configDefaults.exclude],
+          // The `test:int` script passes `--passWithNoTests`: no Postgres-backed
+          // suite exists until the ledger slice lands, and the integration job
+          // still proves Compose comes up and migrations apply from zero. The
+          // `test` script deliberately does not — the unit project must never
+          // be empty again.
         },
       },
     ],
