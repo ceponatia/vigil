@@ -58,6 +58,6 @@ auditor does with it.
 | `needs-decision-without-label` / `decision-label-outside-needs-decision` | info | — | report; the label and the Status should agree |
 | `done-but-open` | finding | no | report; acceptance is the owner's |
 | `closed-not-done` | info | — | report |
-| `assigned-outside-owner-turn` | finding | no | report; `--unassign` only with authorization |
-| `owner-turn-unassigned` | finding | yes | `board-set.sh n --assign` — In review or Needs decision means the owner acts next |
+| `assigned-outside-owner-turn` | finding | no | open issues only; report; `--unassign` only with authorization |
+| `owner-turn-unassigned` | finding | yes | open issues only; `board-set.sh n --assign` — In review or Needs decision means the owner acts next |
 | `duplicate-planning-id:<ID>` (batch) | finding | no | report; one of the twins is a duplicate for the filer to close |

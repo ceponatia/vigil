@@ -275,6 +275,34 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(finding(report, 11, "done-but-open")["severity"], "finding")
         self.assertEqual(finding(report, 12, "closed-not-done")["severity"], "info")
 
+    def test_a_closed_done_issue_keeps_its_assignee_without_a_finding(self):
+        # #4 stays assigned to the owner and Done after the owner merged PR #12; the
+        # assignment convention in vigil-board's lifecycle.md governs open items only,
+        # so a closed issue's existing assignee is never a finding.
+        batch = {
+            4: issue(4, "BOOT-01: first code slice", fields=FULL | {
+                "Status": "Done", "Evidence": "https://github.com/ceponatia/vigil/pull/12",
+            }, assignees=("ceponatia",), state="CLOSED"),
+        }
+        report = AUDIT.audit(batch, OPTIONS)
+        self.assertEqual(codes(report, 4), [])
+
+    def test_a_closed_issue_in_review_is_never_told_to_assign_the_owner(self):
+        # Kills the fixable `owner-turn-unassigned` finding on a closed issue: its
+        # `--assign` fix would mutate an issue nobody can act on any more, and
+        # In review on a closed issue only means the Status field was never moved
+        # to Done — `closed-not-done` already reports that, and it is all that is
+        # left here. The convention still binds open issues:
+        # test_decision_states_and_the_assignment_convention keeps #6 and #9
+        # finding-bearing, so this is a narrowing by state, not a removal.
+        batch = {
+            6: issue(6, "BOOT-04: L", fields=FULL | {
+                "Status": "In review", "Evidence": "https://ci.example/runs/9",
+            }, state="CLOSED"),
+        }
+        report = AUDIT.audit(batch, OPTIONS)
+        self.assertEqual(codes(report, 6), ["closed-not-done"])
+
     def test_evidence_is_required_once_built_or_accepted(self):
         batch = {
             6: issue(6, "BOOT-04: L", fields=FULL | {"Status": "In review"}, assignees=("ceponatia",)),

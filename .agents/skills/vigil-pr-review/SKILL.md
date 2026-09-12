@@ -37,8 +37,15 @@ Only `reply-resolve.sh` mutates GitHub. Use a skill-relative path such as
 `unit tests`, and `integration`, then aggregates the applicable results into
 `verify`. `wait-ci.sh` succeeds only when every required check is successful
 and the required `CI / verify` aggregate reports `SUCCESS` for one unchanged,
-full PR head SHA. Pending exit 8 and failing exit 1 from `gh pr checks` can
-contain valid JSON and are parsed. Missing checks, unrelated successful
+full PR head SHA. The checks rollup holds one entry per check name and
+replaces it, so which `CI/verify` counts is decided by the newest `CI`
+workflow run for the head: one belonging to an older run — a draft-triggered
+run's `SKIPPED` verify, or a `CANCELLED` one from the workflow's own
+`concurrency`, still standing while the ready-triggered run is queued or in
+progress — is dropped and the helper keeps waiting, while one belonging to
+the newest run decides, a lone skip with nothing newer behind it included.
+Pending exit 8 and failing exit 1 from `gh pr checks` can contain valid JSON
+and are parsed. Missing checks, an unreadable run list, unrelated successful
 checks, stale-head results, drafts, conflicts, timeouts, and repeated API
 errors never become green. A draft PR has no checks by design — mark it ready
 before waiting.

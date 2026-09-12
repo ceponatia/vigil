@@ -8,6 +8,32 @@ head_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 reviewer='vigil-review-bot[bot]'
 printf '%s\n' "$*" >>"$state_dir/calls"
 
+# Run and job identities taken from PR #14 at head 72338c5, the sequence the
+# wait-* scenarios below replay: a draft-triggered run whose jobs the workflow's
+# draft guard skipped, then the ready_for_review-triggered run seven seconds
+# later. `run_older` is a second draft-guarded run for the all-skipped case.
+run_older=34719255100
+run_draft=34719260700
+run_ready=34719267014
+link_older="https://github.com/ceponatia/vigil/actions/runs/$run_older/job/103621900001"
+link_draft="https://github.com/ceponatia/vigil/actions/runs/$run_draft/job/103621979362"
+link_ready="https://github.com/ceponatia/vigil/actions/runs/$run_ready/job/103622095513"
+at_older=2026-09-12T21:11:00Z
+at_draft=2026-09-12T21:11:59Z
+at_ready=2026-09-12T21:12:06Z
+
+# A second, unrelated head shape: an earlier CI run for the SAME head already
+# passed its verify, then a later push to the same branch (no new PR head —
+# think a re-run or a second CI trigger on the same commit) is cancelled
+# before its own verify job — which `needs` every other job — is ever
+# scheduled. Used by the wait-newer-cancelled-* scenarios below.
+run_pass_old=34719280512
+run_cancel_new=34719291234
+link_pass_old="https://github.com/ceponatia/vigil/actions/runs/$run_pass_old/job/103622500001"
+link_cancel_new="https://github.com/ceponatia/vigil/actions/runs/$run_cancel_new/job/103622600001"
+at_pass_old=2026-09-12T21:15:00Z
+at_cancel_new=2026-09-12T21:16:30Z
+
 next_count() {
   local name=$1 file="$state_dir/$1"
   local count=0
@@ -21,6 +47,22 @@ pr_json() {
   local head=$1
   printf '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"%s","url":"https://example.test/pr/1","title":"fixture","reviewRequests":[],"assignees":[]}\n' "$head"
 }
+
+# One `gh pr checks --required --json …` entry. The rollup holds exactly one
+# entry per check NAME and replaces it in place, so no scenario here emits two
+# `CI/verify` entries: that state does not occur. `link` is the check run's own
+# job URL, which is what names the run the entry came from.
+check_json() { # name workflow bucket state link
+  printf '{"name":"%s","workflow":"%s","bucket":"%s","state":"%s","event":"pull_request","link":"%s"}' "$1" "$2" "$3" "$4" "$5"
+}
+
+# One `gh run list --json …` entry. gh types `conclusion` as a string, so a run
+# that has not finished carries "" rather than null.
+run_json() { # databaseId status conclusion createdAt
+  printf '{"databaseId":%s,"status":"%s","conclusion":"%s","createdAt":"%s","workflowName":"CI","event":"pull_request","headSha":"%s"}' "$1" "$2" "$3" "$4" "$run_head"
+}
+
+json_array() { local IFS=,; printf '[%s]\n' "$*"; }
 
 if [ "$1 $2" = "pr view" ]; then
   if [[ " $* " == *" --jq .headRefOid "* ]]; then
@@ -39,32 +81,162 @@ if [ "$1 $2" = "pr checks" ]; then
     wait-pending)
       count=$(next_count checks)
       if [ "$count" -eq 1 ]; then
-        printf '[{"name":"verify","workflow":"CI","bucket":"pending","state":"IN_PROGRESS","event":"pull_request","link":"https://example.test/run/1"}]\n'
+        json_array "$(check_json verify CI pending IN_PROGRESS "$link_ready")"
         exit 8
       fi
-      printf '[{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://example.test/run/1"}]\n'
+      json_array "$(check_json verify CI pass SUCCESS "$link_ready")"
+      ;;
+    wait-draft-then-ready)
+      # The observed live sequence at PR #14's head, poll by poll. The rollup's
+      # single CI/verify is the draft run's SKIPPED one while the ready run is
+      # in progress (poll 1); GitHub then clears it (poll 2) before the ready
+      # run's own verify job registers (poll 3) and finishes (poll 4). Only the
+      # run list separates poll 1 from a genuine lone skip.
+      count=$(next_count checks)
+      case "$count" in
+        1) json_array "$(check_json verify CI skipping SKIPPED "$link_draft")" ;;
+        2) echo 'no checks reported on the branch' >&2; exit 1 ;;
+        3) json_array "$(check_json verify CI pending IN_PROGRESS "$link_ready")"; exit 8 ;;
+        *) json_array "$(check_json verify CI pass SUCCESS "$link_ready")" ;;
+      esac
+      ;;
+    wait-skipped-only)
+      # A draft-guarded run's skipped verify that is itself the newest CI run
+      # for this head: nothing supersedes it.
+      json_array "$(check_json verify CI skipping SKIPPED "$link_draft")"
+      ;;
+    wait-verify-all-skipped)
+      # Two draft-guarded runs for the same head and no newer one. The rollup
+      # carries the newest run's skipped verify — the older run's entry was
+      # replaced, not kept beside it.
+      json_array "$(check_json verify CI skipping SKIPPED "$link_draft")"
+      ;;
+    wait-peer-skipped)
+      # The superseded shape (the rollup's CI/verify is the draft run's skip
+      # while the ready run is in progress) beside another workflow's own
+      # skipped required check, which no CI run supersedes.
+      json_array "$(check_json verify CI skipping SKIPPED "$link_draft")" \
+                 "$(check_json security Security skipping SKIPPED https://example.test/run/2)"
+      ;;
+    wait-draft-cancelled-then-ready)
+      # The workflow's own concurrency: cancel-in-progress cancels the draft run
+      # when the ready run is created while it is still queued, so the rollup's
+      # CI/verify is CANCELLED — superseded exactly as a skip is — until the
+      # ready run replaces it.
+      count=$(next_count checks)
+      if [ "$count" -eq 1 ]; then
+        json_array "$(check_json verify CI cancel CANCELLED "$link_draft")"
+      else
+        json_array "$(check_json verify CI pass SUCCESS "$link_ready")"
+      fi
+      ;;
+    wait-newer-cancelled-after-pass)
+      # Codex review finding on PR #14 (raised against the checks-only 72338c5,
+      # still applicable to today's run-list-based selection): a later CI run
+      # for the same head is cancelled before its own verify job ever registers
+      # — `verify` `needs` every other job, so a run cancelled early enough
+      # produces no CI/verify check-run at all. The rollup therefore carries
+      # only the OLDER run's passing verify; the run list is what reveals a
+      # newer, already-terminal run exists and that pass is superseded.
+      json_array "$(check_json verify CI pass SUCCESS "$link_pass_old")"
+      ;;
+    wait-newer-cancelled-with-verify)
+      # The companion shape: the newer run's own CI/verify DID register, and
+      # it is CANCELLED. Already correctly caught by the bucket == "cancel"
+      # test — this scenario guards that behaviour against regressing.
+      json_array "$(check_json verify CI cancel CANCELLED "$link_cancel_new")"
       ;;
     wait-failing|wait-stale)
       if [ "$scenario" = wait-stale ] && [ "$(next_count checks)" -eq 1 ]; then
-        printf '[{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://example.test/run/old"}]\n'
+        json_array "$(check_json verify CI pass SUCCESS "$link_ready")"
         exit 0
       fi
-      printf '[{"name":"verify","workflow":"CI","bucket":"fail","state":"FAILURE","event":"pull_request","link":"https://example.test/run/new"}]\n'
+      json_array "$(check_json verify CI fail FAILURE "$link_ready")"
       exit 1
       ;;
     wait-unrelated)
-      printf '[{"name":"documentation checks","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://example.test/run/1"}]\n'
+      json_array "$(check_json 'documentation checks' CI pass SUCCESS "$link_ready")"
       ;;
     wait-required-peer-fail)
-      printf '[{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://example.test/run/1"},{"name":"security","workflow":"Security","bucket":"fail","state":"FAILURE","event":"pull_request","link":"https://example.test/run/2"}]\n'
+      json_array "$(check_json verify CI pass SUCCESS "$link_ready")" \
+                 "$(check_json security Security fail FAILURE https://example.test/run/2)"
       exit 1
       ;;
     wait-no-checks)
-      echo 'no checks reported on the branch' >&2
+      # The real wording behind `gh pr checks --required`: it differs from the
+      # bare form (still exercised by wait-draft-then-ready's transitional poll
+      # above) by inserting "required".
+      echo "no required checks reported on the 'fixture' branch" >&2
       exit 1
       ;;
     *)
       printf '[{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS"}]\n'
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "$1 $2" = "run list" ]; then
+  run_head=$head_a
+  prev=""
+  for arg in "$@"; do
+    [ "$prev" != --commit ] || run_head=$arg
+    prev=$arg
+  done
+  case "$scenario" in
+    wait-pending)
+      if [ "$(next_count runs)" -eq 1 ]; then
+        json_array "$(run_json "$run_ready" in_progress '' "$at_ready")"
+      else
+        json_array "$(run_json "$run_ready" completed success "$at_ready")"
+      fi
+      ;;
+    wait-draft-then-ready)
+      if [ "$(next_count runs)" -le 3 ]; then
+        json_array "$(run_json "$run_draft" completed skipped "$at_draft")" \
+                   "$(run_json "$run_ready" in_progress '' "$at_ready")"
+      else
+        json_array "$(run_json "$run_draft" completed skipped "$at_draft")" \
+                   "$(run_json "$run_ready" completed success "$at_ready")"
+      fi
+      ;;
+    wait-skipped-only)
+      json_array "$(run_json "$run_draft" completed skipped "$at_draft")"
+      ;;
+    wait-verify-all-skipped)
+      json_array "$(run_json "$run_older" completed skipped "$at_older")" \
+                 "$(run_json "$run_draft" completed skipped "$at_draft")"
+      ;;
+    wait-peer-skipped|wait-draft-cancelled-then-ready)
+      if [ "$(next_count runs)" -eq 1 ]; then
+        json_array "$(run_json "$run_draft" completed cancelled "$at_draft")" \
+                   "$(run_json "$run_ready" in_progress '' "$at_ready")"
+      else
+        json_array "$(run_json "$run_draft" completed cancelled "$at_draft")" \
+                   "$(run_json "$run_ready" completed success "$at_ready")"
+      fi
+      ;;
+    wait-newer-cancelled-after-pass|wait-newer-cancelled-with-verify)
+      # Both terminal already: an older run that passed, and a newer, later
+      # run for the same head that was cancelled. The newer run decides.
+      json_array "$(run_json "$run_pass_old" completed success "$at_pass_old")" \
+                 "$(run_json "$run_cancel_new" completed cancelled "$at_cancel_new")"
+      ;;
+    wait-failing)
+      json_array "$(run_json "$run_ready" completed failure "$at_ready")"
+      ;;
+    wait-stale)
+      if [ "$(next_count runs)" -eq 1 ]; then
+        json_array "$(run_json "$run_ready" completed success "$at_ready")"
+      else
+        json_array "$(run_json "$run_ready" completed failure "$at_ready")"
+      fi
+      ;;
+    wait-unrelated|wait-required-peer-fail)
+      json_array "$(run_json "$run_ready" completed success "$at_ready")"
+      ;;
+    *)
+      printf '[]\n'
       ;;
   esac
   exit 0
