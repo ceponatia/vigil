@@ -15,6 +15,7 @@ import {
   type StoreEntry,
   type StoreProvenance,
 } from "@vigil/db";
+import { assetIdSchema } from "@vigil/contracts";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -31,7 +32,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 // lock, and a committed transaction boundary. Replacing Postgres with an
 // in-memory store would delete the claim rather than move it.
 
-const ASSET = "1337|native|VGLSTABLE|SYNTHETIC_TESTNET";
+const ASSET = assetIdSchema.parse("1337|native|VGLSTABLE|SYNTHETIC_TESTNET");
 const SCALE = 6;
 const FUNDED_BASE = 1_000_000_000n;
 const HALF_PLUS_BASE = 600_000_000n;

@@ -22,6 +22,7 @@ import {
   type BalanceSheet,
   type JournalEntry,
 } from "@vigil/ledger";
+import { assetIdSchema } from "@vigil/contracts";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -61,9 +62,9 @@ const REPLAY_PROVENANCE: StoreProvenance = {
   marketSnapshotVersion: "market-replay-0",
 };
 
-const STABLE = "1337|native|VGLSTABLE|SYNTHETIC_TESTNET";
+const STABLE = assetIdSchema.parse("1337|native|VGLSTABLE|SYNTHETIC_TESTNET");
 const STABLE_SCALE = 6;
-const VOLATILE = "1337|native|VGLVOLATILE|SYNTHETIC_TESTNET";
+const VOLATILE = assetIdSchema.parse("1337|native|VGLVOLATILE|SYNTHETIC_TESTNET");
 const VOLATILE_SCALE = 18;
 
 function line(

@@ -18,6 +18,7 @@ import {
   RESERVATION_STATES,
   type EntryProvenance,
 } from "@vigil/ledger";
+import { assetIdSchema } from "@vigil/contracts";
 import { describe, expect, it } from "vitest";
 
 // `@vigil/ledger` and `@vigil/db` may not import each other — the layer
@@ -35,7 +36,7 @@ import { describe, expect, it } from "vitest";
 // Seam: when `packages/contracts` owns these registries, both sides take
 // them from there and this file goes away.
 
-const SAMPLE_ASSET = "1337|native|VGLSTABLE|SYNTHETIC_TESTNET";
+const SAMPLE_ASSET = assetIdSchema.parse("1337|native|VGLSTABLE|SYNTHETIC_TESTNET");
 
 // The record contract is declared twice for the same reason the enums are.
 // A field on one side and not the other is not a type error anywhere — it is
