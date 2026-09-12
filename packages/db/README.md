@@ -57,7 +57,61 @@ Logical record families are not an instruction to create every table before
 the first paper trade — normalize around the first vertical slice and extend
 as later slices need to.
 
-## Status
+## Column conventions
 
-Empty scaffold. First filled under planning ID BOOT-04, with individual
-schema modules landing per the record family a given slice needs.
+- **Money and quantities** are `numeric(78, 0)` — an exact integer count of
+  base units — beside an `asset_scale` column that says how many decimal
+  places those units represent. 78 digits hold a 256-bit integer, so an
+  18-decimal token balance cannot overflow the column the way an 8-byte
+  `bigint` would. No column is `real` or `double precision`.
+- **Timestamps** are `timestamptz(3)`: millisecond precision, matching what
+  an ISO-8601 timestamp carries, so a stored instant is always one the
+  application can read back and replay exactly.
+- **Idempotency keys are unique**, enforced by unique indexes — an
+  idempotency key that is merely indexed stops nothing. Correlation ids are
+  deliberately *not* unique: one correlation id ties an intent, its attempts,
+  and its outcome together, so it is indexed for lookup and nothing more.
+- **Journal tables are append-only.** A trigger rejects every `UPDATE` and
+  `DELETE` against a posted entry or posting; a correction is a reversing
+  entry. `ledger_balances` is a projection of the journal and is updated in
+  place.
+- **Vocabularies are Postgres enums**, so a column cannot hold a holdings
+  state, account family, entry kind, or reservation state that does not
+  exist.
+- **One asset has one scale.** `asset_scales` registers it on first use, and
+  every table that stores base units carries a composite
+  `(asset_id, asset_scale)` foreign key into it, so base units at a second
+  scale have nowhere to point. The same table's check constraint is where a
+  bare ticker is refused: every asset id in the ledger points at a row here,
+  so one constraint covers all of them.
+- **Every economic record carries its provenance**: the policy and strategy
+  versions that produced it (required, non-blank, enforced by a check
+  constraint), the model version (null when no LLM was involved), and the
+  market and portfolio snapshot versions (null when none informed it).
+- **A posted entry is sealed.** Postings may be added only by the
+  transaction that wrote the entry, so a later writer cannot add offsetting
+  lines that change what a committed entry says while leaving the balance
+  projection untouched.
+
+## Forward-declared seams
+
+- **The reservation lifecycle.** `reservation_state` declares
+  `active → released | consumed | expired`, and only `active` is ever
+  written: nothing releases, consumes, or expires a hold yet, and
+  `expires_at` is stored but never read. The values and the column exist now
+  so the execution slice that owns those transitions changes behavior rather
+  than the schema — and so the partial unique index that allows one live
+  hold per intent already has the terminal states it will need.
+- **Asset identity.** `asset_id` is canonical-id text, checked against the
+  `chainId|kind|value|withdrawalNetwork` shape in `asset_scales` and pointed
+  at by every table that stores base units. `asset_scales` is the first
+  column of the `assets` record family; when that family lands with
+  identity, capabilities, and token representations, this table folds into
+  it and the foreign keys point there instead.
+
+## Built modules
+
+`journal` (journal entries, postings, and the balance projection) and
+`intents` (reservations) exist, with the baseline migration under
+`drizzle/`. The remaining record families above are created by the slice
+that needs them.

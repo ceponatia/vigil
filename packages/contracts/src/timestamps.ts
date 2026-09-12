@@ -17,7 +17,38 @@ import { z } from "zod";
  * timestamps — the caller (ultimately something outside `@vigil/contracts`
  * and `@vigil/market`) is responsible for supplying "now".
  */
-export const isoUtcTimestampSchema = z.iso.datetime().brand<"IsoUtcTimestamp">();
+/**
+ * The finest precision any vigil consumer can store and read back.
+ *
+ * Durable timestamps land in `timestamptz(3)` columns and every reader
+ * parses through `Date.parse`, both of which keep milliseconds. A value
+ * carrying more precision is therefore not stored as written: `…05.0004Z`
+ * comes back as `…05.000Z`, four hundred microseconds earlier than the
+ * event it claims to timestamp, with nothing in the record to say it was
+ * changed. Refusing at the boundary is the only honest option, because no
+ * layer below this one can round a decision's timestamp on the caller's
+ * behalf (`docs/evaluation.md` "Point-in-time integrity").
+ *
+ * "At most three" rather than "exactly three": `…05Z`, `…05.0Z` and
+ * `…05.00Z` all name an instant this application can represent exactly, so
+ * a producer that trims trailing zeros is not wrong.
+ */
+const MAX_FRACTIONAL_SECOND_DIGITS = 3;
+
+const FRACTIONAL_SECONDS = /\.(\d+)Z$/;
+
+export const isoUtcTimestampSchema = z.iso
+  .datetime()
+  .refine(
+    (value) => {
+      const fraction = FRACTIONAL_SECONDS.exec(value);
+      return fraction === null || (fraction[1] ?? "").length <= MAX_FRACTIONAL_SECOND_DIGITS;
+    },
+    {
+      error: `expected at most ${String(MAX_FRACTIONAL_SECOND_DIGITS)} fractional-second digits: finer precision is silently truncated on the way into storage`,
+    },
+  )
+  .brand<"IsoUtcTimestamp">();
 
 export type IsoUtcTimestamp = z.infer<typeof isoUtcTimestampSchema>;
 

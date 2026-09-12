@@ -17,6 +17,7 @@
   "devDependencies": {
     "typescript": "catalog:",
     "@types/node": "catalog:",
+    "vitest": "catalog:",
     "@types/pg": "catalog:"
   }
 }

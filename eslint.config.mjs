@@ -74,10 +74,13 @@ const NAMING_CONVENTION = [
 // base units or a decimal type internally — never IEEE-754 float (product
 // rule 5). `parseFloat` is the most common way that rule gets broken by
 // accident, so it is banned everywhere the numbers it would parse are real
-// money: the four pure packages that compute with money or quantities, and
-// the trading runtime that authorizes and executes it.
+// money: the four pure packages that compute with money or quantities, the
+// trading runtime that authorizes and executes it, and packages/db, which
+// reads every base-unit column back as a `numeric` — a string, and so one
+// `parseFloat` away from a balance that no longer reconciles.
 const MONEY_GUARD_FILES = [
   "packages/contracts/**/*.{ts,tsx}",
+  "packages/db/**/*.{ts,tsx}",
   "packages/ledger/**/*.{ts,tsx}",
   "packages/policy/**/*.{ts,tsx}",
   "packages/strategies/**/*.{ts,tsx}",

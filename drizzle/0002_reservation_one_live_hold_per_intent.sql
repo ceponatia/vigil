@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "reservations_intent_id_active_key" ON "reservations" USING btree ("intent_id") WHERE state = 'active';

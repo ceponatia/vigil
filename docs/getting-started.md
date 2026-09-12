@@ -21,7 +21,7 @@ pnpm db:up
 pnpm db:migrate
 ```
 
-`pnpm db:migrate` currently has nothing to apply — the migration baseline arrives with the ledger vertical slice. Running it before that slice lands is a no-op, not an error.
+`pnpm db:migrate` applies the checked-in migrations under `drizzle/` in order, from an empty database to the current schema. It is the only sanctioned path from schema to database; `drizzle-kit push` is never used.
 
 ## Running
 

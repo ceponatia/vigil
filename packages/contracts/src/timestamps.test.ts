@@ -6,8 +6,10 @@ import type { IsoUtcTimestamp } from "./timestamps";
 describe("isoUtcTimestampSchema", () => {
   const validInputs = [
     "2024-01-01T00:00:00Z",
+    "2024-01-01T00:00:00.0Z",
+    "2024-01-01T00:00:00.00Z",
     "2024-01-01T00:00:00.000Z",
-    "2024-01-01T00:00:00.123456Z",
+    "2024-01-01T00:00:00.123Z",
     "1970-01-01T00:00:00Z",
   ];
 
@@ -52,6 +54,18 @@ describe("isoUtcTimestampSchema", () => {
       catches: "a schema that accepts z.date() would let a Date object (which serializes inconsistently and is never the wire format) through construction call sites",
     },
     { name: "null", input: null, catches: "a schema without a required string type would accept a missing timestamp as valid" },
+    {
+      name: "microsecond precision",
+      input: "2024-01-01T00:00:00.123456Z",
+      catches:
+        "a schema with no precision cap would accept a value finer than anything vigil stores: `timestamptz(3)` and `Date.parse` both keep milliseconds, so this instant is written back 456 microseconds earlier than it was supplied, and no reader can tell it was changed",
+    },
+    {
+      name: "nanosecond precision",
+      input: "2024-01-01T00:00:00.000000001Z",
+      catches:
+        "the same truncation from a chain or venue timestamp, which is where nine-digit fractions actually come from",
+    },
   ];
 
   it.each(invalidCases)("$name is rejected without throwing — catches: $catches", ({ input }) => {

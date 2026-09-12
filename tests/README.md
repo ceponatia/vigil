@@ -14,6 +14,10 @@ Cross-package suites and synthetic fixtures that don't belong to any single
 - **`fault-injection/`** — the fault scenario matrix described in
   `docs/testing.md` (crash mid-write, duplicate delivery, stale data,
   partial fill, and similar cases the system must fail closed on).
+- **`seams/`** — claims about two packages agreeing, where neither package
+  can import the other to make the agreement a type. Pure suites: a seam
+  test that needed a running service would belong to the layer that owns the
+  service.
 
 ## Naming and selection
 
@@ -27,6 +31,11 @@ excludes every `*.int.test.ts`; its `integration` project includes every
 `*.int.test.ts` in the repository. Nothing under `tests/` needs its own
 Vitest config or `package.json` — the root config already reaches it by glob.
 
-## Status
+## What lives here
 
-Empty. No fixtures, replays, or fault-injection scenarios exist yet.
+`replay/` holds the journal-rebuild replay, which drives a multi-asset
+history through `@vigil/db` and rebuilds it with `@vigil/ledger` from an
+empty runtime state. `fault-injection/` holds the concurrent-reservation
+scenario, which drives two independent connections at one balance. Both are
+`*.int.test.ts` and need Postgres. `seams/` holds the ledger-and-database
+vocabulary check, a plain unit suite. `fixtures/` holds no fixtures yet.
