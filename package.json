@@ -26,6 +26,8 @@
     "@eslint/js": "catalog:",
     "@types/node": "catalog:",
     "@types/pg": "catalog:",
+    "@vigil/contracts": "workspace:*",
+    "@vigil/market": "workspace:*",
     "@vitest/coverage-v8": "catalog:",
     "dotenv": "catalog:",
     "drizzle-kit": "catalog:",
