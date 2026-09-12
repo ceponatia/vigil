@@ -79,6 +79,16 @@ describe("unitsToDecimalString", () => {
     { units: -500n, scale: 2, expected: "-5.00" },
     { units: -5n, scale: 2, expected: "-0.05" },
     { units: 7n, scale: 0, expected: "7" },
+    // Every case above is small enough that a renderer built on
+    // `Number(units) / 10 ** scale` plus `toFixed(scale)` would still produce
+    // the right answer — so none of them actually proves the "no JS number at
+    // any point" claim this module is built on. These two do: both magnitudes
+    // exceed Number.MAX_SAFE_INTEGER, so a float round-trip loses the low
+    // digits and cannot produce the expected string.
+    // 2^53 + 1 is the smallest integer a double cannot represent exactly; it
+    // rounds down to ...992, which would render the last digit as 2.
+    { units: -9_007_199_254_740_993n, scale: 2, expected: "-90071992547409.93" },
+    { units: 12_345_678_901_234_567_890_123n, scale: 6, expected: "12345678901234567.890123" },
   ];
 
   it.each(cases)("renders $units units at scale $scale as $expected", ({ units, scale, expected }) => {

@@ -22,6 +22,16 @@ describe("isoUtcTimestampSchema", () => {
       catches: "a schema that allows an offset would accept a non-UTC wire timestamp, breaking every downstream age comparison that assumes UTC",
     },
     {
+      name: "a zero offset spelled +00:00 rather than Z",
+      input: "2024-01-01T00:00:00+00:00",
+      catches: "a schema configured with { offset: true } would admit a second spelling of the same instant, so one timestamp could be persisted two ways and no stored value could be compared as a string",
+    },
+    {
+      name: "a naive local datetime carrying no timezone designator at all",
+      input: "2024-01-01T00:00:00",
+      catches: "a schema configured with { local: true } would accept a timestamp whose zone is unknown, and every age comparison downstream would silently read it in whatever zone the reader assumed",
+    },
+    {
       name: "missing the time component",
       input: "2024-01-01",
       catches: "a date-only schema would accept a value with no time-of-day precision, which the timestamp family requires",

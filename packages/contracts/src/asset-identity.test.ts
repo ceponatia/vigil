@@ -52,6 +52,18 @@ const sameTickerDifferentIdentityCases: ReadonlyArray<{
     resolved: { kind: "contract", chainId: "1", contractAddress: "contract-address-d", withdrawalNetwork: "ARBITRUM_ONE" },
     expectedReasonCode: "UNAPPROVED_ASSET",
   },
+  {
+    // Reason-code precedence: when the chain AND the contract both differ,
+    // the chain is what a caller must be told about first. An implementation
+    // that compared the contract/mint value before the chain would answer
+    // UNAPPROVED_ASSET here and hide the fact that the resolved asset is on
+    // an entirely different chain (docs/policy.md, WRONG_CHAIN).
+    name: "same ticker, different chain AND a different contract address",
+    symbol: "USDX",
+    declared: { kind: "contract", chainId: "1", contractAddress: "contract-address-e", withdrawalNetwork: "ERC20" },
+    resolved: { kind: "contract", chainId: "137", contractAddress: "contract-address-f", withdrawalNetwork: "POLYGON" },
+    expectedReasonCode: "WRONG_CHAIN",
+  },
 ];
 
 describe("assetIdentitySchema", () => {
@@ -91,6 +103,28 @@ describe("canonicalAssetId", () => {
   it("is deterministic: the same identity always derives the same id", () => {
     const identity: AssetIdentity = { kind: "contract", chainId: "1", contractAddress: "contract-address-stable", withdrawalNetwork: "ERC20" };
     expect(canonicalAssetId(identity)).toBe(canonicalAssetId({ ...identity }));
+  });
+
+  it("derives the id from the identity fields alone — a display ticker riding along on the object never reaches the id, so a renamed or re-used ticker can neither split one asset into two ids nor merge two assets into one", () => {
+    // Typed loosely on purpose: the excess `symbol` is exactly what a
+    // symbol-keyed lookup table would hand in, and the point is that the id
+    // derivation must ignore it rather than fold it in.
+    const withStrayTicker = {
+      kind: "native" as const,
+      chainId: "1",
+      nativeDenomination: "VGLBASE",
+      withdrawalNetwork: "ERC20",
+      symbol: "USDX",
+    };
+    const withoutTicker: AssetIdentity = {
+      kind: "native",
+      chainId: "1",
+      nativeDenomination: "VGLBASE",
+      withdrawalNetwork: "ERC20",
+    };
+
+    expect(canonicalAssetId(withStrayTicker)).toBe(canonicalAssetId(withoutTicker));
+    expect(canonicalAssetId(withStrayTicker)).not.toContain("USDX");
   });
 });
 

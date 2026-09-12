@@ -10,7 +10,12 @@ import { SYNTHETIC_MARKET_EXPECTED_QUOTES, SYNTHETIC_MARKET_FIXTURE_PARAMS } fro
 // unseeded source — or one whose PRNG state leaks across calls — would
 // fail one or more of the checks below.
 describe("synthetic market replay (BOOT-03)", () => {
-  it("reproduces the exact recorded fixture sequence on replay", () => {
+  it("records a non-empty sequence of exactly `count` quotes — without this, an emptied or truncated fixture would let the comparison below pass while proving nothing about the generator at all", () => {
+    expect(SYNTHETIC_MARKET_EXPECTED_QUOTES.length).toBeGreaterThan(0);
+    expect(SYNTHETIC_MARKET_EXPECTED_QUOTES.length).toBe(SYNTHETIC_MARKET_FIXTURE_PARAMS.count);
+  });
+
+  it("reproduces the exact recorded fixture sequence on replay — every quote, in order, field for field", () => {
     const actual = generateSyntheticQuotes(SYNTHETIC_MARKET_FIXTURE_PARAMS);
     expect(actual).toEqual(SYNTHETIC_MARKET_EXPECTED_QUOTES);
   });
@@ -41,8 +46,15 @@ describe("synthetic market replay (BOOT-03)", () => {
     expect(alternate).not.toEqual(SYNTHETIC_MARKET_EXPECTED_QUOTES);
   });
 
-  it("a different count changes only the sequence length, and every extra quote continues to be schema-valid", () => {
-    const shorter = generateSyntheticQuotes({ ...SYNTHETIC_MARKET_FIXTURE_PARAMS, count: SYNTHETIC_MARKET_FIXTURE_PARAMS.count - 1 });
+  it("count changes the sequence length and nothing else: a shorter run is an exact prefix of the fixture, a longer run extends it, and the extra quote is schema-valid — a generator that derived its walk from `count` rather than advancing one fixed step per tick would rewrite the earlier quotes instead", () => {
+    const { count } = SYNTHETIC_MARKET_FIXTURE_PARAMS;
+
+    const shorter = generateSyntheticQuotes({ ...SYNTHETIC_MARKET_FIXTURE_PARAMS, count: count - 1 });
     expect(shorter).toEqual(SYNTHETIC_MARKET_EXPECTED_QUOTES.slice(0, -1));
+
+    const longer = generateSyntheticQuotes({ ...SYNTHETIC_MARKET_FIXTURE_PARAMS, count: count + 1 });
+    expect(longer.slice(0, count)).toEqual(SYNTHETIC_MARKET_EXPECTED_QUOTES);
+    expect(longer).toHaveLength(count + 1);
+    expect(quoteSnapshotSchema.safeParse(longer[count]).success).toBe(true);
   });
 });
