@@ -8,7 +8,7 @@ import {
   type LedgerAccount,
   type PostingDirection,
 } from "./accounts";
-import { assetScaleSchema } from "./base-units";
+import { assetScaleSchema, MAX_BASE_UNIT_MAGNITUDE } from "./base-units";
 import { ledgerRefusal, type LedgerDiagnosticCode, type LedgerRefusal } from "./diagnostics";
 import { isoUtcTimestampSchema, type IsoUtcTimestamp } from "./timestamps";
 
@@ -157,6 +157,12 @@ export function validateEntry(entry: JournalEntry): EntryValidation {
       return refused(
         "NON_POSITIVE_AMOUNT",
         `entry ${entry.entryId} posts ${line.amountBase.toString()} base units; direction carries the sign`,
+      );
+    }
+    if (line.amountBase > MAX_BASE_UNIT_MAGNITUDE) {
+      return refused(
+        "AMOUNT_OUT_OF_RANGE",
+        `entry ${entry.entryId} posts an amount of ${String(line.amountBase.toString().length)} digits; base-unit columns hold 78`,
       );
     }
     if (!allowed.includes(line.account.family)) {

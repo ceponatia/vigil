@@ -35,6 +35,8 @@ export const LEDGER_DIAGNOSTIC_CODES = [
   "UNREPRESENTABLE_PRECISION",
   /** The supplied scale is outside the representable range. */
   "SCALE_OUT_OF_RANGE",
+  /** The amount in base units is outside the range this application stores. */
+  "AMOUNT_OUT_OF_RANGE",
   /** A posted amount was zero or negative; direction carries the sign. */
   "NON_POSITIVE_AMOUNT",
   /** The entry's kind may not touch one of the account families it posts to. */

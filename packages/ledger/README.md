@@ -69,3 +69,12 @@ reads or writes a database itself.
 Reconciliation against exchange, wallet, and chain state at a consistent
 event watermark is not built; `compareBalanceSheets` is the piece of it that
 exists.
+
+`RESERVATION_STATES` declares the lifecycle a hold will follow —
+`active → released | consumed | expired` — and this package moves a hold
+through none of it. `planRelease` computes the posting that returns capital
+to `available`, but which outcome releases, consumes, or expires a
+reservation is execution-lifecycle knowledge: a partial fill releases only
+the confirmed unfilled remainder, and guessing that rule before the
+execution slice owns it would be a wrong rule written down durably. The
+vocabulary is declared now so the states exist to transition to.

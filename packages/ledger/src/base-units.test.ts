@@ -148,6 +148,19 @@ describe("fromBaseUnits", () => {
     }
   });
 
+  it("refuses to render an amount wider than a base-unit column, in either direction — the mirror of the conversion bound, so a value that could never have been stored is refused rather than formatted into something that looks storable", () => {
+    const tooWide = MAX_BASE_UNIT_MAGNITUDE + 1n;
+
+    for (const base of [tooWide, -tooWide]) {
+      const rendered = fromBaseUnits(base, 6);
+
+      expect(rendered.outcome).toBe("refused");
+      if (rendered.outcome === "refused") {
+        expect(rendered.refusal.reason.code).toBe("AMOUNT_OUT_OF_RANGE");
+      }
+    }
+  });
+
   it("strips trailing zeros from the fraction only — a blanket trailing-zero strip over the whole rendered string would render ten units as one", () => {
     const tenUnits = fromBaseUnits(10_000_000n, 6);
     const fractional = fromBaseUnits(1_100_000n, 6);
@@ -157,6 +170,44 @@ describe("fromBaseUnits", () => {
     if (tenUnits.outcome === "ok" && fractional.outcome === "ok") {
       expect(tenUnits.amount).toBe("10");
       expect(fractional.amount).toBe("1.1");
+    }
+  });
+});
+
+// Bounding the scale is not the same as bounding the amount. Without this
+// guard a 79-digit amount converts happily here, is written by packages/db
+// into a numeric(78, 0) column, and comes back as SQLSTATE 22003 — a driver
+// error raised in the middle of a write rather than a diagnostic.
+describe("the representable range", () => {
+  it("converts the largest amount a base-unit column holds — catches a bound written one digit short, which would refuse a legitimate amount", () => {
+    const widest = decimalStringSchema.parse("9".repeat(78));
+
+    const result = toBaseUnits(widest, 0);
+
+    expect(result.outcome).toBe("ok");
+    if (result.outcome === "ok") {
+      expect(result.base).toBe(MAX_BASE_UNIT_MAGNITUDE);
+    }
+  });
+
+  it("refuses one unit more than that, as a diagnostic rather than a throw — catches an unstorable amount reaching Postgres, where the overflow surfaces as a driver error a caller has no reason code to act on", () => {
+    const tooWide = decimalStringSchema.parse(`1${"0".repeat(78)}`);
+
+    expect(() => toBaseUnits(tooWide, 0)).not.toThrow();
+    const result = toBaseUnits(tooWide, 0);
+
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.refusal.reason).toEqual({ source: "ledger", code: "AMOUNT_OUT_OF_RANGE" });
+    }
+  });
+
+  it("refuses an amount that only overflows once scaled — catches a bound checked against the decimal digits instead of the base units, which an 18-decimal asset defeats with a 61-digit amount", () => {
+    const result = toBaseUnits(decimalStringSchema.parse(`1${"0".repeat(60)}`), 18);
+
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.refusal.reason.code).toBe("AMOUNT_OUT_OF_RANGE");
     }
   });
 });

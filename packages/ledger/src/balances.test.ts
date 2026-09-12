@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { accountKey, counterAccount, holdingsAccount } from "./accounts";
 import { compareBalanceSheets, holdingsBase, netBase, rebuildBalances, type BalanceSheet } from "./balances";
-import { reverseEntry, type JournalEntry } from "./journal";
+import { postEntry, reverseEntry, type JournalEntry } from "./journal";
 import { at, sheetFrom, twoLineEntry, TEST_STABLE_ASSET } from "./test-support/journal-fixtures";
 
 // The defect this file kills: a restart that rebuilds balances which are
@@ -112,6 +112,33 @@ describe("rebuildBalances", () => {
     if (result.outcome === "refused") {
       expect(result.refusal.reason.code).toBe("SCALE_MISMATCH");
       expect(result.entryId).toBe("entry-scale-18");
+    }
+  });
+
+  it("refuses an entry that names itself as the entry it reverses, exactly as postEntry does — catches a rebuild that records the entry id before checking the reversal target, where a self-reversal replays cleanly and then blocks the genuine reversal of that entry as a duplicate", () => {
+    const selfReversal = twoLineEntry({
+      entryId: "entry-ouroboros",
+      kind: "reversal",
+      debit: availableAccount,
+      credit: contributedAccount,
+      amountBase: 10n,
+      reversesEntryId: "entry-ouroboros",
+    });
+
+    const replayed = rebuildBalances([selfReversal]);
+    const posted = postEntry([], selfReversal);
+
+    expect(replayed.outcome).toBe("refused");
+    if (replayed.outcome === "refused") {
+      expect(replayed.refusal.reason.code).toBe("UNKNOWN_REVERSAL_TARGET");
+      expect(replayed.entryId).toBe("entry-ouroboros");
+    }
+    // The incremental path and the replay path agree about the same entry;
+    // a journal one of them accepts and the other refuses is a journal that
+    // cannot be restarted from.
+    expect(posted.outcome).toBe("refused");
+    if (posted.outcome === "refused") {
+      expect(posted.refusal.reason.code).toBe("UNKNOWN_REVERSAL_TARGET");
     }
   });
 });

@@ -122,8 +122,11 @@ export const HOLDINGS_STATE_RESERVABILITY: Readonly<Record<HoldingsState, StateR
  * A canonical asset id: chain plus contract/mint or native denomination,
  * never a bare ticker (`AGENTS.md` "Financial authority and safety"). This
  * package does not resolve identity, it only refuses to key an account on a
- * string that cannot be a canonical id or that would make an account key
- * ambiguous — `|` is the key separator, so it is excluded here.
+ * string that cannot be a canonical id. `|` is excluded because it is the
+ * account-key separator and a literal one would make a key hard to read or
+ * split by hand — not because the key would otherwise be ambiguous.
+ * `accountKey` is injective either way: its first two segments come from
+ * closed vocabularies, so whatever follows the second `|` is the asset id.
  *
  * Seam: `packages/contracts`'s asset-identity module owns this vocabulary
  * once it lands, and `assetId` becomes its type instead of a local string.

@@ -32,6 +32,7 @@ export {
   fromBaseUnits,
   toBaseUnits,
   MAX_ASSET_SCALE,
+  MAX_BASE_UNIT_MAGNITUDE,
   MIN_ASSET_SCALE,
 } from "./base-units";
 export type { BaseUnitResult, DecimalResult } from "./base-units";

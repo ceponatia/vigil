@@ -62,7 +62,6 @@ export function rebuildBalances(entries: readonly JournalEntry[]): RebuildResult
     if (seenEntryIds.has(entry.entryId)) {
       return rebuildRefusal("DUPLICATE_ENTRY_ID", `entry ${entry.entryId} appears twice in the replayed journal`, entry.entryId);
     }
-    seenEntryIds.add(entry.entryId);
 
     if (seenIdempotencyKeys.has(entry.idempotencyKey)) {
       return rebuildRefusal(
@@ -83,6 +82,12 @@ export function rebuildBalances(entries: readonly JournalEntry[]): RebuildResult
       }
       reversedEntryIds.add(target);
     }
+
+    // Added only after the reversal check, so an entry that names itself as
+    // the entry it reverses is refused here exactly as `postEntry` refuses
+    // it. Adding it first would let a self-reversal replay cleanly and then
+    // block the genuine reversal of that entry as a duplicate.
+    seenEntryIds.add(entry.entryId);
 
     for (const line of entry.lines) {
       const knownScale = scaleByAsset.get(line.account.assetId);
