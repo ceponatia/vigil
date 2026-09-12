@@ -69,6 +69,8 @@ describe("evaluateQuoteFreshness — corruption and schema-invalid input", () =>
     { name: "a bidPrice that is a JS number, not a DecimalString", raw: { ...validQuote, bidPrice: 250 } },
     { name: "missing timestamps entirely", raw: { ...validQuote, timestamps: undefined } },
     { name: "a quoteAcquiredAt that is not a valid ISO-8601 UTC string", raw: { ...validQuote, timestamps: { ...validQuote.timestamps, quoteAcquiredAt: "not-a-timestamp" } } },
+    { name: "a non-positive bidQuantity (corrupt top-of-book liquidity)", raw: { ...validQuote, bidQuantity: "0" } },
+    { name: "an ad hoc instrumentId never derived from canonicalInstrumentId", raw: { ...validQuote, instrumentId: "instrument-a" } },
   ];
 
   it.each(corruptCases)("$name is treated as unusable input: non-executable, STALE_QUOTE, never thrown", ({ raw }) => {
@@ -78,6 +80,29 @@ describe("evaluateQuoteFreshness — corruption and schema-invalid input", () =>
     expect(result.executable).toBe(false);
     if (!result.executable) {
       expect(result.reasonCode).toBe("STALE_QUOTE");
+    }
+  });
+
+  // The owning matrix (all four money fields, all three non-positive
+  // spellings) lives in quote-snapshot.test.ts, where quoteSnapshotSchema's
+  // positivity refinement is defined — this proves only that
+  // evaluateQuoteFreshness is correctly wired to that refinement for
+  // every field, and that the STALE_QUOTE detail names whichever one
+  // failed.
+  it("blocks every non-positive price/quantity field, naming the offending field in the detail", () => {
+    const moneyFields = ["bidPrice", "askPrice", "bidQuantity", "askQuantity"] as const;
+    const nonPositiveValues = ["-1", "0", "0.00"];
+
+    for (const field of moneyFields) {
+      for (const value of nonPositiveValues) {
+        const raw = { ...validQuote, [field]: value };
+        const result = evaluateQuoteFreshness({ raw, now, maxAgeMs: MAX_AGE_MS });
+        expect(result.executable).toBe(false);
+        if (!result.executable) {
+          expect(result.reasonCode).toBe("STALE_QUOTE");
+          expect(result.detail).toContain(field);
+        }
+      }
     }
   });
 

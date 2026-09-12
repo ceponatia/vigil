@@ -13,7 +13,15 @@ import { instrumentIdSchema } from "./instrument-identity";
  *
  * Every price and quantity is a `DecimalString` (@vigil/contracts
  * money.ts): never a JavaScript number, never routed through
- * `parseFloat`/`Number()`/`toFixed`.
+ * `parseFloat`/`Number()`/`toFixed`. Beyond the wire-format check
+ * `decimalStringSchema` already runs, every price and quantity here must
+ * be strictly positive: `"-1"`, `"0"`, and `"0.00"` are schema-legal
+ * `DecimalString`s (negative and zero are both valid amounts elsewhere —
+ * a reservation, a fee — so `decimalStringSchema` itself has no opinion
+ * on sign) but corrupt top-of-book liquidity, since a quote cannot
+ * legitimately offer a non-positive price or size. Positivity is decided
+ * from the string alone (no leading "-", and not the zero spelling), not
+ * by parsing it as a number.
  *
  * This schema does not reject a crossed book (`askPrice` at or below
  * `bidPrice`) — that comparison needs decimal arithmetic on two
@@ -23,12 +31,28 @@ import { instrumentIdSchema } from "./instrument-identity";
  * primitive that future slice adds, not as an arithmetic implementation
  * here.
  */
+
+// Matches exactly the "this decimal string represents zero" branch of
+// decimalStringSchema's own DECIMAL_STRING_PATTERN — "0", "0.0", "0.00",
+// and so on — so this stays in lock-step with that pattern's definition
+// of zero rather than re-deriving it independently.
+const ZERO_DECIMAL_STRING_PATTERN = /^0(?:\.0+)?$/;
+
+function positiveDecimalString(fieldName: string) {
+  return decimalStringSchema.refine(
+    (value) => !value.startsWith("-") && !ZERO_DECIMAL_STRING_PATTERN.test(value),
+    {
+      message: `${fieldName} must be a strictly positive decimal string — a quote cannot offer a non-positive price or size`,
+    },
+  );
+}
+
 export const quoteSnapshotSchema = z.object({
   instrumentId: instrumentIdSchema,
-  bidPrice: decimalStringSchema,
-  askPrice: decimalStringSchema,
-  bidQuantity: decimalStringSchema,
-  askQuantity: decimalStringSchema,
+  bidPrice: positiveDecimalString("bidPrice"),
+  askPrice: positiveDecimalString("askPrice"),
+  bidQuantity: positiveDecimalString("bidQuantity"),
+  askQuantity: positiveDecimalString("askQuantity"),
   timestamps: quoteTimestampsSchema,
 });
 

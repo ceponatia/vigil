@@ -34,4 +34,37 @@ describe("quoteSnapshotSchema", () => {
     const candidate = { ...validQuote, askPrice: "2.5e2" };
     expect(quoteSnapshotSchema.safeParse(candidate).success).toBe(false);
   });
+
+  it.each(["instrument-a", "BTC-USD"])(
+    "rejects the ad hoc instrumentId %s without throwing — it was never derived from canonicalInstrumentId",
+    (instrumentId) => {
+      const candidate = { ...validQuote, instrumentId };
+      expect(() => quoteSnapshotSchema.safeParse(candidate)).not.toThrow();
+      expect(quoteSnapshotSchema.safeParse(candidate).success).toBe(false);
+    },
+  );
+});
+
+// Kills the "corrupt top-of-book liquidity marked executable" bug class:
+// decimalStringSchema alone admits "-1", "0", and "0.00" (negative and
+// zero amounts are legitimate elsewhere — a fee, a reservation — so it
+// has no opinion on sign), but a quote cannot legitimately offer a
+// non-positive price or size. All four money fields must reject all
+// three non-positive spellings.
+describe("quoteSnapshotSchema — positivity", () => {
+  const moneyFields = ["bidPrice", "askPrice", "bidQuantity", "askQuantity"] as const;
+  const nonPositiveValues = ["-1", "0", "0.00"];
+
+  for (const field of moneyFields) {
+    it.each(nonPositiveValues)(`rejects ${field} = %s (non-positive) without throwing`, (value) => {
+      const candidate = { ...validQuote, [field]: value };
+      expect(() => quoteSnapshotSchema.safeParse(candidate)).not.toThrow();
+      expect(quoteSnapshotSchema.safeParse(candidate).success).toBe(false);
+    });
+
+    it(`accepts a genuinely positive ${field}`, () => {
+      const candidate = { ...validQuote, [field]: "0.01" };
+      expect(quoteSnapshotSchema.safeParse(candidate).success).toBe(true);
+    });
+  }
 });

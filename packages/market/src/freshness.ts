@@ -61,10 +61,16 @@ export type EvaluateQuoteFreshnessParams = {
 export function evaluateQuoteFreshness(params: EvaluateQuoteFreshnessParams): QuoteEvaluation {
   const parsed = quoteSnapshotSchema.safeParse(params.raw);
   if (!parsed.success) {
+    // Names the offending field(s) — e.g. "bidQuantity" for a non-positive
+    // top-of-book size, or "instrumentId" for a ticker-only string — so a
+    // caller does not have to re-run the schema itself to find out which
+    // part of a rejected quote was actually wrong.
+    const fields = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".")).filter((path) => path.length > 0))];
+    const fieldSummary = fields.length > 0 ? ` (${fields.join(", ")})` : "";
     return {
       executable: false,
       reasonCode: "STALE_QUOTE",
-      detail: 'quote snapshot failed schema validation and is treated as unusable (docs/testing.md "Quote/book is stale or corrupt")',
+      detail: `quote snapshot failed schema validation${fieldSummary} and is treated as unusable (docs/testing.md "Quote/book is stale or corrupt")`,
     };
   }
 
