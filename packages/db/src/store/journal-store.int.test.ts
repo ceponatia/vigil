@@ -373,3 +373,30 @@ describe("record requirements", () => {
     }
   });
 });
+
+// The store shares `@vigil/contracts`' asset-identity schema with the
+// ledger now, rather than leaving the `asset_scales` check constraint to
+// catch a bad id after a round trip.
+describe("asset identity at the door", () => {
+  it("refuses a posting to a bare ticker before any write — catches an id that only the database would have rejected, which reaches the caller as a constraint violation instead of a diagnostic naming the asset", async () => {
+    const bogus: StoreEntry = {
+      ...fundingEntry("entry-ticker", 1_000n),
+      lines: [
+        { ...debitOf(heldIn("available"), 1_000n), account: { family: "holdings", assetId: "BTC", holdingsState: "available" } },
+        {
+          ...creditOf(counterFamily("contributed-capital"), 1_000n),
+          account: { family: "contributed-capital", assetId: "BTC", holdingsState: null },
+        },
+      ],
+    };
+
+    const result = await postJournalEntry(db, bogus);
+
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.code).toBe("MALFORMED_ENTRY");
+      expect(result.detail).toContain("canonical asset id");
+    }
+    expect(await loadJournalEntries(db)).toHaveLength(0);
+  });
+});

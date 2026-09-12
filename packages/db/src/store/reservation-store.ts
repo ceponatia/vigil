@@ -1,3 +1,4 @@
+import { assetIdSchema } from "@vigil/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import type { VigilDatabase } from "../client";
@@ -139,6 +140,15 @@ export async function reserveAvailable(db: VigilDatabase, request: ReserveReques
       outcome: "refused",
       code: "MALFORMED_ENTRY",
       detail: `reservation ${request.reservationId} carries a timestamp that is not an ISO-8601 UTC instant on a real calendar day`,
+      availableBase: null,
+    };
+  }
+
+  if (!assetIdSchema.safeParse(request.assetId).success) {
+    return {
+      outcome: "refused",
+      code: "MALFORMED_ENTRY",
+      detail: `reservation ${request.reservationId} names ${request.assetId}, which is not a canonical asset id`,
       availableBase: null,
     };
   }

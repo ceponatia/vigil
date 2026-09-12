@@ -1,3 +1,4 @@
+import { assetIdSchema } from "@vigil/contracts";
 import { sql } from "drizzle-orm";
 
 import { createDbClient, type VigilDatabase } from "../client";
@@ -24,11 +25,14 @@ import type { StoreAccount, StoreEntry, StoreLine, StoreProvenance } from "../st
  * here.
  */
 
-export const TEST_ASSET = "1337|native|VGLSTABLE|SYNTHETIC_TESTNET";
+// Parsed through `@vigil/contracts`' schema rather than written out as a
+// bare string: a fixture that could not itself pass the identity rule would
+// be testing the store against records the application cannot produce.
+export const TEST_ASSET: string = assetIdSchema.parse("1337|native|VGLSTABLE|SYNTHETIC_TESTNET");
 export const TEST_SCALE = 6;
 
 /** A second synthetic asset, for the claims that need two. */
-export const TEST_OTHER_ASSET = "1337|native|VGLOTHER|SYNTHETIC_TESTNET";
+export const TEST_OTHER_ASSET: string = assetIdSchema.parse("1337|native|VGLOTHER|SYNTHETIC_TESTNET");
 
 /**
  * The provenance a fixture record carries: deterministic, obviously

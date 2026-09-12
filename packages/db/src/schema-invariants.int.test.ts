@@ -1,3 +1,4 @@
+import { assetIdSchema } from "@vigil/contracts";
 import { is, sql } from "drizzle-orm";
 import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
@@ -196,24 +197,37 @@ describe("idempotency and correlation keys", () => {
 });
 
 describe("asset identity", () => {
-  it("refuses to register a bare ticker as an asset — catches the ticker-as-identity bug at the one table every asset id in the ledger points at: BTC on two chains would otherwise share an account key, and one balance would reconcile against neither venue", async () => {
-    const failure = await errorFrom(() =>
-      db.execute(sql`insert into ${assetScales} (asset_id, asset_scale) values ('BTC', 8)`),
-    );
+  // The check constraint restates `@vigil/contracts`' canonical shape as a
+  // SQL literal, because a Postgres constraint cannot import a TypeScript
+  // regex. These cases hold the two definitions to each other: for every
+  // id, what the database does must match what the shared schema says.
+  const identities: ReadonlyArray<{ name: string; assetId: string }> = [
+    { name: "a bare ticker", assetId: "BTC" },
+    { name: "a ticker pair", assetId: "BTC-USD" },
+    { name: "three components", assetId: "1|native|ETH" },
+    { name: "an unknown kind", assetId: "1|ticker|BTC|mainnet" },
+    { name: "a component carrying the instrument separator", assetId: "1|native|ETH/WBTC|mainnet" },
+    { name: "a contract identity", assetId: "1|contract|0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48|ethereum" },
+    { name: "a mint identity", assetId: "solana:mainnet|mint|EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v|solana" },
+    { name: "a native identity", assetId: "cosmos:osmosis-1|native|uosmo|osmosis" },
+  ];
 
-    expect(postgresErrorCode(failure)).toBe(PG_CHECK_VIOLATION);
-    expect(postgresConstraintName(failure)).toBe("asset_scales_canonical_asset_id");
-  });
+  it.each(identities)(
+    "treats $name the same way @vigil/contracts does — catches the constraint's SQL literal drifting from the schema every caller validates against, where an id the application accepts is rejected on write, or one it rejects is persisted",
+    async ({ assetId }) => {
+      const acceptedBySchema = assetIdSchema.safeParse(assetId).success;
 
-  it("accepts a canonical four-component identity — the shape @vigil/contracts derives, so the constraint refuses tickers without refusing real assets", async () => {
-    const accepted = await errorFrom(() =>
-      db.execute(
-        sql`insert into ${assetScales} (asset_id, asset_scale) values ('1|contract|0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48|ethereum', 6)`,
-      ),
-    );
+      const failure = await errorFrom(() =>
+        db.execute(sql`insert into ${assetScales} (asset_id, asset_scale) values (${assetId}, 6)`),
+      );
+      const acceptedByDatabase = failure === null;
 
-    expect(accepted).toBeNull();
-  });
+      expect([assetId, acceptedByDatabase]).toEqual([assetId, acceptedBySchema]);
+      if (!acceptedByDatabase) {
+        expect(postgresConstraintName(failure)).toBe("asset_scales_canonical_asset_id");
+      }
+    },
+  );
 });
 
 describe("append-only journal", () => {

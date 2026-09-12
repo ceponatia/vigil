@@ -1,3 +1,4 @@
+import { assetIdSchema } from "@vigil/contracts";
 import { asc, eq, inArray, sql } from "drizzle-orm";
 
 import type { VigilDatabase } from "../client";
@@ -292,6 +293,15 @@ function preflight(entry: StoreEntry): EntryPreflight {
       outcome: "refused",
       code: "MALFORMED_ENTRY",
       detail: `entry ${entry.entryId} carries a timestamp that is not an ISO-8601 UTC instant on a real calendar day`,
+    };
+  }
+
+  const unknownAsset = entry.lines.find((line) => !assetIdSchema.safeParse(line.account.assetId).success);
+  if (unknownAsset !== undefined) {
+    return {
+      outcome: "refused",
+      code: "MALFORMED_ENTRY",
+      detail: `entry ${entry.entryId} posts to ${unknownAsset.account.assetId}, which is not a canonical asset id`,
     };
   }
 
