@@ -1,5 +1,4 @@
 import {
-  accountKeyFor,
   createDbClient,
   journalEntries,
   journalLines,
@@ -9,11 +8,6 @@ import {
   postJournalEntry,
   reservations,
   reserveAvailable,
-  accountFamilyEnum,
-  holdingsStateEnum,
-  journalEntryKindEnum,
-  postingDirectionEnum,
-  reservationStateEnum,
   type StoreEntry,
   type VigilDatabase,
 } from "@vigil/db";
@@ -22,11 +16,6 @@ import {
   compareBalanceSheets,
   parseJournalEntry,
   rebuildBalances,
-  ACCOUNT_FAMILIES,
-  ENTRY_KINDS,
-  HOLDINGS_STATES,
-  POSTING_DIRECTIONS,
-  RESERVATION_STATES,
   type AccountBalance,
   type BalanceSheet,
   type JournalEntry,
@@ -51,6 +40,15 @@ const client = createDbClient({
   applicationName: "vigil-replay-test",
 });
 const db: VigilDatabase = client.db;
+
+/**
+ * Every account the history below touches: available and reserved stable,
+ * available volatile, the stable and volatile exchange clearing accounts,
+ * contributed capital, fees, and realized P&L. Pinned exactly, because a
+ * rebuild that quietly invents or drops an account is the defect this suite
+ * exists to catch.
+ */
+const EXPECTED_ACCOUNTS = 8;
 
 const STABLE = "test:stable-6";
 const STABLE_SCALE = 6;
@@ -200,7 +198,7 @@ describe("rebuilding balances from the journal alone", () => {
 
     // Non-vacuous: a rebuild of nothing would also report no differences.
     expect(rebuilt.entryCount).toBe(history.length + 1);
-    expect(rebuilt.balances.size).toBeGreaterThan(4);
+    expect(rebuilt.balances.size).toBe(EXPECTED_ACCOUNTS);
     expect(persisted.size).toBe(rebuilt.balances.size);
 
     expect(compareBalanceSheets(rebuilt.balances, persisted)).toEqual([]);
@@ -257,32 +255,5 @@ describe("rebuilding balances from the journal alone", () => {
     );
 
     expect(reserved?.debitBase).toBe(300_000_000n);
-  });
-});
-
-// The two packages cannot import each other, so these are the assertions
-// that keep their shared vocabulary from drifting apart. Seam: when
-// packages/contracts owns these registries, both sides take them from there
-// and this describe block goes away.
-describe("the persisted vocabulary and the ledger's vocabulary", () => {
-  it("declare exactly the same holdings states — catches a seventh state added to one side only, which would make a rebuild drop or invent a balance", () => {
-    expect(holdingsStateEnum.enumValues).toEqual([...HOLDINGS_STATES]);
-  });
-
-  it("declare exactly the same account families, entry kinds, posting directions, and reservation states — catches a kind that can be written but not replayed", () => {
-    expect(accountFamilyEnum.enumValues).toEqual([...ACCOUNT_FAMILIES]);
-    expect(journalEntryKindEnum.enumValues).toEqual([...ENTRY_KINDS]);
-    expect(postingDirectionEnum.enumValues).toEqual([...POSTING_DIRECTIONS]);
-    expect(reservationStateEnum.enumValues).toEqual([...RESERVATION_STATES]);
-  });
-
-  it("derive the same account key for every family and state — catches one side changing the separator or the null placeholder, which would silently split one account into two", () => {
-    for (const family of ACCOUNT_FAMILIES) {
-      const states = family === "holdings" ? HOLDINGS_STATES : ([null] as const);
-      for (const holdingsState of states) {
-        const account = { family, assetId: STABLE, holdingsState };
-        expect(accountKeyFor(account)).toBe(accountKey(account));
-      }
-    }
   });
 });

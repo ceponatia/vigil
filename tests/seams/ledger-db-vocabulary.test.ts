@@ -1,0 +1,57 @@
+import {
+  accountKeyFor,
+  accountFamilyEnum,
+  holdingsStateEnum,
+  journalEntryKindEnum,
+  postingDirectionEnum,
+  reservationStateEnum,
+} from "@vigil/db";
+import {
+  accountKey,
+  ACCOUNT_FAMILIES,
+  ENTRY_KINDS,
+  HOLDINGS_STATES,
+  POSTING_DIRECTIONS,
+  RESERVATION_STATES,
+} from "@vigil/ledger";
+import { describe, expect, it } from "vitest";
+
+// `@vigil/ledger` and `@vigil/db` may not import each other — the layer
+// graph runs one way — so the same vocabulary is declared twice: once as a
+// TypeScript registry and once as a Postgres enum. These assertions are the
+// only thing keeping the two spellings in step.
+//
+// This is a *unit* suite despite being about the database. Both index
+// modules are side-effect-free (the client is a factory; importing it opens
+// no connection), the values compared are constants, and no claim here needs
+// a migrated schema. Running it under `integration` would mean a vocabulary
+// drift that breaks every replay is reported only when Postgres is
+// available, and skipped on a change the classifier calls docs-only.
+//
+// Seam: when `packages/contracts` owns these registries, both sides take
+// them from there and this file goes away.
+
+const SAMPLE_ASSET = "test:stable-6";
+
+describe("the persisted vocabulary and the ledger's vocabulary", () => {
+  it("declare exactly the same holdings states, in the same order — catches a seventh state added to one side only, which would make a rebuild drop or invent a balance", () => {
+    expect(holdingsStateEnum.enumValues).toEqual([...HOLDINGS_STATES]);
+  });
+
+  it("declare exactly the same account families, entry kinds, posting directions, and reservation states — catches a kind that can be written but not replayed", () => {
+    expect(accountFamilyEnum.enumValues).toEqual([...ACCOUNT_FAMILIES]);
+    expect(journalEntryKindEnum.enumValues).toEqual([...ENTRY_KINDS]);
+    expect(postingDirectionEnum.enumValues).toEqual([...POSTING_DIRECTIONS]);
+    expect(reservationStateEnum.enumValues).toEqual([...RESERVATION_STATES]);
+  });
+
+  it("derive the same account key for every family and state the vocabulary allows — catches one side changing the separator or the placeholder for an absent state, which would silently split one account into two", () => {
+    for (const family of ACCOUNT_FAMILIES) {
+      const states = family === "holdings" ? HOLDINGS_STATES : ([null] as const);
+      for (const holdingsState of states) {
+        const account = { family, assetId: SAMPLE_ASSET, holdingsState };
+        expect(accountKeyFor(account)).toBe(accountKey(account));
+      }
+    }
+  });
+});

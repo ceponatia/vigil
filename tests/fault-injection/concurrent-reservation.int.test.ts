@@ -93,6 +93,13 @@ beforeEach(async () => {
   );
   const funded = await postJournalEntry(strategyOne.db, fundingEntry());
   expect(funded.outcome).toBe("posted");
+
+  // Both pools connect lazily. Without this, the second strategy's first
+  // query includes a TCP connect and authentication handshake, which is
+  // easily long enough for the first strategy's whole transaction to commit
+  // — the two calls would then be sequential, and the race this suite exists
+  // to run would never actually happen.
+  await Promise.all([strategyOne.db.execute(sql`select 1`), strategyTwo.db.execute(sql`select 1`)]);
 });
 
 async function availableAndReserved(): Promise<{ available: bigint; reserved: bigint }> {
@@ -118,7 +125,11 @@ describe("two strategies reserving the same funds", () => {
     expect(refused).not.toBeNull();
     if (refused !== null && refused.outcome === "refused") {
       expect(refused.code).toBe("INSUFFICIENT_AVAILABLE");
-      // The loser saw the winner's committed balance, not the opening one.
+      // This figure is what separates the two ways the aggregate could have
+      // stayed feasible. The loser reporting the *remaining* balance means it
+      // waited on the row lock, re-read what the winner committed, and
+      // decided against it. A refusal that had instead bounced off the
+      // holdings check constraint would carry no measured balance at all.
       expect(refused.availableBase).toBe(FUNDED_BASE - HALF_PLUS_BASE);
     }
 
