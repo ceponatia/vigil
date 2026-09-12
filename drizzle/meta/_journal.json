@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1789247542224,
+      "tag": "0000_ledger_baseline",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789247565077,
+      "tag": "0001_journal_append_only_guard",
+      "breakpoints": true
+    }
+  ]
+}

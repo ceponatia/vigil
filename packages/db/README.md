@@ -57,7 +57,29 @@ Logical record families are not an instruction to create every table before
 the first paper trade — normalize around the first vertical slice and extend
 as later slices need to.
 
-## Status
+## Column conventions
 
-Empty scaffold. First filled under planning ID BOOT-04, with individual
-schema modules landing per the record family a given slice needs.
+- **Money and quantities** are `numeric(78, 0)` — an exact integer count of
+  base units — beside an `asset_scale` column that says how many decimal
+  places those units represent. 78 digits hold a 256-bit integer, so an
+  18-decimal token balance cannot overflow the column the way an 8-byte
+  `bigint` would. No column is `real` or `double precision`.
+- **Timestamps** are `timestamptz(3)`: millisecond precision, matching what
+  an ISO-8601 timestamp carries, so a stored instant is always one the
+  application can read back and replay exactly.
+- **Idempotency and correlation keys** carry unique constraints, not merely
+  indexes.
+- **Journal tables are append-only.** A trigger rejects every `UPDATE` and
+  `DELETE` against a posted entry or posting; a correction is a reversing
+  entry. `ledger_balances` is a projection of the journal and is updated in
+  place.
+- **Vocabularies are Postgres enums**, so a column cannot hold a holdings
+  state, account family, entry kind, or reservation state that does not
+  exist.
+
+## Built modules
+
+`journal` (journal entries, postings, and the balance projection) and
+`intents` (reservations) exist, with the baseline migration under
+`drizzle/`. The remaining record families above are created by the slice
+that needs them.
