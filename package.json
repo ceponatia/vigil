@@ -14,12 +14,12 @@
     "lint:cycles": "madge --circular --extensions ts,tsx apps packages",
     "typecheck": "pnpm -r --workspace-concurrency=1 run typecheck",
     "test": "vitest run --project unit",
-    "test:int": "vitest run --no-file-parallelism --project integration",
+    "test:int": "vitest run --no-file-parallelism --project integration --passWithNoTests",
     "jscpd": "jscpd",
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate",
+    "db:migrate": "if [ -f drizzle/meta/_journal.json ] || ls drizzle/*.sql >/dev/null 2>&1; then exec drizzle-kit migrate; fi; echo 'db:migrate: no migrations yet (drizzle/ holds no migration)'",
     "db:studio": "drizzle-kit studio"
   },
   "devDependencies": {

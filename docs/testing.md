@@ -23,6 +23,8 @@ CI job names are fixed: `classify changes`, `lint`, `static checks`, `unit tests
 | `integration`        | Postgres via Docker Compose, `pnpm db:migrate` from zero, then `pnpm test:int`                 |
 | `verify`             | Aggregate: requires every applicable job to succeed and every inapplicable job to be skipped or successful |
 
+`pnpm test:int` passes `--passWithNoTests` while no `*.int.test.ts` exists, so the `integration` job proves Compose start-up and migration from zero on its own; `pnpm test` fails on an empty unit project on purpose.
+
 A draft pull request runs nothing. A ready pull request runs the jobs its changed paths make applicable. A green `verify` proves only that the applicable jobs ran and passed — it does not claim an inapplicable job, or a test file outside a job's selection, ran.
 
 ## Local execution boundary
