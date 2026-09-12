@@ -1,4 +1,11 @@
-// Placeholder: @vigil/market is implemented under planning ID BOOT-03. This file
-// exists so `tsc -p` has an input and the package's `exports` entry
-// resolves; it has no runtime behavior.
-export {};
+export { canonicalInstrumentId, instrumentIdSchema, instrumentIdentitySchema } from "./instrument-identity";
+export type { InstrumentId, InstrumentIdentity } from "./instrument-identity";
+
+export { quoteSnapshotSchema } from "./quote-snapshot";
+export type { QuoteSnapshot } from "./quote-snapshot";
+
+export { evaluateQuoteFreshness } from "./freshness";
+export type { EvaluateQuoteFreshnessParams, QuoteEvaluation } from "./freshness";
+
+export { SYNTHETIC_INSTRUMENT_ID, generateSyntheticQuotes } from "./synthetic-feed";
+export type { SyntheticFeedParams } from "./synthetic-feed";
