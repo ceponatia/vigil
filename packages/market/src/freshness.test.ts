@@ -42,11 +42,15 @@ describe("evaluateQuoteFreshness — staleness", () => {
   it("produces STALE_QUOTE for a quote far older than its threshold and blocks new risk downstream — the executable:false shape carries no usable quote for a caller to act on", () => {
     const now = parse("2024-01-01T01:00:00.000Z"); // one hour old
     const result = evaluateQuoteFreshness({ raw: validQuote, now, maxAgeMs: MAX_AGE_MS });
-    expect(result).toEqual({
-      executable: false,
-      reasonCode: "STALE_QUOTE",
-      detail: expect.stringContaining("exceeding the configured"),
-    });
+    // Asserted field by field, rather than via `toEqual({ ..., detail:
+    // expect.stringContaining(...) })`: vitest types `stringContaining`'s
+    // return as `any`, and embedding it as an object-literal property
+    // trips `@typescript-eslint/no-unsafe-assignment` on that property.
+    expect(result.executable).toBe(false);
+    if (!result.executable) {
+      expect(result.reasonCode).toBe("STALE_QUOTE");
+      expect(result.detail).toContain("exceeding the configured");
+    }
   });
 
   it("never throws for a stale input, however old", () => {

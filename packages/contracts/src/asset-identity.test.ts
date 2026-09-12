@@ -99,7 +99,7 @@ describe("assetIdentitySchema", () => {
   // code is "parsing rejects it without throwing" rather than "the two
   // derive different ids" — there is no id to derive from a value the
   // schema never accepts in the first place.
-  it("rejects a contractAddress or withdrawalNetwork containing the reserved "|" separator, without throwing — a value that reached canonicalAssetId undetected could collide with a differently-split pair that joins to the same string", () => {
+  it("rejects a contractAddress or withdrawalNetwork containing the reserved '|' separator, without throwing — a value that reached canonicalAssetId undetected could collide with a differently-split pair that joins to the same string", () => {
     const pipeInContractAddress = { kind: "contract", chainId: "1", contractAddress: "a|b", withdrawalNetwork: "c" };
     const pipeInWithdrawalNetwork = { kind: "contract", chainId: "1", contractAddress: "a", withdrawalNetwork: "b|c" };
 
@@ -109,7 +109,7 @@ describe("assetIdentitySchema", () => {
     expect(assetIdentitySchema.safeParse(pipeInWithdrawalNetwork).success).toBe(false);
   });
 
-  it("rejects a chainId, mintAddress, or nativeDenomination containing the reserved "/" separator, without throwing — that character is reserved for @vigil/market's canonicalInstrumentId, one layer up", () => {
+  it("rejects a chainId, mintAddress, or nativeDenomination containing the reserved '/' separator, without throwing — that character is reserved for @vigil/market's canonicalInstrumentId, one layer up", () => {
     const slashInChainId = { kind: "native", chainId: "1/337", nativeDenomination: "VGLBASE", withdrawalNetwork: "SYNTHETIC_TESTNET" };
     const slashInMintAddress = { kind: "mint", chainId: "solana:mainnet-beta", mintAddress: "mint/address", withdrawalNetwork: "SPL" };
 

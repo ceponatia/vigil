@@ -24,7 +24,7 @@ describe("instrumentIdentitySchema", () => {
   // component is rejected at the asset-identity layer before an instrument
   // could ever be built from it — proven here through the composed
   // instrumentIdentitySchema rather than re-implemented.
-  it("rejects a base or quote asset whose nativeDenomination contains the reserved "/" separator, without throwing — canonicalInstrumentId joins two asset ids with "/", so this must be caught at the asset-identity layer before an instrument can be built at all", () => {
+  it("rejects a base or quote asset whose nativeDenomination contains the reserved '/' separator, without throwing — canonicalInstrumentId joins two asset ids with '/', so this must be caught at the asset-identity layer before an instrument can be built at all", () => {
     const slashInBaseDenomination = {
       baseAsset: { kind: "native", chainId: "1337", nativeDenomination: "VGL/BASE", withdrawalNetwork: "SYNTHETIC_TESTNET" },
       quoteAsset: quote,
