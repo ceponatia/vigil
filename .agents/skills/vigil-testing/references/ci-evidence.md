@@ -4,10 +4,11 @@ Read this before claiming a test ran or a change is fully covered.
 
 The repository and its CI exist: `.github/workflows/ci.yml` runs on
 GitHub-hosted runners for every pull request into `main` or `prod` and on a
-manual `workflow_dispatch` — deliberately never on a push, so a commit that
-reaches `main` outside a PR carries no run of its own. Evidence is the
-workflow run at the exact head SHA under review — never a neighboring run, a
-stale head, or an inference from a green badge elsewhere.
+manual `workflow_dispatch` — deliberately never on a push, so no commit on
+`main` carries a run of its own; the evidence is the run at the pull
+request's head SHA. Evidence is the workflow run at the exact head SHA under
+review — never a neighboring run, a stale head, or an inference from a green
+badge elsewhere.
 
 The fixed job names are `classify changes`, `lint`, `static checks`,
 `unit tests`, `integration`, and the required aggregate `verify`. The
@@ -24,7 +25,7 @@ not that every suite in the repository ran.
   replay or fault-injection scenario that does need Postgres for a real
   reservation, reconciliation, or persistence path.
 - `lint` and `static checks` run ESLint (type-aware), `lint:cycles` (madge),
-  and `jscpd`; neither executes a test file.
+  `pnpm typecheck`, and `jscpd`; neither executes a test file.
 
 For completion evidence:
 
