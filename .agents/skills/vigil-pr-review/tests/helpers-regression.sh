@@ -60,7 +60,11 @@ run_case wait-failing 1 'FAILED for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 # NEWEST CI run for the head — a draft-guarded run with nothing behind it — is
 # still the documented exit 1; this kills a drop written on the bucket or on the
 # rollup alone, which would turn that failure into an endless wait.
-run_case wait-skipped-only 1 $'  SKIPPED\tCI/verify' wait-ci.sh 0
+# It also says so: a newest run whose own jobs did not run is indistinguishable
+# from the seconds before GitHub creates the ready-triggered run, and re-reading
+# is the only thing that resolves that — so the exit-1 report names it.
+run_case wait-skipped-only 1 $'  SKIPPED\tCI/verify' wait-ci.sh 0 \
+  'note: run 34719260700 is the newest CI run for this head and its jobs did not run.'
 # Supersession is scoped to CI/verify and to its own workflow. Beside the very
 # draft-then-ready shape that triggers the drop, another workflow's skipped
 # required check is still a failure; this kills a drop written on the bucket

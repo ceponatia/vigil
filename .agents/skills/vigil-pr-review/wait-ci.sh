@@ -175,6 +175,19 @@ while :; do
       elif jq -e 'any(.[]; .bucket == "fail" or .bucket == "cancel" or .bucket == "skipping")' <<<"$checks" >/dev/null; then
         echo "FAILED for head $head$run_note:"
         jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel" or .bucket == "skipping") | "  \(.state)\t\(.workflow)/\(.name)"' <<<"$checks"
+        # The one window this rule cannot close from a single read: the newest CI
+        # run for the head is itself a draft-guarded (skipped) or cancelled run,
+        # which is also what the head looks like in the seconds between marking a
+        # PR ready and GitHub creating the ready-triggered run. The verdict stays
+        # the documented exit 1 — this helper never invents a run it cannot see —
+        # but say so, because re-reading resolves it and nothing else will.
+        if { [ "$newest_conclusion" = skipped ] || [ "$newest_conclusion" = cancelled ]; } \
+          && jq -e 'any(.[]; .name == "verify" and .workflow == "CI"
+                           and (.bucket == "skipping" or .bucket == "cancel"))' <<<"$checks" >/dev/null; then
+          echo "note: run $newest_id is the newest CI run for this head and its jobs did not run."
+          echo "      If this PR was just marked ready, the ready-triggered run may not exist yet;"
+          echo "      re-run wait-ci.sh before treating this as a real failure."
+        fi
         echo "diagnose with ci-failure.sh $PR (from logs, never a local gate run)"
         exit 1
       elif jq -e 'any(.[]; .bucket == "pending")' <<<"$checks" >/dev/null; then
