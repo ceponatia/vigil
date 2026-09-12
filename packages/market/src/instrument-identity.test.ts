@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { assetIdentitySchema } from "@vigil/contracts";
-import type { AssetIdentity } from "@vigil/contracts";
 
 import { canonicalInstrumentId, instrumentIdSchema, instrumentIdentitySchema } from "./instrument-identity";
 import type { InstrumentIdentity } from "./instrument-identity";
@@ -44,10 +43,7 @@ describe("instrumentIdentitySchema", () => {
   // schema-parse-time rejection.
   it("cannot bypass identity validation via a raw baseAsset/quoteAsset object literal either — AssetIdentity's brand rejects it at compile time, one layer below canonicalInstrumentId", () => {
     // @ts-expect-error -- baseAsset is a plain object literal with no schema brand, so this assignment is a compile-time error even though the shape (including the reserved "/" it carries) otherwise matches AssetIdentity
-    const bypassed: InstrumentIdentity = {
-      baseAsset: { kind: "native", chainId: "1337", nativeDenomination: "VGL/BASE", withdrawalNetwork: "SYNTHETIC_TESTNET" },
-      quoteAsset: quote,
-    };
+    const bypassed: InstrumentIdentity = { baseAsset: { kind: "native", chainId: "1337", nativeDenomination: "VGL/BASE", withdrawalNetwork: "SYNTHETIC_TESTNET" }, quoteAsset: quote };
     // Still runs at runtime; the composed schema is the only gateway to an
     // actual InstrumentIdentity, and it refuses the same value.
     expect(instrumentIdentitySchema.safeParse(bypassed).success).toBe(false);
