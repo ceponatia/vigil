@@ -114,13 +114,18 @@ while :; do
       errors=0
       verify=$(jq -c '[.[] | select(.name == "verify" and .workflow == "CI")]' <<<"$checks")
       verify_count=$(jq 'length' <<<"$verify")
-      if [ "$verify_count" -gt 1 ] && jq -e 'any(.[]; .bucket == "skipping")' <<<"$verify" >/dev/null; then
-        # A draft-triggered run's skipped verify can linger in the rollup until the
-        # ready-triggered run creates its own verify check for the same head. Once a
-        # newer CI/verify exists for this head, the superseded skip is not a failure —
-        # drop it and judge readiness from the newer run's verify instead. A skipped
-        # verify with no newer run present (verify_count == 1) still fails below.
-        checks=$(jq -c '[.[] | select(.name != "verify" or .workflow != "CI" or .bucket != "skipping")]' <<<"$checks")
+      if jq -e 'any(.[]; .bucket == "skipping" or .bucket == "cancel")
+                and any(.[]; .bucket != "skipping" and .bucket != "cancel")' <<<"$verify" >/dev/null; then
+        # A skipped or cancelled CI/verify is treated as superseded whenever a live
+        # CI/verify (pending, pass, or fail) exists for this head — for example a
+        # draft-triggered run's skipped verify lingering after the ready-triggered
+        # run creates its own verify, or a draft run's verify left CANCELLED by the
+        # workflow's own concurrency: cancel-in-progress when the ready run starts.
+        # Drop the superseded entries and judge readiness from the live verify
+        # instead. A lone skipped/cancelled verify, or an all-skipped/all-cancelled
+        # set with no live verify to supersede it, still fails below.
+        checks=$(jq -c '[.[] | select(.name != "verify" or .workflow != "CI"
+                                      or (.bucket != "skipping" and .bucket != "cancel"))]' <<<"$checks")
         verify=$(jq -c '[.[] | select(.name == "verify" and .workflow == "CI")]' <<<"$checks")
         verify_count=$(jq 'length' <<<"$verify")
       fi

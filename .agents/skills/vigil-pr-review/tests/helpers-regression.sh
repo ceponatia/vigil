@@ -59,6 +59,11 @@ run_case wait-skipped-only 1 $'  SKIPPED\tCI/verify' wait-ci.sh 0
 # required check is still a failure; this kills a drop written on the bucket
 # alone, which would report GREEN over a skipped required peer check.
 run_case wait-peer-skipped 1 'Security/security' wait-ci.sh 0
+# A draft run's verify left CANCELLED by the workflow's own
+# concurrency: cancel-in-progress (the ready run starts while the draft run is
+# still queued) is superseded the same way a skip is: the ready run's own
+# verify decides pending vs. green.
+run_case wait-draft-cancelled-then-ready 0 'GREEN: required CI/verify succeeded for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 1
 # An unrelated successful check cannot satisfy the required aggregate.
 run_case wait-unrelated 2 'CI/verify is absent' wait-ci.sh 0
 run_case wait-no-checks 2 'no required checks registered' wait-ci.sh 0

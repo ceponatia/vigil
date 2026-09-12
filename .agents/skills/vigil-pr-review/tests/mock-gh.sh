@@ -68,6 +68,18 @@ if [ "$1 $2" = "pr checks" ]; then
       # supersedes: the CI/verify skip is dropped, the peer skip is not.
       printf '[{"name":"verify","workflow":"CI","bucket":"skipping","state":"SKIPPED","event":"pull_request","link":"https://example.test/run/skipped"},{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://example.test/run/1"},{"name":"security","workflow":"Security","bucket":"skipping","state":"SKIPPED","event":"pull_request","link":"https://example.test/run/2"}]\n'
       ;;
+    wait-draft-cancelled-then-ready)
+      # The workflow's own concurrency: cancel-in-progress cancels the draft run's
+      # verify when the ready run starts queued while the draft run is still
+      # queued, leaving a CANCELLED CI/verify beside the ready run's own verify
+      # for the same head — first pending, then passing.
+      count=$(next_count checks)
+      if [ "$count" -eq 1 ]; then
+        printf '[{"name":"verify","workflow":"CI","bucket":"cancel","state":"CANCELLED","event":"pull_request","link":"https://github.com/ceponatia/vigil/actions/runs/34716578875"},{"name":"verify","workflow":"CI","bucket":"pending","state":"IN_PROGRESS","event":"pull_request","link":"https://github.com/ceponatia/vigil/actions/runs/34716584247"}]\n'
+        exit 8
+      fi
+      printf '[{"name":"verify","workflow":"CI","bucket":"cancel","state":"CANCELLED","event":"pull_request","link":"https://github.com/ceponatia/vigil/actions/runs/34716578875"},{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://github.com/ceponatia/vigil/actions/runs/34716584247"}]\n'
+      ;;
     wait-failing|wait-stale)
       if [ "$scenario" = wait-stale ] && [ "$(next_count checks)" -eq 1 ]; then
         printf '[{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://example.test/run/old"}]\n'
