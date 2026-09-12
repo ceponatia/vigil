@@ -1,0 +1,116 @@
+import type { HoldingsState, LedgerAccount } from "../accounts";
+import { rebuildBalances, type BalanceSheet } from "../balances";
+import { buildEntry, type EntryKind, type JournalEntry } from "../journal";
+import type { ReservationRequest } from "../reservations";
+import { isoUtcTimestampSchema, type IsoUtcTimestamp } from "../timestamps";
+
+/**
+ * Builders for this package's own suites only. Never imported by production
+ * code, and never exported from `src/index.ts`.
+ *
+ * Every identifier here is obviously synthetic: `test:` prefixed asset ids
+ * that cannot be a real chain-plus-contract identity, and no address, key,
+ * or holding of any kind.
+ */
+
+/** A synthetic six-decimal settlement asset. Not a real asset id. */
+export const TEST_STABLE_ASSET = "test:stable-6";
+export const TEST_STABLE_SCALE = 6;
+
+/** A synthetic eighteen-decimal asset, to keep scale handling honest. */
+export const TEST_VOLATILE_ASSET = "test:volatile-18";
+export const TEST_VOLATILE_SCALE = 18;
+
+/** Parse a literal into a validated timestamp. Time is always an input. */
+export function at(value: string): IsoUtcTimestamp {
+  return isoUtcTimestampSchema.parse(value);
+}
+
+export type TwoLineEntryInput = {
+  readonly entryId: string;
+  readonly kind: EntryKind;
+  readonly debit: LedgerAccount;
+  readonly credit: LedgerAccount;
+  readonly amountBase: bigint;
+  readonly scale?: number;
+  readonly occurredAt?: string;
+  readonly recordedAt?: string;
+  readonly correlationId?: string;
+  readonly idempotencyKey?: string;
+  readonly intentId?: string | null;
+  readonly reversesEntryId?: string | null;
+};
+
+/**
+ * Build a balanced two-line entry, or throw. A refusal here is a defect in
+ * the test's own setup, not schema-legal production input, so throwing is
+ * the right signal — production paths still get a diagnostic.
+ */
+export function twoLineEntry(input: TwoLineEntryInput): JournalEntry {
+  const scale = input.scale ?? TEST_STABLE_SCALE;
+  const result = buildEntry({
+    entryId: input.entryId,
+    kind: input.kind,
+    occurredAt: at(input.occurredAt ?? "2026-01-02T03:04:05.000Z"),
+    recordedAt: at(input.recordedAt ?? "2026-01-02T03:04:06.000Z"),
+    correlationId: input.correlationId ?? `corr-${input.entryId}`,
+    idempotencyKey: input.idempotencyKey ?? `idem-${input.entryId}`,
+    intentId: input.intentId ?? null,
+    reversesEntryId: input.reversesEntryId ?? null,
+    lines: [
+      { account: input.debit, scale, amountBase: input.amountBase, direction: "debit" },
+      { account: input.credit, scale, amountBase: input.amountBase, direction: "credit" },
+    ],
+  });
+
+  if (result.outcome === "refused") {
+    throw new Error(`test fixture built an invalid entry: ${result.refusal.reason.code} — ${result.refusal.detail}`);
+  }
+  return result.entry;
+}
+
+/**
+ * Rebuild a balance sheet from entries, or throw. Tests that need a starting
+ * balance state build it the same way the application does — by replaying
+ * the journal — rather than by hand-assembling a map the journal would never
+ * have produced.
+ */
+export function sheetFrom(entries: readonly JournalEntry[]): BalanceSheet {
+  const rebuilt = rebuildBalances(entries);
+  if (rebuilt.outcome === "refused") {
+    throw new Error(`test fixture journal did not rebuild: ${rebuilt.refusal.reason.code} — ${rebuilt.refusal.detail}`);
+  }
+  return rebuilt.balances;
+}
+
+export type ReservationRequestInput = {
+  readonly amountBase: bigint;
+  readonly reservationId?: string;
+  readonly entryId?: string;
+  readonly intentId?: string;
+  readonly attempt?: number;
+  readonly assetId?: string;
+  readonly scale?: number;
+  readonly fromState?: HoldingsState;
+  readonly occurredAt?: string;
+  readonly expiresAt?: string;
+};
+
+export function reservationRequest(input: ReservationRequestInput): ReservationRequest {
+  const reservationId = input.reservationId ?? "reservation-1";
+  return {
+    reservationId,
+    intentId: input.intentId ?? `intent-${reservationId}`,
+    attempt: input.attempt ?? 1,
+    idempotencyKey: `idem-${reservationId}`,
+    correlationId: `corr-${reservationId}`,
+    entryId: input.entryId ?? `entry-${reservationId}`,
+    assetId: input.assetId ?? TEST_STABLE_ASSET,
+    scale: input.scale ?? TEST_STABLE_SCALE,
+    amountBase: input.amountBase,
+    fromState: input.fromState ?? "available",
+    occurredAt: at(input.occurredAt ?? "2026-01-02T03:04:05.000Z"),
+    recordedAt: at("2026-01-02T03:04:06.000Z"),
+    expiresAt: at(input.expiresAt ?? "2026-01-02T03:09:05.000Z"),
+  };
+}
