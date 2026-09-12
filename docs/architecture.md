@@ -335,7 +335,6 @@ The repository's preflight hook refuses to stage `.env` (or any file the ignore 
 
 - `apps/research`, `apps/signer`, `apps/evaluation` — planned processes, none exist
 - Any `packages/adapter-<venue>` beyond `adapter-paper` — no venue or chain is selected
-- `drizzle/` migrations — empty until the ledger vertical slice lands
 - `scripts/` guard scripts — none exist; [runbooks/README.md](runbooks/README.md) and this document name the planned ones
 - `lint:package-boundaries` — the layer graph is enforced only by ESLint zones today
 - The `LIVE` capability gate implementation
