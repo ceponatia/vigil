@@ -1,7 +1,13 @@
 import { decimalStringSchema } from "@vigil/contracts";
 import { describe, expect, it } from "vitest";
 
-import { fromBaseUnits, toBaseUnits, MAX_ASSET_SCALE, MIN_ASSET_SCALE } from "./base-units";
+import {
+  fromBaseUnits,
+  toBaseUnits,
+  MAX_ASSET_SCALE,
+  MAX_BASE_UNIT_MAGNITUDE,
+  MIN_ASSET_SCALE,
+} from "./base-units";
 
 // The defect this file kills: money entering the ledger through a float.
 // Every case below is one that `parseFloat`, `Number()`, or `toFixed()`
