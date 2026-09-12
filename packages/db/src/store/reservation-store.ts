@@ -2,13 +2,14 @@ import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import type { VigilDatabase } from "../client";
 import { reservations } from "../schema/intents";
-import { journalEntries, journalLines, ledgerBalances } from "../schema/journal";
+import { assetScales, journalEntries, journalLines, ledgerBalances } from "../schema/journal";
 import {
   accountKeyFor,
   compareAccountKeys,
   describeDriverRefusal,
   type StoreAccount,
   type StoreDiagnosticCode,
+  type StoreProvenance,
 } from "./journal-store";
 import { parseIsoInstant } from "./instants";
 
@@ -58,6 +59,8 @@ export type ReserveRequest = {
   readonly recordedAt: string;
   /** ISO-8601 UTC; must be after `occurredAt`. */
   readonly expiresAt: string;
+  /** What authorized and sized this hold; stored on the reservation and its posting. */
+  readonly provenance: StoreProvenance;
 };
 
 export type ReserveResult =
@@ -140,6 +143,15 @@ export async function reserveAvailable(db: VigilDatabase, request: ReserveReques
     };
   }
 
+  if (request.provenance.policyVersion.trim() === "" || request.provenance.strategyVersion.trim() === "") {
+    return {
+      outcome: "refused",
+      code: "MISSING_PROVENANCE",
+      detail: `reservation ${request.reservationId} does not name the policy and strategy versions that authorized it`,
+      availableBase: null,
+    };
+  }
+
   const availableAccount = holdingsAccountFor(request.assetId, "available");
   const reservedAccount = holdingsAccountFor(request.assetId, "reserved");
   const availableKey = accountKeyFor(availableAccount);
@@ -156,6 +168,15 @@ export async function reserveAvailable(db: VigilDatabase, request: ReserveReques
 
   try {
     return await db.transaction(async (tx): Promise<ReserveResult> => {
+      // The balance rows below carry (asset_id, asset_scale) foreign keys,
+      // so the asset's scale has to be registered first. A scale that
+      // disagrees with the registry has nowhere to point and comes back as
+      // SCALE_MISMATCH rather than a foreign-key crash.
+      await tx
+        .insert(assetScales)
+        .values({ assetId: request.assetId, assetScale: request.scale })
+        .onConflictDoNothing({ target: assetScales.assetId });
+
       // One statement, rows already in key order: a concurrent transaction
       // either waits here or finds both rows present.
       await tx
@@ -217,6 +238,11 @@ export async function reserveAvailable(db: VigilDatabase, request: ReserveReques
         idempotencyKey: `hold:${request.idempotencyKey}`,
         intentId: request.intentId,
         reversesEntryId: null,
+        policyVersion: request.provenance.policyVersion,
+        strategyVersion: request.provenance.strategyVersion,
+        modelVersion: request.provenance.modelVersion,
+        portfolioSnapshotVersion: request.provenance.portfolioSnapshotVersion,
+        marketSnapshotVersion: request.provenance.marketSnapshotVersion,
       });
 
       await tx.insert(journalLines).values([
@@ -274,6 +300,11 @@ export async function reserveAvailable(db: VigilDatabase, request: ReserveReques
         occurredAt,
         recordedAt,
         expiresAt,
+        policyVersion: request.provenance.policyVersion,
+        strategyVersion: request.provenance.strategyVersion,
+        modelVersion: request.provenance.modelVersion,
+        portfolioSnapshotVersion: request.provenance.portfolioSnapshotVersion,
+        marketSnapshotVersion: request.provenance.marketSnapshotVersion,
       });
 
       return {

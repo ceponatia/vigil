@@ -12,6 +12,7 @@ import {
   smallint,
   text,
   timestamp,
+  unique,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
@@ -88,6 +89,46 @@ export const journalEntryKindEnum = pgEnum("journal_entry_kind", [
 
 export const postingDirectionEnum = pgEnum("posting_direction", ["debit", "credit"]);
 
+/**
+ * One scale per asset, enforced durably.
+ *
+ * Base units are meaningless without the scale that interprets them, and
+ * nothing above this table can stop two entries from disagreeing about an
+ * asset's scale: the application checks what it can see, and a second writer
+ * sees a different transaction. Registering the scale on first use and
+ * pointing a composite foreign key at it from every table that stores base
+ * units turns "one asset has one scale" into something the database refuses
+ * to break — `(asset_id, asset_scale)` simply has nowhere to point when the
+ * scale is wrong.
+ *
+ * The primary key is `asset_id` alone, so the unique pair it also carries
+ * can only ever be that asset's single registered scale.
+ *
+ * Seam: this is the first column of the `assets` record family
+ * (`docs/architecture.md` "Record families"). When that family lands with
+ * canonical identity, capabilities, and token representations, this table
+ * folds into it and the foreign keys point there instead.
+ */
+export const assetScales = pgTable(
+  "asset_scales",
+  {
+    assetId: text("asset_id").primaryKey(),
+    assetScale: smallint("asset_scale").notNull(),
+  },
+  (table) => [
+    unique("asset_scales_asset_id_asset_scale_key").on(table.assetId, table.assetScale),
+    check("asset_scales_scale_range", sql`asset_scale between 0 and 36`),
+    // The canonical identity shape from @vigil/contracts:
+    // chainId|kind|value|withdrawalNetwork, no component containing "|" or
+    // "/". Every asset id in the ledger tables points at a row here, so this
+    // one constraint is what keeps a bare ticker out of all of them.
+    check(
+      "asset_scales_canonical_asset_id",
+      sql`asset_id ~ '^[^|/]+[|](contract|mint|native)[|][^|/]+[|][^|/]+$'`,
+    ),
+  ],
+);
+
 export const journalEntries = pgTable(
   "journal_entries",
   {
@@ -120,6 +161,21 @@ export const journalEntries = pgTable(
     intentId: text("intent_id"),
     /** Non-null exactly when `kind` is `reversal`. */
     reversesEntryId: text("reverses_entry_id"),
+    /**
+     * What produced this record (`AGENTS.md`: every economic record carries
+     * the policy, strategy, model, and snapshot versions that produced it).
+     * Without them an outcome cannot be attributed to the behavior that
+     * caused it, and no later comparison between two behaviors means
+     * anything.
+     */
+    policyVersion: text("policy_version").notNull(),
+    strategyVersion: text("strategy_version").notNull(),
+    /** Null when no LLM was involved — every deterministic path today. */
+    modelVersion: text("model_version"),
+    /** Null when no portfolio snapshot informed the record, as for a contribution. */
+    portfolioSnapshotVersion: text("portfolio_snapshot_version"),
+    /** Null when no market snapshot informed the record. */
+    marketSnapshotVersion: text("market_snapshot_version"),
   },
   (table) => [
     uniqueIndex("journal_entries_entry_sequence_key").on(table.entrySequence),
@@ -139,6 +195,10 @@ export const journalEntries = pgTable(
       sql`(kind = 'reversal') = (reverses_entry_id is not null)`,
     ),
     check("journal_entries_no_self_reversal", sql`reverses_entry_id is null or reverses_entry_id <> entry_id`),
+    check(
+      "journal_entries_provenance_present",
+      sql`length(btrim(policy_version)) > 0 and length(btrim(strategy_version)) > 0`,
+    ),
   ],
 );
 
@@ -164,6 +224,11 @@ export const journalLines = pgTable(
       columns: [table.entryId],
       foreignColumns: [journalEntries.entryId],
       name: "journal_lines_entry_id_fk",
+    }),
+    foreignKey({
+      columns: [table.assetId, table.assetScale],
+      foreignColumns: [assetScales.assetId, assetScales.assetScale],
+      name: "journal_lines_asset_scale_fk",
     }),
     index("journal_lines_account_key_idx").on(table.accountKey),
     check("journal_lines_amount_positive", sql`amount_base > 0`),
@@ -200,6 +265,11 @@ export const ledgerBalances = pgTable(
     check("ledger_balances_holdings_never_negative", sql`account_family <> 'holdings' or debit_base >= credit_base`),
     check("ledger_balances_holdings_state", sql`(account_family = 'holdings') = (holdings_state is not null)`),
     check("ledger_balances_scale_range", sql`asset_scale between 0 and 36`),
+    foreignKey({
+      columns: [table.assetId, table.assetScale],
+      foreignColumns: [assetScales.assetId, assetScales.assetScale],
+      name: "ledger_balances_asset_scale_fk",
+    }),
     index("ledger_balances_asset_id_idx").on(table.assetId),
   ],
 );

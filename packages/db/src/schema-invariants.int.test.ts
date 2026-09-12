@@ -3,9 +3,14 @@ import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { schema } from "./client";
-import { journalEntries, journalLines, ledgerBalances } from "./schema/journal";
+import { assetScales, journalEntries, journalLines, ledgerBalances } from "./schema/journal";
 import { postJournalEntry } from "./store/journal-store";
-import { postgresErrorCode, PG_CHECK_VIOLATION, PG_RAISE_EXCEPTION } from "./store/pg-errors";
+import {
+  postgresConstraintName,
+  postgresErrorCode,
+  PG_CHECK_VIOLATION,
+  PG_RAISE_EXCEPTION,
+} from "./store/pg-errors";
 import { fundingEntry, openLedgerTestDb } from "./test-support/journal-fixtures";
 
 // Lives beside src/, NOT under src/schema/: drizzle.config.ts globs
@@ -190,6 +195,27 @@ describe("idempotency and correlation keys", () => {
   });
 });
 
+describe("asset identity", () => {
+  it("refuses to register a bare ticker as an asset — catches the ticker-as-identity bug at the one table every asset id in the ledger points at: BTC on two chains would otherwise share an account key, and one balance would reconcile against neither venue", async () => {
+    const failure = await errorFrom(() =>
+      db.execute(sql`insert into ${assetScales} (asset_id, asset_scale) values ('BTC', 8)`),
+    );
+
+    expect(postgresErrorCode(failure)).toBe(PG_CHECK_VIOLATION);
+    expect(postgresConstraintName(failure)).toBe("asset_scales_canonical_asset_id");
+  });
+
+  it("accepts a canonical four-component identity — the shape @vigil/contracts derives, so the constraint refuses tickers without refusing real assets", async () => {
+    const accepted = await errorFrom(() =>
+      db.execute(
+        sql`insert into ${assetScales} (asset_id, asset_scale) values ('1|contract|0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48|ethereum', 6)`,
+      ),
+    );
+
+    expect(accepted).toBeNull();
+  });
+});
+
 describe("append-only journal", () => {
   it("rejects an UPDATE against a posted entry and leaves it unchanged — catches a correction applied by editing the original, which erases what the application believed at the time", async () => {
     const posted = await postJournalEntry(db, fundingEntry("entry-append-only", 1_000_000n));
@@ -235,7 +261,7 @@ describe("holdings balances", () => {
 
     const failure = await errorFrom(() =>
       db.execute(
-        sql`update ${ledgerBalances} set credit_base = credit_base + 2000000 where account_key = 'holdings|available|test:stable-6'`,
+        sql`update ${ledgerBalances} set credit_base = credit_base + 2000000 where account_key = 'holdings/available/1337|native|VGLSTABLE|SYNTHETIC_TESTNET'`,
       ),
     );
 
@@ -247,7 +273,7 @@ describe("holdings balances", () => {
 
     expect(posted.outcome).toBe("posted");
     const capital = await db.execute<{ credit_base: string }>(
-      sql`select credit_base::text as credit_base from ${ledgerBalances} where account_key = 'contributed-capital|-|test:stable-6'`,
+      sql`select credit_base::text as credit_base from ${ledgerBalances} where account_key = 'contributed-capital/-/1337|native|VGLSTABLE|SYNTHETIC_TESTNET'`,
     );
     expect(capital.rows[0]?.credit_base).toBe("1000000");
   });

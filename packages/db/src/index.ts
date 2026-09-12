@@ -15,6 +15,7 @@ export type { DbClient, DbClientOptions, VigilDatabase, VigilSchema } from "./cl
 
 export {
   accountFamilyEnum,
+  assetScales,
   holdingsStateEnum,
   journalEntries,
   journalEntryKindEnum,
@@ -47,6 +48,7 @@ export type {
   StoreDiagnosticCode,
   StoreEntry,
   StoreLine,
+  StoreProvenance,
   StoredBalance,
 } from "./store/journal-store";
 

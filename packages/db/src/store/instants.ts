@@ -13,7 +13,15 @@
  * lands.
  */
 
-const ISO_UTC_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+/**
+ * At most three fractional digits. `timestamptz(3)` stores milliseconds and
+ * `Date.parse` keeps milliseconds, so a finer value is truncated on the way
+ * in: the record would state an event time up to a millisecond before the
+ * one the caller supplied, and no later reader could tell. Refusing is the
+ * only honest option, since this layer cannot round a decision's timestamp
+ * on the caller's behalf.
+ */
+const ISO_UTC_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 
 /** The instant `value` names, or null when it names none. Never a clock read. */
 export function parseIsoInstant(value: string): Date | null {

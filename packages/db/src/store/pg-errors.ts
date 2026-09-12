@@ -26,6 +26,13 @@ export const PG_CHECK_VIOLATION = "23514";
  * a caller bypassed that check — it is still a diagnostic, never a crash.
  */
 export const PG_NUMERIC_VALUE_OUT_OF_RANGE = "22003";
+/**
+ * A foreign key with nothing to point at. Two of them carry invariants
+ * rather than mere referential tidiness: a reversal naming an entry that is
+ * not in durable history, and base units at a scale the asset is not
+ * registered with.
+ */
+export const PG_FOREIGN_KEY_VIOLATION = "23503";
 /** Raised by the append-only trigger on the journal tables. */
 export const PG_RAISE_EXCEPTION = "P0001";
 

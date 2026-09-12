@@ -78,6 +78,20 @@ as later slices need to.
 - **Vocabularies are Postgres enums**, so a column cannot hold a holdings
   state, account family, entry kind, or reservation state that does not
   exist.
+- **One asset has one scale.** `asset_scales` registers it on first use, and
+  every table that stores base units carries a composite
+  `(asset_id, asset_scale)` foreign key into it, so base units at a second
+  scale have nowhere to point. The same table's check constraint is where a
+  bare ticker is refused: every asset id in the ledger points at a row here,
+  so one constraint covers all of them.
+- **Every economic record carries its provenance**: the policy and strategy
+  versions that produced it (required, non-blank, enforced by a check
+  constraint), the model version (null when no LLM was involved), and the
+  market and portfolio snapshot versions (null when none informed it).
+- **A posted entry is sealed.** Postings may be added only by the
+  transaction that wrote the entry, so a later writer cannot add offsetting
+  lines that change what a committed entry says while leaving the balance
+  projection untouched.
 
 ## Forward-declared seams
 
@@ -88,9 +102,12 @@ as later slices need to.
   so the execution slice that owns those transitions changes behavior rather
   than the schema — and so the partial unique index that allows one live
   hold per intent already has the terminal states it will need.
-- **Asset identity.** `asset_id` is canonical-id text with no foreign key;
-  the `assets` record family and the key arrive with the slice that creates
-  it.
+- **Asset identity.** `asset_id` is canonical-id text, checked against the
+  `chainId|kind|value|withdrawalNetwork` shape in `asset_scales` and pointed
+  at by every table that stores base units. `asset_scales` is the first
+  column of the `assets` record family; when that family lands with
+  identity, capabilities, and token representations, this table folds into
+  it and the foreign keys point there instead.
 
 ## Built modules
 

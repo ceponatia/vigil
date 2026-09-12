@@ -1,7 +1,8 @@
-import { asc, eq, sql } from "drizzle-orm";
+import { asc, eq, inArray, sql } from "drizzle-orm";
 
 import type { VigilDatabase } from "../client";
 import {
+  assetScales,
   journalEntries,
   journalLines,
   ledgerBalances,
@@ -15,6 +16,7 @@ import {
   postgresConstraintName,
   postgresErrorCode,
   PG_CHECK_VIOLATION,
+  PG_FOREIGN_KEY_VIOLATION,
   PG_NUMERIC_VALUE_OUT_OF_RANGE,
   PG_UNIQUE_VIOLATION,
 } from "./pg-errors";
@@ -51,6 +53,18 @@ export const STORE_DIAGNOSTIC_CODES = [
   "DUPLICATE_RECORD",
   /** A check constraint rejected the write. */
   "CONSTRAINT_VIOLATION",
+  /** One asset was posted at two scales, or at a scale it is not registered with. */
+  "SCALE_MISMATCH",
+  /** The record does not say which policy and strategy versions produced it. */
+  "MISSING_PROVENANCE",
+  /** A reservation posting is not the exact available/reserved move it claims. */
+  "RESERVATION_POSTING_SHAPE",
+  /** A reversal's postings are not the exact inverse of the entry it reverses. */
+  "REVERSAL_NOT_MIRRORED",
+  /** The reversal names an entry that is not in durable history. */
+  "UNKNOWN_REVERSAL_TARGET",
+  /** Postings may not be added to an entry an earlier transaction posted. */
+  "ENTRY_ALREADY_POSTED",
 ] as const;
 
 export type StoreDiagnosticCode = (typeof STORE_DIAGNOSTIC_CODES)[number];
@@ -68,6 +82,19 @@ export type StoreLine = {
   readonly direction: PostingDirectionValue;
 };
 
+/**
+ * The versions that produced an economic record. Mirrors
+ * `@vigil/ledger`'s `EntryProvenance` — the layer graph forbids importing
+ * it, and `tests/seams` is where the two shapes are held to each other.
+ */
+export type StoreProvenance = {
+  readonly policyVersion: string;
+  readonly strategyVersion: string;
+  readonly modelVersion: string | null;
+  readonly portfolioSnapshotVersion: string | null;
+  readonly marketSnapshotVersion: string | null;
+};
+
 export type StoreEntry = {
   readonly entryId: string;
   readonly kind: JournalEntryKindValue;
@@ -79,6 +106,7 @@ export type StoreEntry = {
   readonly idempotencyKey: string;
   readonly intentId: string | null;
   readonly reversesEntryId: string | null;
+  readonly provenance: StoreProvenance;
   readonly lines: readonly StoreLine[];
 };
 
@@ -156,6 +184,68 @@ function describeImbalance(lines: readonly StoreLine[]): string | null {
   return null;
 }
 
+/**
+ * Two postings of one asset at two scales are two different units, and the
+ * balance check below would call them equal. The `asset_scales` foreign key
+ * makes this unrepresentable durably; this says so at the door, where the
+ * caller gets a diagnostic naming the asset instead of a foreign-key error.
+ */
+function describeScaleClash(lines: readonly StoreLine[]): string | null {
+  const scaleByAsset = new Map<string, number>();
+  for (const line of lines) {
+    const known = scaleByAsset.get(line.account.assetId);
+    if (known === undefined) {
+      scaleByAsset.set(line.account.assetId, line.scale);
+    } else if (known !== line.scale) {
+      return `asset ${line.account.assetId} is posted at scale ${String(known)} and scale ${String(line.scale)}`;
+    }
+  }
+  return null;
+}
+
+/**
+ * The exact state move each reservation kind names — the same rule
+ * `@vigil/ledger` enforces in its planner, restated here because a caller
+ * may reach this store without going through the planner. A hold that
+ * debits `available` and credits `reserved` is the inverse move wearing a
+ * hold's name: it releases capital another intent committed.
+ */
+function describeReservationShape(entry: StoreEntry): string | null {
+  if (entry.kind !== "reservation-hold" && entry.kind !== "reservation-release") {
+    return null;
+  }
+  const expected =
+    entry.kind === "reservation-hold"
+      ? { debit: "reserved", credit: "available" }
+      : { debit: "available", credit: "reserved" };
+
+  if (entry.lines.length !== 2) {
+    return `a ${entry.kind} moves one amount between two holdings states; this entry has ${String(entry.lines.length)} postings`;
+  }
+  const debit = entry.lines.find((line) => line.direction === "debit");
+  const credit = entry.lines.find((line) => line.direction === "credit");
+  if (debit === undefined || credit === undefined) {
+    return `a ${entry.kind} has exactly one debit and one credit`;
+  }
+  if (debit.amountBase !== credit.amountBase || debit.account.assetId !== credit.account.assetId) {
+    return `a ${entry.kind} moves one amount of one asset between two states of itself`;
+  }
+  if (debit.account.holdingsState !== expected.debit || credit.account.holdingsState !== expected.credit) {
+    return `a ${entry.kind} debits holdings ${expected.debit} and credits holdings ${expected.credit}`;
+  }
+  return null;
+}
+
+/** The postings of an entry as a comparable, order-independent multiset. */
+function postingFingerprint(lines: readonly StoreLine[], flipDirection: boolean): readonly string[] {
+  return lines
+    .map((line) => {
+      const direction = flipDirection ? (line.direction === "debit" ? "credit" : "debit") : line.direction;
+      return [accountKeyFor(line.account), String(line.scale), line.amountBase.toString(), direction].join("~");
+    })
+    .toSorted();
+}
+
 type EntryPreflight =
   | { readonly outcome: "ok"; readonly occurredAt: Date; readonly recordedAt: Date }
   | { readonly outcome: "refused"; readonly code: StoreDiagnosticCode; readonly detail: string };
@@ -186,9 +276,27 @@ function preflight(entry: StoreEntry): EntryPreflight {
     };
   }
 
+  const scaleClash = describeScaleClash(entry.lines);
+  if (scaleClash !== null) {
+    return { outcome: "refused", code: "SCALE_MISMATCH", detail: `entry ${entry.entryId}: ${scaleClash}` };
+  }
+
   const imbalance = describeImbalance(entry.lines);
   if (imbalance !== null) {
     return { outcome: "refused", code: "UNBALANCED_ENTRY", detail: `entry ${entry.entryId}: ${imbalance}` };
+  }
+
+  if (entry.provenance.policyVersion.trim() === "" || entry.provenance.strategyVersion.trim() === "") {
+    return {
+      outcome: "refused",
+      code: "MISSING_PROVENANCE",
+      detail: `entry ${entry.entryId} does not name the policy and strategy versions that produced it`,
+    };
+  }
+
+  const shapeClash = describeReservationShape(entry);
+  if (shapeClash !== null) {
+    return { outcome: "refused", code: "RESERVATION_POSTING_SHAPE", detail: `entry ${entry.entryId}: ${shapeClash}` };
   }
 
   return { outcome: "ok", occurredAt, recordedAt };
@@ -219,6 +327,15 @@ export function describeDriverRefusal(
         detail: "the entry is not a balanced double-entry posting for every asset it touches",
       };
     }
+    if (constraint === "journal_lines_entry_sealed") {
+      return {
+        code: "ENTRY_ALREADY_POSTED",
+        detail: "postings may not be added to an entry an earlier transaction posted; a correction is a reversing entry",
+      };
+    }
+    if (constraint === "journal_entries_provenance_present" || constraint === "reservations_provenance_present") {
+      return { code: "MISSING_PROVENANCE", detail: "the record does not name the policy and strategy versions that produced it" };
+    }
     return { code: "CONSTRAINT_VIOLATION", detail: `check constraint ${constraint} rejected the write` };
   }
   if (code === PG_UNIQUE_VIOLATION) {
@@ -227,10 +344,42 @@ export function describeDriverRefusal(
     }
     return { code: "DUPLICATE_RECORD", detail: `unique constraint ${constraint} rejected the write` };
   }
+  if (code === PG_FOREIGN_KEY_VIOLATION) {
+    if (constraint === "journal_entries_reverses_entry_id_fk") {
+      return {
+        code: "UNKNOWN_REVERSAL_TARGET",
+        detail: "the entry this reversal names is not in durable history",
+      };
+    }
+    if (constraint.endsWith("_asset_scale_fk")) {
+      return {
+        code: "SCALE_MISMATCH",
+        detail: "the asset is registered at a different scale; one asset has exactly one scale",
+      };
+    }
+    return { code: "CONSTRAINT_VIOLATION", detail: `foreign key ${constraint} rejected the write` };
+  }
   if (code === PG_NUMERIC_VALUE_OUT_OF_RANGE) {
     return { code: "AMOUNT_OUT_OF_RANGE", detail: "the amount has more digits than a numeric(78, 0) base-unit column holds" };
   }
   return null;
+}
+
+/**
+ * A refusal decided inside the transaction. Thrown rather than returned so
+ * the transaction rolls back: a refused posting must leave nothing behind,
+ * not even the asset-scale row it registered on the way in.
+ */
+class PostingRefused extends Error {
+  public readonly code: StoreDiagnosticCode;
+  public readonly detail: string;
+
+  public constructor(code: StoreDiagnosticCode, detail: string) {
+    super(detail);
+    this.name = "PostingRefused";
+    this.code = code;
+    this.detail = detail;
+  }
 }
 
 /**
@@ -250,6 +399,79 @@ export async function postJournalEntry(db: VigilDatabase, entry: StoreEntry): Pr
 
   try {
     return await db.transaction(async (tx): Promise<PostEntryResult> => {
+      // Register each asset's scale on first use, in asset order so two
+      // transactions introducing the same asset queue instead of deadlocking.
+      // The composite foreign keys below then have nowhere to point when a
+      // later entry posts the same asset at a different scale.
+      const assets = [
+        ...new Map(entry.lines.map((line): [string, number] => [line.account.assetId, line.scale])).entries(),
+      ]
+        .map(([assetId, scale]) => ({ assetId, scale }))
+        .toSorted((left, right) => compareAccountKeys(left.assetId, right.assetId));
+
+      await tx
+        .insert(assetScales)
+        .values(assets.map((asset) => ({ assetId: asset.assetId, assetScale: asset.scale })))
+        .onConflictDoNothing({ target: assetScales.assetId });
+
+      const registered = await tx
+        .select({ assetId: assetScales.assetId, assetScale: assetScales.assetScale })
+        .from(assetScales)
+        .where(inArray(assetScales.assetId, assets.map((asset) => asset.assetId)));
+
+      for (const asset of assets) {
+        const row = registered.find((candidate) => candidate.assetId === asset.assetId);
+        if (row !== undefined && row.assetScale !== asset.scale) {
+          throw new PostingRefused(
+            "SCALE_MISMATCH",
+            `asset ${asset.assetId} is registered at scale ${String(row.assetScale)}; entry ${entry.entryId} posts it at scale ${String(asset.scale)}`,
+          );
+        }
+      }
+
+      // A reversal consumes the target's one correction slot, so the target
+      // is read under this transaction and its postings compared: a caller
+      // working from a stale copy cannot spend that slot on postings of its
+      // own choosing.
+      if (entry.reversesEntryId !== null) {
+        const targetLines = await tx
+          .select({
+            accountKey: journalLines.accountKey,
+            accountFamily: journalLines.accountFamily,
+            holdingsState: journalLines.holdingsState,
+            assetId: journalLines.assetId,
+            assetScale: journalLines.assetScale,
+            direction: journalLines.direction,
+            amountBase: journalLines.amountBase,
+          })
+          .from(journalLines)
+          .where(eq(journalLines.entryId, entry.reversesEntryId));
+
+        if (targetLines.length === 0) {
+          throw new PostingRefused(
+            "UNKNOWN_REVERSAL_TARGET",
+            `entry ${entry.reversesEntryId} is not in durable history, so there is nothing to reverse`,
+          );
+        }
+
+        const expected = postingFingerprint(
+          targetLines.map((line) => ({
+            account: { family: line.accountFamily, assetId: line.assetId, holdingsState: line.holdingsState },
+            scale: line.assetScale,
+            amountBase: line.amountBase,
+            direction: line.direction,
+          })),
+          true,
+        );
+        const actual = postingFingerprint(entry.lines, false);
+        if (expected.length !== actual.length || expected.some((line, index) => actual[index] !== line)) {
+          throw new PostingRefused(
+            "REVERSAL_NOT_MIRRORED",
+            `entry ${entry.entryId} is not the exact inverse of entry ${entry.reversesEntryId}`,
+          );
+        }
+      }
+
       const inserted = await tx
         .insert(journalEntries)
         .values({
@@ -261,6 +483,11 @@ export async function postJournalEntry(db: VigilDatabase, entry: StoreEntry): Pr
           idempotencyKey: entry.idempotencyKey,
           intentId: entry.intentId,
           reversesEntryId: entry.reversesEntryId,
+          policyVersion: entry.provenance.policyVersion,
+          strategyVersion: entry.provenance.strategyVersion,
+          modelVersion: entry.provenance.modelVersion,
+          portfolioSnapshotVersion: entry.provenance.portfolioSnapshotVersion,
+          marketSnapshotVersion: entry.provenance.marketSnapshotVersion,
         })
         .onConflictDoNothing({ target: journalEntries.idempotencyKey })
         .returning({ entryId: journalEntries.entryId });
@@ -346,6 +573,9 @@ export async function postJournalEntry(db: VigilDatabase, entry: StoreEntry): Pr
       return { outcome: "posted", entryId: entry.entryId };
     });
   } catch (error) {
+    if (error instanceof PostingRefused) {
+      return { outcome: "refused", code: error.code, detail: error.detail };
+    }
     const refusal = describeDriverRefusal(error);
     if (refusal !== null) {
       return { outcome: "refused", code: refusal.code, detail: refusal.detail };
@@ -388,6 +618,13 @@ export async function loadJournalEntries(db: VigilDatabase): Promise<readonly St
     idempotencyKey: row.idempotencyKey,
     intentId: row.intentId,
     reversesEntryId: row.reversesEntryId,
+    provenance: {
+      policyVersion: row.policyVersion,
+      strategyVersion: row.strategyVersion,
+      modelVersion: row.modelVersion,
+      portfolioSnapshotVersion: row.portfolioSnapshotVersion,
+      marketSnapshotVersion: row.marketSnapshotVersion,
+    },
     lines: linesByEntry.get(row.entryId) ?? [],
   }));
 }

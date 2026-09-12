@@ -1,0 +1,835 @@
+{
+  "id": "4c00a88f-8851-478d-9fef-d40951adfbd9",
+  "prevId": "eb861596-1a53-4cf1-9428-ab4a6b431250",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.reservations": {
+      "name": "reservations",
+      "schema": "",
+      "columns": {
+        "reservation_id": {
+          "name": "reservation_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "intent_id": {
+          "name": "intent_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "attempt": {
+          "name": "attempt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "correlation_id": {
+          "name": "correlation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "asset_id": {
+          "name": "asset_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "asset_scale": {
+          "name": "asset_scale",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "amount_base": {
+          "name": "amount_base",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "reservation_state",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "journal_entry_id": {
+          "name": "journal_entry_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "timestamp (3) with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "recorded_at": {
+          "name": "recorded_at",
+          "type": "timestamp (3) with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp (3) with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "policy_version": {
+          "name": "policy_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "strategy_version": {
+          "name": "strategy_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model_version": {
+          "name": "model_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "portfolio_snapshot_version": {
+          "name": "portfolio_snapshot_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "market_snapshot_version": {
+          "name": "market_snapshot_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "reservations_idempotency_key_key": {
+          "name": "reservations_idempotency_key_key",
+          "columns": [
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "reservations_intent_id_attempt_key": {
+          "name": "reservations_intent_id_attempt_key",
+          "columns": [
+            {
+              "expression": "intent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "attempt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "reservations_intent_id_active_key": {
+          "name": "reservations_intent_id_active_key",
+          "columns": [
+            {
+              "expression": "intent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "with": {},
+          "method": "btree",
+          "where": "state = 'active'",
+          "concurrently": false
+        },
+        "reservations_journal_entry_id_key": {
+          "name": "reservations_journal_entry_id_key",
+          "columns": [
+            {
+              "expression": "journal_entry_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "reservations_correlation_id_idx": {
+          "name": "reservations_correlation_id_idx",
+          "columns": [
+            {
+              "expression": "correlation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "reservations_state_expires_at_idx": {
+          "name": "reservations_state_expires_at_idx",
+          "columns": [
+            {
+              "expression": "state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "reservations_journal_entry_id_fk": {
+          "name": "reservations_journal_entry_id_fk",
+          "tableFrom": "reservations",
+          "columnsFrom": [
+            "journal_entry_id"
+          ],
+          "tableTo": "journal_entries",
+          "columnsTo": [
+            "entry_id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "reservations_asset_scale_fk": {
+          "name": "reservations_asset_scale_fk",
+          "tableFrom": "reservations",
+          "columnsFrom": [
+            "asset_id",
+            "asset_scale"
+          ],
+          "tableTo": "asset_scales",
+          "columnsTo": [
+            "asset_id",
+            "asset_scale"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "reservations_amount_positive": {
+          "name": "reservations_amount_positive",
+          "value": "amount_base > 0"
+        },
+        "reservations_attempt_positive": {
+          "name": "reservations_attempt_positive",
+          "value": "attempt >= 1"
+        },
+        "reservations_scale_range": {
+          "name": "reservations_scale_range",
+          "value": "asset_scale between 0 and 36"
+        },
+        "reservations_window": {
+          "name": "reservations_window",
+          "value": "expires_at > occurred_at"
+        },
+        "reservations_provenance_present": {
+          "name": "reservations_provenance_present",
+          "value": "length(btrim(policy_version)) > 0 and length(btrim(strategy_version)) > 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.asset_scales": {
+      "name": "asset_scales",
+      "schema": "",
+      "columns": {
+        "asset_id": {
+          "name": "asset_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "asset_scale": {
+          "name": "asset_scale",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "asset_scales_asset_id_asset_scale_key": {
+          "name": "asset_scales_asset_id_asset_scale_key",
+          "columns": [
+            "asset_id",
+            "asset_scale"
+          ],
+          "nullsNotDistinct": false
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "asset_scales_scale_range": {
+          "name": "asset_scales_scale_range",
+          "value": "asset_scale between 0 and 36"
+        },
+        "asset_scales_canonical_asset_id": {
+          "name": "asset_scales_canonical_asset_id",
+          "value": "asset_id ~ '^[^|/]+[|](contract|mint|native)[|][^|/]+[|][^|/]+$'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.journal_entries": {
+      "name": "journal_entries",
+      "schema": "",
+      "columns": {
+        "entry_id": {
+          "name": "entry_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "entry_sequence": {
+          "name": "entry_sequence",
+          "type": "bigserial",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "journal_entry_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "timestamp (3) with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "recorded_at": {
+          "name": "recorded_at",
+          "type": "timestamp (3) with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "correlation_id": {
+          "name": "correlation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "intent_id": {
+          "name": "intent_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reverses_entry_id": {
+          "name": "reverses_entry_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "policy_version": {
+          "name": "policy_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "strategy_version": {
+          "name": "strategy_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model_version": {
+          "name": "model_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "portfolio_snapshot_version": {
+          "name": "portfolio_snapshot_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "market_snapshot_version": {
+          "name": "market_snapshot_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "journal_entries_entry_sequence_key": {
+          "name": "journal_entries_entry_sequence_key",
+          "columns": [
+            {
+              "expression": "entry_sequence",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "journal_entries_idempotency_key_key": {
+          "name": "journal_entries_idempotency_key_key",
+          "columns": [
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "journal_entries_reverses_entry_id_key": {
+          "name": "journal_entries_reverses_entry_id_key",
+          "columns": [
+            {
+              "expression": "reverses_entry_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "journal_entries_correlation_id_idx": {
+          "name": "journal_entries_correlation_id_idx",
+          "columns": [
+            {
+              "expression": "correlation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "journal_entries_reverses_entry_id_fk": {
+          "name": "journal_entries_reverses_entry_id_fk",
+          "tableFrom": "journal_entries",
+          "columnsFrom": [
+            "reverses_entry_id"
+          ],
+          "tableTo": "journal_entries",
+          "columnsTo": [
+            "entry_id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "journal_entries_reversal_link": {
+          "name": "journal_entries_reversal_link",
+          "value": "(kind = 'reversal') = (reverses_entry_id is not null)"
+        },
+        "journal_entries_no_self_reversal": {
+          "name": "journal_entries_no_self_reversal",
+          "value": "reverses_entry_id is null or reverses_entry_id <> entry_id"
+        },
+        "journal_entries_provenance_present": {
+          "name": "journal_entries_provenance_present",
+          "value": "length(btrim(policy_version)) > 0 and length(btrim(strategy_version)) > 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.journal_lines": {
+      "name": "journal_lines",
+      "schema": "",
+      "columns": {
+        "entry_id": {
+          "name": "entry_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "line_index": {
+          "name": "line_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "account_key": {
+          "name": "account_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "account_family": {
+          "name": "account_family",
+          "type": "account_family",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "holdings_state": {
+          "name": "holdings_state",
+          "type": "holdings_state",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "asset_id": {
+          "name": "asset_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "asset_scale": {
+          "name": "asset_scale",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "direction": {
+          "name": "direction",
+          "type": "posting_direction",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "amount_base": {
+          "name": "amount_base",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "journal_lines_account_key_idx": {
+          "name": "journal_lines_account_key_idx",
+          "columns": [
+            {
+              "expression": "account_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "journal_lines_entry_id_fk": {
+          "name": "journal_lines_entry_id_fk",
+          "tableFrom": "journal_lines",
+          "columnsFrom": [
+            "entry_id"
+          ],
+          "tableTo": "journal_entries",
+          "columnsTo": [
+            "entry_id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "journal_lines_asset_scale_fk": {
+          "name": "journal_lines_asset_scale_fk",
+          "tableFrom": "journal_lines",
+          "columnsFrom": [
+            "asset_id",
+            "asset_scale"
+          ],
+          "tableTo": "asset_scales",
+          "columnsTo": [
+            "asset_id",
+            "asset_scale"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "journal_lines_entry_id_line_index_pk": {
+          "name": "journal_lines_entry_id_line_index_pk",
+          "columns": [
+            "entry_id",
+            "line_index"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "journal_lines_amount_positive": {
+          "name": "journal_lines_amount_positive",
+          "value": "amount_base > 0"
+        },
+        "journal_lines_scale_range": {
+          "name": "journal_lines_scale_range",
+          "value": "asset_scale between 0 and 36"
+        },
+        "journal_lines_holdings_state": {
+          "name": "journal_lines_holdings_state",
+          "value": "(account_family = 'holdings') = (holdings_state is not null)"
+        },
+        "journal_lines_line_index_non_negative": {
+          "name": "journal_lines_line_index_non_negative",
+          "value": "line_index >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.ledger_balances": {
+      "name": "ledger_balances",
+      "schema": "",
+      "columns": {
+        "account_key": {
+          "name": "account_key",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "account_family": {
+          "name": "account_family",
+          "type": "account_family",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "holdings_state": {
+          "name": "holdings_state",
+          "type": "holdings_state",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "asset_id": {
+          "name": "asset_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "asset_scale": {
+          "name": "asset_scale",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "debit_base": {
+          "name": "debit_base",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "credit_base": {
+          "name": "credit_base",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "last_recorded_at": {
+          "name": "last_recorded_at",
+          "type": "timestamp (3) with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "ledger_balances_asset_id_idx": {
+          "name": "ledger_balances_asset_id_idx",
+          "columns": [
+            {
+              "expression": "asset_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "ledger_balances_asset_scale_fk": {
+          "name": "ledger_balances_asset_scale_fk",
+          "tableFrom": "ledger_balances",
+          "columnsFrom": [
+            "asset_id",
+            "asset_scale"
+          ],
+          "tableTo": "asset_scales",
+          "columnsTo": [
+            "asset_id",
+            "asset_scale"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "ledger_balances_totals_non_negative": {
+          "name": "ledger_balances_totals_non_negative",
+          "value": "debit_base >= 0 and credit_base >= 0"
+        },
+        "ledger_balances_holdings_never_negative": {
+          "name": "ledger_balances_holdings_never_negative",
+          "value": "account_family <> 'holdings' or debit_base >= credit_base"
+        },
+        "ledger_balances_holdings_state": {
+          "name": "ledger_balances_holdings_state",
+          "value": "(account_family = 'holdings') = (holdings_state is not null)"
+        },
+        "ledger_balances_scale_range": {
+          "name": "ledger_balances_scale_range",
+          "value": "asset_scale between 0 and 36"
+        }
+      },
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {
+    "public.reservation_state": {
+      "name": "reservation_state",
+      "schema": "public",
+      "values": [
+        "active",
+        "released",
+        "consumed",
+        "expired"
+      ]
+    },
+    "public.account_family": {
+      "name": "account_family",
+      "schema": "public",
+      "values": [
+        "holdings",
+        "contributed-capital",
+        "realized-pnl",
+        "fees",
+        "exchange"
+      ]
+    },
+    "public.holdings_state": {
+      "name": "holdings_state",
+      "schema": "public",
+      "values": [
+        "available",
+        "reserved",
+        "staked",
+        "unbonding",
+        "pending-transfer",
+        "exit-queued"
+      ]
+    },
+    "public.journal_entry_kind": {
+      "name": "journal_entry_kind",
+      "schema": "public",
+      "values": [
+        "contribution",
+        "distribution",
+        "trade",
+        "fee",
+        "realized-pnl",
+        "reservation-hold",
+        "reservation-release",
+        "reversal"
+      ]
+    },
+    "public.posting_direction": {
+      "name": "posting_direction",
+      "schema": "public",
+      "values": [
+        "debit",
+        "credit"
+      ]
+    }
+  },
+  "schemas": {},
+  "views": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}

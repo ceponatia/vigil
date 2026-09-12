@@ -13,7 +13,7 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
-import { BASE_UNIT_PRECISION, journalEntries } from "./journal";
+import { assetScales, BASE_UNIT_PRECISION, journalEntries } from "./journal";
 
 /**
  * The `intents` record family: capital authority
@@ -70,6 +70,20 @@ export const reservations = pgTable(
     recordedAt: timestamp("recorded_at", { withTimezone: true, precision: 3, mode: "date" }).notNull(),
     /** After this instant the hold authorizes nothing. */
     expiresAt: timestamp("expires_at", { withTimezone: true, precision: 3, mode: "date" }).notNull(),
+    /**
+     * What authorized and sized this hold. A reservation commits capital, so
+     * it is an economic record in its own right and carries the same
+     * provenance the posting it makes does (`AGENTS.md`, "Architecture and
+     * implementation").
+     */
+    policyVersion: text("policy_version").notNull(),
+    strategyVersion: text("strategy_version").notNull(),
+    /** Null when no LLM was involved. */
+    modelVersion: text("model_version"),
+    /** Null when no portfolio snapshot informed the hold. */
+    portfolioSnapshotVersion: text("portfolio_snapshot_version"),
+    /** Null when no market snapshot informed the hold. */
+    marketSnapshotVersion: text("market_snapshot_version"),
   },
   (table) => [
     uniqueIndex("reservations_idempotency_key_key").on(table.idempotencyKey),
@@ -89,6 +103,15 @@ export const reservations = pgTable(
     check("reservations_attempt_positive", sql`attempt >= 1`),
     check("reservations_scale_range", sql`asset_scale between 0 and 36`),
     check("reservations_window", sql`expires_at > occurred_at`),
+    check(
+      "reservations_provenance_present",
+      sql`length(btrim(policy_version)) > 0 and length(btrim(strategy_version)) > 0`,
+    ),
+    foreignKey({
+      columns: [table.assetId, table.assetScale],
+      foreignColumns: [assetScales.assetId, assetScales.assetScale],
+      name: "reservations_asset_scale_fk",
+    }),
   ],
 );
 

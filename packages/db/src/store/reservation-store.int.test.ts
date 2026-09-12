@@ -2,7 +2,13 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { loadBalances, loadJournalEntries, postJournalEntry } from "./journal-store";
 import { loadActiveReservations, reserveAvailable, type ReserveRequest } from "./reservation-store";
-import { fundingEntry, openLedgerTestDb, TEST_ASSET, TEST_SCALE } from "../test-support/journal-fixtures";
+import {
+  fundingEntry,
+  openLedgerTestDb,
+  TEST_ASSET,
+  TEST_PROVENANCE,
+  TEST_SCALE,
+} from "../test-support/journal-fixtures";
 
 // The defects this file kills:
 //   * a reservation that is written but never reflected in the balances it
@@ -32,6 +38,7 @@ function request(overrides: Partial<ReserveRequest> = {}): ReserveRequest {
     occurredAt: "2026-01-02T03:05:00.000Z",
     recordedAt: "2026-01-02T03:05:01.000Z",
     expiresAt: "2026-01-02T03:10:00.000Z",
+    provenance: TEST_PROVENANCE,
     ...overrides,
   };
 }
@@ -46,7 +53,7 @@ beforeEach(async () => {
 
 async function availableBase(): Promise<bigint> {
   const balances = await loadBalances(db);
-  const row = balances.find((balance) => balance.accountKey === `holdings|available|${TEST_ASSET}`);
+  const row = balances.find((balance) => balance.accountKey === `holdings/available/${TEST_ASSET}`);
   return row === undefined ? 0n : row.debitBase - row.creditBase;
 }
 
@@ -70,7 +77,7 @@ describe("reserveAvailable", () => {
     expect(await availableBase()).toBe(400_000_000n);
 
     const balances = await loadBalances(db);
-    const reserved = balances.find((balance) => balance.accountKey === `holdings|reserved|${TEST_ASSET}`);
+    const reserved = balances.find((balance) => balance.accountKey === `holdings/reserved/${TEST_ASSET}`);
     expect(reserved?.debitBase).toBe(600_000_000n);
 
     const held = await loadActiveReservations(db, TEST_ASSET);
@@ -106,7 +113,7 @@ describe("reserveAvailable", () => {
     // Only the funding entry exists: the refused attempt rolled back whole.
     expect(await loadJournalEntries(db)).toHaveLength(1);
     const balances = await loadBalances(db);
-    expect(balances.map((balance) => balance.accountKey)).not.toContain(`holdings|reserved|${TEST_ASSET}`);
+    expect(balances.map((balance) => balance.accountKey)).not.toContain(`holdings/reserved/${TEST_ASSET}`);
   });
 
   it("reserves exactly the available balance and leaves nothing behind — catches the store's own feasibility check written as `<=`, which would strand the last base unit of every asset permanently unreservable", async () => {
