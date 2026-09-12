@@ -135,7 +135,10 @@ if [ "$1 $2" = "pr checks" ]; then
       exit 1
       ;;
     wait-no-checks)
-      echo 'no checks reported on the branch' >&2
+      # The real wording behind `gh pr checks --required`: it differs from the
+      # bare form (still exercised by wait-draft-then-ready's transitional poll
+      # above) by inserting "required".
+      echo "no required checks reported on the 'fixture' branch" >&2
       exit 1
       ;;
     *)
