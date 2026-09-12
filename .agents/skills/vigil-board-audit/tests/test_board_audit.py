@@ -275,6 +275,18 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(finding(report, 11, "done-but-open")["severity"], "finding")
         self.assertEqual(finding(report, 12, "closed-not-done")["severity"], "info")
 
+    def test_a_closed_done_issue_keeps_its_assignee_without_a_finding(self):
+        # #4 stays assigned to the owner and Done after the owner merged PR #12; the
+        # assignment convention in vigil-board's lifecycle.md governs open items only,
+        # so a closed issue's existing assignee is never a finding.
+        batch = {
+            4: issue(4, "BOOT-01: first code slice", fields=FULL | {
+                "Status": "Done", "Evidence": "https://github.com/ceponatia/vigil/pull/12",
+            }, assignees=("ceponatia",), state="CLOSED"),
+        }
+        report = AUDIT.audit(batch, OPTIONS)
+        self.assertEqual(codes(report, 4), [])
+
     def test_evidence_is_required_once_built_or_accepted(self):
         batch = {
             6: issue(6, "BOOT-04: L", fields=FULL | {"Status": "In review"}, assignees=("ceponatia",)),

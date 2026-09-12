@@ -538,13 +538,14 @@ def audit(batch: dict[int, dict], options: dict[str, list[str]], parent_arg: int
             add("closed-not-done", "info", detail="closed but not Done; only verified acceptance moves it")
 
         owner_turn = status in ("In review", DECISION)
-        if issue["assignees"] and not owner_turn:
-            add("assigned-outside-owner-turn", "finding",
-                detail="assigned to " + ", ".join(issue["assignees"]) + " while the next action is not the owner's; "
-                       f"the parent decides — `{BOARD_SET} {n} --unassign` only with its authorization")
-        if owner_turn and not issue["assignees"]:
-            add("owner-turn-unassigned", "finding", fixable=True, fix=f"{BOARD_SET} {n} --assign",
-                detail=f"{status} means the next action is the owner's, so the owner is assigned")
+        if issue["state"] == "OPEN":
+            if issue["assignees"] and not owner_turn:
+                add("assigned-outside-owner-turn", "finding",
+                    detail="assigned to " + ", ".join(issue["assignees"]) + " while the next action is not the owner's; "
+                           f"the parent decides — `{BOARD_SET} {n} --unassign` only with its authorization")
+            if owner_turn and not issue["assignees"]:
+                add("owner-turn-unassigned", "finding", fixable=True, fix=f"{BOARD_SET} {n} --assign",
+                    detail=f"{status} means the next action is the owner's, so the owner is assigned")
 
         reports.append({
             "number": n,
