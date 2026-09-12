@@ -34,7 +34,7 @@ The directory layout, module boundaries, and data flow are documented in [docs/a
 
 ## Working in this repository
 
-Agent roles, authority boundaries, the CI-only gate policy, and the Vigil Development board are described in [AGENTS.md](AGENTS.md).
+Agent roles, authority boundaries, the CI-only gate policy, and the [Vigil Development board](https://github.com/users/ceponatia/projects/8) are described in [AGENTS.md](AGENTS.md). The repository is [ceponatia/vigil](https://github.com/ceponatia/vigil).
 
 ## Documentation
 
