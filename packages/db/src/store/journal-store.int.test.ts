@@ -1,6 +1,8 @@
+import { sql } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { loadBalances, loadJournalEntries, postJournalEntry } from "./journal-store";
+import { journalEntries, journalLines } from "../schema/journal";
+import { describeDriverRefusal, loadBalances, loadJournalEntries, postJournalEntry } from "./journal-store";
 import {
   counterFamily,
   creditOf,
@@ -38,6 +40,15 @@ beforeEach(reset);
 async function netBaseOf(accountKey: string): Promise<bigint> {
   const row = (await loadBalances(db)).find((balance) => balance.accountKey === accountKey);
   return row === undefined ? 0n : row.debitBase - row.creditBase;
+}
+
+async function errorFrom(run: () => Promise<unknown>): Promise<unknown> {
+  try {
+    await run();
+    return null;
+  } catch (error) {
+    return error;
+  }
 }
 
 describe("postJournalEntry", () => {
@@ -79,6 +90,63 @@ describe("postJournalEntry", () => {
     expect(await loadJournalEntries(db)).toHaveLength(1);
     expect(await netBaseOf(`holdings|available|${TEST_ASSET}`)).toBe(FUNDED_BASE);
     expect((await loadBalances(db)).map((balance) => balance.accountKey)).not.toContain(`fees|-|${TEST_ASSET}`);
+  });
+
+  it("refuses an entry whose debits and credits do not match for an asset, before writing anything — catches the invariant living only in @vigil/ledger, which packages/db may not import: an entry that never went through the ledger would otherwise post a balance change with nothing on the other side of it", async () => {
+    const lopsided = storeEntry("entry-lopsided", "contribution", [
+      debitOf(heldIn("available"), 1_000n),
+      creditOf(counterFamily("contributed-capital"), 999n),
+    ]);
+
+    const result = await postJournalEntry(db, lopsided);
+
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.code).toBe("UNBALANCED_ENTRY");
+      expect(result.detail).toContain(TEST_ASSET);
+    }
+    expect(await loadJournalEntries(db)).toHaveLength(0);
+    expect(await loadBalances(db)).toHaveLength(0);
+  });
+
+  it("cannot be bypassed: the database itself refuses an unbalanced entry at commit — catches the store's bigint pre-check being the only thing enforcing the rule, so any other writer, repair script, or psql session could leave the journal not adding up", async () => {
+    const failure = await errorFrom(() =>
+      db.transaction(async (tx) => {
+        await tx.execute(sql`
+          insert into ${journalEntries} (entry_id, kind, occurred_at, recorded_at, correlation_id, idempotency_key)
+          values ('entry-bypass', 'contribution', '2026-01-02T03:04:05Z'::timestamptz, '2026-01-02T03:04:06Z'::timestamptz, 'corr-bypass', 'idem-bypass')
+        `);
+        await tx.execute(sql`
+          insert into ${journalLines}
+            (entry_id, line_index, account_key, account_family, holdings_state, asset_id, asset_scale, direction, amount_base)
+          values ('entry-bypass', 0, ${`holdings|available|${TEST_ASSET}`}, 'holdings', 'available', ${TEST_ASSET}, 6, 'debit', 1)
+        `);
+      }),
+    );
+
+    // Deferred to commit, so the single posting is written and then rejected
+    // as a whole rather than at the moment it is inserted.
+    expect(failure).not.toBeNull();
+    expect(describeDriverRefusal(failure)?.code).toBe("UNBALANCED_ENTRY");
+    expect(await loadJournalEntries(db)).toHaveLength(0);
+  });
+
+  it("refuses an amount with more digits than a base-unit column holds, as a diagnostic — catches a numeric field overflow surfacing as a raw driver error from the middle of a write, which a caller has no reason codes to act on", async () => {
+    const tooWide = 10n ** 79n;
+
+    const result = await postJournalEntry(
+      db,
+      storeEntry("entry-too-wide", "contribution", [
+        debitOf(heldIn("available"), tooWide),
+        creditOf(counterFamily("contributed-capital"), tooWide),
+      ]),
+    );
+
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.code).toBe("AMOUNT_OUT_OF_RANGE");
+    }
+    expect(await loadJournalEntries(db)).toHaveLength(0);
   });
 
   it("refuses a record that is not a double-entry posting before writing anything — catches a single-sided or unparseably-timestamped record reaching the tables, where the constraint that would have caught it fires halfway through a transaction instead of at the door", async () => {

@@ -5,11 +5,20 @@ configured in `drizzle.config.ts`. Never hand-edit a migration file after it
 has merged; if a mistake needs fixing, generate a new migration on top of it.
 
 `0000_ledger_baseline` creates the `journal` and `intents` record families
-from `packages/db/src/schema/`. `0001_journal_append_only_guard` is a custom
-(hand-authored) migration: it adds the trigger that rejects `UPDATE` and
-`DELETE` against a posted journal entry or posting, which `drizzle-kit`
-cannot generate from the schema. Its snapshot is identical to the previous
-one by design — it makes no schema-model transition.
+from `packages/db/src/schema/`. `0002_reservation_one_live_hold_per_intent`
+adds the partial unique index that allows one active hold per intent.
+
+Two migrations here are custom (hand-authored) rather than generated,
+because `drizzle-kit` cannot derive a trigger from the schema:
+
+- `0001_journal_append_only_guard` rejects `UPDATE` and `DELETE` against a
+  posted journal entry or posting.
+- `0003_journal_entry_balanced_guard` rejects, at commit, an entry whose
+  debits and credits do not match for every asset it touches.
+
+Each of the two carries a snapshot identical to the previous one by design:
+a custom migration that adds only DDL makes no schema-model transition, so
+there is nothing for the snapshot to record.
 
 ## Workflow
 

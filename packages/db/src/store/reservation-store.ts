@@ -5,15 +5,12 @@ import { reservations } from "../schema/intents";
 import { journalEntries, journalLines, ledgerBalances } from "../schema/journal";
 import {
   accountKeyFor,
+  compareAccountKeys,
+  describeDriverRefusal,
   type StoreAccount,
   type StoreDiagnosticCode,
 } from "./journal-store";
-import {
-  postgresConstraintName,
-  postgresErrorCode,
-  PG_CHECK_VIOLATION,
-  PG_UNIQUE_VIOLATION,
-} from "./pg-errors";
+import { parseIsoInstant } from "./instants";
 
 /**
  * Taking a reservation durably.
@@ -77,15 +74,23 @@ export type ReserveResult =
       readonly outcome: "refused";
       readonly code: StoreDiagnosticCode;
       readonly detail: string;
-      readonly availableBase: bigint;
+      /**
+       * The available balance this store read under the row lock, or `null`
+       * when the refusal happened before any balance was read — a malformed
+       * request, or a constraint the database rejected. Never a fabricated
+       * zero: "we did not look" and "the account is empty" are different
+       * answers, and an allocator that confused them would size its next
+       * attempt against a balance nobody measured.
+       */
+      readonly availableBase: bigint | null;
     };
 
 class ReservationRefused extends Error {
   public readonly code: StoreDiagnosticCode;
   public readonly detail: string;
-  public readonly availableBase: bigint;
+  public readonly availableBase: bigint | null;
 
-  public constructor(code: StoreDiagnosticCode, detail: string, availableBase: bigint) {
+  public constructor(code: StoreDiagnosticCode, detail: string, availableBase: bigint | null) {
     super(detail);
     this.name = "ReservationRefused";
     this.code = code;
@@ -114,22 +119,24 @@ async function findByIdempotencyKey(
 /**
  * Reserve base units from an asset's `available` balance.
  *
- * `available` is the only state this function reads, by construction: the
- * other five holdings states are refused before a request ever reaches the
- * store (`@vigil/ledger`'s `HOLDINGS_STATE_RESERVABILITY`), and no code path
- * here can be pointed at a staked or in-flight balance.
+ * `available` is the only state this function reads, and the guarantee is
+ * structural rather than checked: `ReserveRequest` carries no source state,
+ * so there is no argument that could point this at a staked, unbonding,
+ * exit-queued, or in-flight balance. `@vigil/ledger` refuses a *caller* that
+ * asks to reserve from one of those states; nothing wires that registry to
+ * this function, and nothing needs to.
  */
 export async function reserveAvailable(db: VigilDatabase, request: ReserveRequest): Promise<ReserveResult> {
-  const occurredAt = new Date(request.occurredAt);
-  const recordedAt = new Date(request.recordedAt);
-  const expiresAt = new Date(request.expiresAt);
+  const occurredAt = parseIsoInstant(request.occurredAt);
+  const recordedAt = parseIsoInstant(request.recordedAt);
+  const expiresAt = parseIsoInstant(request.expiresAt);
 
-  if ([occurredAt, recordedAt, expiresAt].some((value) => Number.isNaN(value.getTime()))) {
+  if (occurredAt === null || recordedAt === null || expiresAt === null) {
     return {
       outcome: "refused",
       code: "MALFORMED_ENTRY",
-      detail: `reservation ${request.reservationId} carries an unparseable timestamp`,
-      availableBase: 0n,
+      detail: `reservation ${request.reservationId} carries a timestamp that is not an ISO-8601 UTC instant on a real calendar day`,
+      availableBase: null,
     };
   }
 
@@ -140,7 +147,7 @@ export async function reserveAvailable(db: VigilDatabase, request: ReserveReques
   const accountRows = [
     { account: availableAccount, key: availableKey },
     { account: reservedAccount, key: reservedKey },
-  ].sort((left, right) => (left.key < right.key ? -1 : 1));
+  ].sort((left, right) => compareAccountKeys(left.key, right.key));
 
   const existing = await findByIdempotencyKey(db, request.idempotencyKey);
   if (existing !== null) {
@@ -282,34 +289,28 @@ export async function reserveAvailable(db: VigilDatabase, request: ReserveReques
       return { outcome: "refused", code: error.code, detail: error.detail, availableBase: error.availableBase };
     }
 
-    const code = postgresErrorCode(error);
-    const constraint = postgresConstraintName(error) ?? "unknown constraint";
+    const refusal = describeDriverRefusal(error);
+    if (refusal === null) {
+      throw error;
+    }
 
-    if (code === PG_UNIQUE_VIOLATION) {
+    // A duplicate here is the same request arriving twice concurrently: the
+    // fast-path lookup above found nothing because the winner had not
+    // committed yet. Report the hold that exists rather than a refusal.
+    if (refusal.code === "DUPLICATE_RECORD") {
       const duplicate = await findByIdempotencyKey(db, request.idempotencyKey);
       if (duplicate !== null) {
         return { outcome: "duplicate", reservationId: duplicate.reservationId, entryId: duplicate.journalEntryId };
       }
-      return {
-        outcome: "refused",
-        code: "DUPLICATE_RECORD",
-        detail: `unique constraint ${constraint} rejected the reservation`,
-        availableBase: 0n,
-      };
     }
-    if (code === PG_CHECK_VIOLATION) {
-      return {
-        outcome: "refused",
-        code: constraint === "ledger_balances_holdings_never_negative" ? "INSUFFICIENT_AVAILABLE" : "CONSTRAINT_VIOLATION",
-        detail: `check constraint ${constraint} rejected the reservation`,
-        availableBase: 0n,
-      };
-    }
-    throw error;
+
+    // The transaction rolled back before any balance was read under a lock,
+    // so there is no measured figure to report.
+    return { outcome: "refused", code: refusal.code, detail: refusal.detail, availableBase: null };
   }
 }
 
-/** Reservations held against one asset, newest first by recorded time. */
+/** Active reservations against one asset, in recorded order, oldest first. */
 export async function loadActiveReservations(
   db: VigilDatabase,
   assetId: string,

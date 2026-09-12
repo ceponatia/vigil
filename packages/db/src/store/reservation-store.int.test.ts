@@ -142,7 +142,35 @@ describe("reserveAvailable", () => {
     await expectNothingWritten();
   });
 
-  it("refuses a second reservation claiming the same attempt number on one intent — catches a retry treated as a fresh authorization instead of a versioned attempt", async () => {
+  it("refuses a second live hold on one intent even under a fresh attempt number, and holds the funds once — catches the defect that (intent_id, attempt) uniqueness alone leaves open: a caller whose first attempt timed out retries as attempt 2, nothing requires attempt 1 to be finished, and the intent ends up holding the capital twice", async () => {
+    const first = await reserveAvailable(db, request({ amountBase: 100_000_000n }));
+    const retryWhileLive = await reserveAvailable(
+      db,
+      request({
+        reservationId: "reservation-3",
+        entryId: "entry-hold-3",
+        idempotencyKey: "idem-reservation-3",
+        attempt: 2,
+        amountBase: 100_000_000n,
+      }),
+    );
+
+    expect(first.outcome).toBe("reserved");
+    expect(retryWhileLive.outcome).toBe("refused");
+    if (retryWhileLive.outcome === "refused") {
+      expect(retryWhileLive.code).toBe("INTENT_ALREADY_HELD");
+      // Refused by a unique index after the transaction rolled back, so no
+      // balance was measured under a lock. Reporting 0 here would read as
+      // "the account is empty" — it is not; it holds 900,000,000.
+      expect(retryWhileLive.availableBase).toBeNull();
+    }
+
+    // One hold, one hold's worth of capital committed.
+    expect(await loadActiveReservations(db, TEST_ASSET)).toHaveLength(1);
+    expect(await availableBase()).toBe(900_000_000n);
+  });
+
+  it("refuses a second reservation reusing one intent's attempt number — catches a retry treated as a fresh authorization instead of a versioned attempt", async () => {
     const first = await reserveAvailable(db, request({ amountBase: 100_000_000n }));
     const sameAttempt = await reserveAvailable(
       db,
@@ -157,26 +185,15 @@ describe("reserveAvailable", () => {
     expect(first.outcome).toBe("reserved");
     expect(sameAttempt.outcome).toBe("refused");
     if (sameAttempt.outcome === "refused") {
-      expect(sameAttempt.code).toBe("DUPLICATE_RECORD");
+      // This row violates both rules at once — same intent while a hold is
+      // live, and an attempt number already used — and Postgres does not
+      // promise which unique index reports first. Either diagnostic is the
+      // same refusal; what must never happen is a second hold. The claim
+      // that each index exists is asserted against the migrated database in
+      // schema-invariants.int.test.ts.
+      expect(["INTENT_ALREADY_HELD", "DUPLICATE_RECORD"]).toContain(sameAttempt.code);
     }
+    expect(await loadActiveReservations(db, TEST_ASSET)).toHaveLength(1);
     expect(await availableBase()).toBe(900_000_000n);
-  });
-
-  it("permits a second attempt on the same intent under a new attempt number — catches uniqueness written as intent_id alone, which would make a retry impossible after a release", async () => {
-    const first = await reserveAvailable(db, request({ amountBase: 100_000_000n }));
-    const retry = await reserveAvailable(
-      db,
-      request({
-        reservationId: "reservation-3",
-        entryId: "entry-hold-3",
-        idempotencyKey: "idem-reservation-3",
-        attempt: 2,
-        amountBase: 100_000_000n,
-      }),
-    );
-
-    expect(first.outcome).toBe("reserved");
-    expect(retry.outcome).toBe("reserved");
-    expect(await availableBase()).toBe(800_000_000n);
   });
 });

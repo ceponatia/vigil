@@ -23,13 +23,22 @@ import { BASE_UNIT_PRECISION, journalEntries } from "./journal";
  *
  * A reservation is the durable record that capital is committed to one
  * intent, written **before** anything acts on it (`docs/resilience.md` §9).
- * Three unique constraints carry invariants the application must not be
+ * Four unique constraints carry invariants the application must not be
  * trusted to hold on its own:
  *
  * - `idempotency_key` — the same reservation request delivered twice holds
  *   funds once.
- * - `(intent_id, attempt)` — a retry is a versioned attempt on the same
- *   intent, never a second authorization to spend.
+ * - `(intent_id, attempt)` — two rows can never claim to be the same attempt
+ *   on one intent, so an attempt number always names one authorization.
+ * - **one live hold per intent** — a partial unique index over `intent_id`
+ *   where `state = 'active'`. `(intent_id, attempt)` alone does not deliver
+ *   "a retry is a versioned attempt, never a second authorization to spend":
+ *   nothing in it requires the previous attempt to be finished, so a caller
+ *   that timed out and retried under attempt 2 would hold the funds twice
+ *   while attempt 1 is still live. The index is partial so that a released,
+ *   consumed, or expired hold stops blocking the next attempt the moment it
+ *   reaches a terminal state — which is what makes a genuine retry possible
+ *   once the release path exists.
  * - `journal_entry_id` — exactly one hold posting per reservation, so a
  *   reservation cannot be backed by two different balance movements.
  */
@@ -65,6 +74,9 @@ export const reservations = pgTable(
   (table) => [
     uniqueIndex("reservations_idempotency_key_key").on(table.idempotencyKey),
     uniqueIndex("reservations_intent_id_attempt_key").on(table.intentId, table.attempt),
+    uniqueIndex("reservations_intent_id_active_key")
+      .on(table.intentId)
+      .where(sql`state = 'active'`),
     uniqueIndex("reservations_journal_entry_id_key").on(table.journalEntryId),
     index("reservations_correlation_id_idx").on(table.correlationId),
     index("reservations_state_expires_at_idx").on(table.state, table.expiresAt),

@@ -97,6 +97,14 @@ export const journalEntries = pgTable(
      * timestamp: two entries recorded in the same millisecond would have no
      * defined order otherwise, and a correction that replayed before the
      * entry it corrects is a rebuild that fails or, worse, does not.
+     *
+     * It orders a **full** reload and nothing else. Sequence values are
+     * drawn before commit, so two concurrent writers can commit out of
+     * order — 8 becoming visible before 7 — and a tailing consumer that
+     * remembered `entry_sequence > lastSeen` would skip the laggard
+     * permanently. Reading the whole journal, which is what a restart does,
+     * is unaffected: every committed row is present and its order is total.
+     * An incremental consumer needs a different mechanism than this column.
      */
     entrySequence: bigserial("entry_sequence", { mode: "bigint" }).notNull(),
     kind: journalEntryKindEnum("kind").notNull(),

@@ -15,6 +15,20 @@
       "when": 1789247565077,
       "tag": "0001_journal_append_only_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789250279383,
+      "tag": "0002_reservation_one_live_hold_per_intent",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789250328454,
+      "tag": "0003_journal_entry_balanced_guard",
+      "breakpoints": true
     }
   ]
 }

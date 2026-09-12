@@ -67,8 +67,10 @@ as later slices need to.
 - **Timestamps** are `timestamptz(3)`: millisecond precision, matching what
   an ISO-8601 timestamp carries, so a stored instant is always one the
   application can read back and replay exactly.
-- **Idempotency and correlation keys** carry unique constraints, not merely
-  indexes.
+- **Idempotency keys are unique**, enforced by unique indexes — an
+  idempotency key that is merely indexed stops nothing. Correlation ids are
+  deliberately *not* unique: one correlation id ties an intent, its attempts,
+  and its outcome together, so it is indexed for lookup and nothing more.
 - **Journal tables are append-only.** A trigger rejects every `UPDATE` and
   `DELETE` against a posted entry or posting; a correction is a reversing
   entry. `ledger_balances` is a projection of the journal and is updated in
@@ -76,6 +78,19 @@ as later slices need to.
 - **Vocabularies are Postgres enums**, so a column cannot hold a holdings
   state, account family, entry kind, or reservation state that does not
   exist.
+
+## Forward-declared seams
+
+- **The reservation lifecycle.** `reservation_state` declares
+  `active → released | consumed | expired`, and only `active` is ever
+  written: nothing releases, consumes, or expires a hold yet, and
+  `expires_at` is stored but never read. The values and the column exist now
+  so the execution slice that owns those transitions changes behavior rather
+  than the schema — and so the partial unique index that allows one live
+  hold per intent already has the terminal states it will need.
+- **Asset identity.** `asset_id` is canonical-id text with no foreign key;
+  the `assets` record family and the key arrive with the slice that creates
+  it.
 
 ## Built modules
 

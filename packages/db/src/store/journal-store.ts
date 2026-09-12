@@ -10,10 +10,12 @@ import {
   type JournalEntryKindValue,
   type PostingDirectionValue,
 } from "../schema/journal";
+import { parseIsoInstant } from "./instants";
 import {
   postgresConstraintName,
   postgresErrorCode,
   PG_CHECK_VIOLATION,
+  PG_NUMERIC_VALUE_OUT_OF_RANGE,
   PG_UNIQUE_VIOLATION,
 } from "./pg-errors";
 
@@ -39,6 +41,12 @@ export const STORE_DIAGNOSTIC_CODES = [
   "INSUFFICIENT_AVAILABLE",
   /** The record could not be read as a journal entry. */
   "MALFORMED_ENTRY",
+  /** Debits and credits do not match for at least one asset in the entry. */
+  "UNBALANCED_ENTRY",
+  /** The amount has more digits than a base-unit column holds. */
+  "AMOUNT_OUT_OF_RANGE",
+  /** The intent already holds funds; a retry is a versioned attempt, not a second hold. */
+  "INTENT_ALREADY_HELD",
   /** A unique constraint rejected the write; the record already exists. */
   "DUPLICATE_RECORD",
   /** A check constraint rejected the write. */
@@ -99,45 +107,121 @@ export function accountKeyFor(account: StoreAccount): string {
   return `${account.family}|${account.holdingsState ?? "-"}|${account.assetId}`;
 }
 
-function parseInstant(value: string): Date | null {
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? null : new Date(parsed);
+/**
+ * A total order over account keys, used to take row locks in the same order
+ * everywhere. Deliberately a codepoint comparison rather than
+ * `localeCompare`: collation depends on the process's locale, and two
+ * processes that disagree about the order of two keys deadlock against each
+ * other instead of queueing. Equal keys compare 0, so a sort cannot reorder
+ * them arbitrarily either.
+ */
+export function compareAccountKeys(left: string, right: string): number {
+  if (left === right) {
+    return 0;
+  }
+  return left < right ? -1 : 1;
 }
 
 /**
- * Reject what the driver would only fail on obscurely — an unparseable
- * timestamp, an entry with nothing to post. Amounts, scales, and the
- * account-family pairing are checked by the table's own constraints, and a
- * violation there comes back as a diagnostic too.
+ * The per-asset balancing rule, checked in `bigint` before anything is
+ * written.
+ *
+ * `@vigil/ledger` owns this invariant, and `packages/db` may not import it
+ * (the layer graph runs one way), so an entry that never went through the
+ * ledger would otherwise reach the tables unbalanced. The database enforces
+ * the same rule at commit time through the constraint triggers in
+ * `drizzle/0003_journal_entry_balanced_guard.sql`; this check exists so the
+ * ordinary path answers with a diagnostic instead of a deferred trigger
+ * firing on COMMIT.
  */
-function describeMalformed(entry: StoreEntry): string | null {
-  if (entry.lines.length < 2) {
-    return `entry ${entry.entryId} has ${String(entry.lines.length)} lines; a double-entry posting has at least two`;
+function describeImbalance(lines: readonly StoreLine[]): string | null {
+  const netByAsset = new Map<string, bigint>();
+  for (const line of lines) {
+    const signed = line.direction === "debit" ? line.amountBase : -line.amountBase;
+    netByAsset.set(line.account.assetId, (netByAsset.get(line.account.assetId) ?? 0n) + signed);
   }
-  for (const field of ["occurredAt", "recordedAt"] as const) {
-    if (parseInstant(entry[field]) === null) {
-      return `entry ${entry.entryId} carries an unparseable ${field}: ${entry[field]}`;
+
+  for (const [assetId, net] of netByAsset) {
+    if (net !== 0n) {
+      return `asset ${assetId} is out of balance by ${net.toString()} base units; debits and credits must match per asset`;
     }
   }
   return null;
 }
 
-function refuseFromDriver(error: unknown): PostEntryResult | null {
+type EntryPreflight =
+  | { readonly outcome: "ok"; readonly occurredAt: Date; readonly recordedAt: Date }
+  | { readonly outcome: "refused"; readonly code: StoreDiagnosticCode; readonly detail: string };
+
+/**
+ * Reject, before any write, what the driver would only fail on obscurely: an
+ * entry with nothing to post, a timestamp that is not a real instant, and a
+ * posting that does not balance. Amounts, scales, and the account-family
+ * pairing are checked by the table's own constraints, and a violation there
+ * comes back as a diagnostic too.
+ */
+function preflight(entry: StoreEntry): EntryPreflight {
+  if (entry.lines.length < 2) {
+    return {
+      outcome: "refused",
+      code: "MALFORMED_ENTRY",
+      detail: `entry ${entry.entryId} has ${String(entry.lines.length)} lines; a double-entry posting has at least two`,
+    };
+  }
+
+  const occurredAt = parseIsoInstant(entry.occurredAt);
+  const recordedAt = parseIsoInstant(entry.recordedAt);
+  if (occurredAt === null || recordedAt === null) {
+    return {
+      outcome: "refused",
+      code: "MALFORMED_ENTRY",
+      detail: `entry ${entry.entryId} carries a timestamp that is not an ISO-8601 UTC instant on a real calendar day`,
+    };
+  }
+
+  const imbalance = describeImbalance(entry.lines);
+  if (imbalance !== null) {
+    return { outcome: "refused", code: "UNBALANCED_ENTRY", detail: `entry ${entry.entryId}: ${imbalance}` };
+  }
+
+  return { outcome: "ok", occurredAt, recordedAt };
+}
+
+/**
+ * What a driver error means in this application's vocabulary, or null when
+ * it is not a constraint the store recognises — an unreachable database or a
+ * malformed query is a real failure and is re-thrown, never reported as a
+ * routine refusal. Shared by both stores so the two cannot drift into
+ * describing the same violation differently.
+ */
+export function describeDriverRefusal(
+  error: unknown,
+): { readonly code: StoreDiagnosticCode; readonly detail: string } | null {
   const code = postgresErrorCode(error);
   const constraint = postgresConstraintName(error) ?? "unknown constraint";
 
   if (code === PG_CHECK_VIOLATION) {
     if (constraint === "ledger_balances_holdings_never_negative") {
+      return { code: "INSUFFICIENT_AVAILABLE", detail: "the posting would credit a holdings account below zero" };
+    }
+    // Both constraint triggers from drizzle/0003 report under their own
+    // trigger name, so the mapping names both rather than matching a suffix.
+    if (constraint === "journal_lines_balanced" || constraint === "journal_entries_balanced") {
       return {
-        outcome: "refused",
-        code: "INSUFFICIENT_AVAILABLE",
-        detail: "the posting would credit a holdings account below zero",
+        code: "UNBALANCED_ENTRY",
+        detail: "the entry is not a balanced double-entry posting for every asset it touches",
       };
     }
-    return { outcome: "refused", code: "CONSTRAINT_VIOLATION", detail: `check constraint ${constraint} rejected the write` };
+    return { code: "CONSTRAINT_VIOLATION", detail: `check constraint ${constraint} rejected the write` };
   }
   if (code === PG_UNIQUE_VIOLATION) {
-    return { outcome: "refused", code: "DUPLICATE_RECORD", detail: `unique constraint ${constraint} rejected the write` };
+    if (constraint === "reservations_intent_id_active_key") {
+      return { code: "INTENT_ALREADY_HELD", detail: "this intent already holds funds; release the live hold before retrying" };
+    }
+    return { code: "DUPLICATE_RECORD", detail: `unique constraint ${constraint} rejected the write` };
+  }
+  if (code === PG_NUMERIC_VALUE_OUT_OF_RANGE) {
+    return { code: "AMOUNT_OUT_OF_RANGE", detail: "the amount has more digits than a numeric(78, 0) base-unit column holds" };
   }
   return null;
 }
@@ -151,13 +235,11 @@ function refuseFromDriver(error: unknown): PostEntryResult | null {
  * Delivered twice with the same idempotency key, it posts once.
  */
 export async function postJournalEntry(db: VigilDatabase, entry: StoreEntry): Promise<PostEntryResult> {
-  const malformed = describeMalformed(entry);
-  if (malformed !== null) {
-    return { outcome: "refused", code: "MALFORMED_ENTRY", detail: malformed };
+  const checked = preflight(entry);
+  if (checked.outcome === "refused") {
+    return checked;
   }
-
-  const occurredAt = new Date(entry.occurredAt);
-  const recordedAt = new Date(entry.recordedAt);
+  const { occurredAt, recordedAt } = checked;
 
   try {
     return await db.transaction(async (tx): Promise<PostEntryResult> => {
@@ -204,7 +286,7 @@ export async function postJournalEntry(db: VigilDatabase, entry: StoreEntry): Pr
       // accounts always take their row locks in the same order; unsorted
       // upserts deadlock instead of queueing.
       const ordered = [...entry.lines].sort((left, right) =>
-        accountKeyFor(left.account) < accountKeyFor(right.account) ? -1 : 1,
+        compareAccountKeys(accountKeyFor(left.account), accountKeyFor(right.account)),
       );
 
       for (const line of ordered) {
@@ -233,9 +315,9 @@ export async function postJournalEntry(db: VigilDatabase, entry: StoreEntry): Pr
       return { outcome: "posted", entryId: entry.entryId };
     });
   } catch (error) {
-    const refusal = refuseFromDriver(error);
+    const refusal = describeDriverRefusal(error);
     if (refusal !== null) {
-      return refusal;
+      return { outcome: "refused", code: refusal.code, detail: refusal.detail };
     }
     throw error;
   }

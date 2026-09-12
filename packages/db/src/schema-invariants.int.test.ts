@@ -153,6 +153,7 @@ describe("idempotency and correlation keys", () => {
         "journal_entries_idempotency_key_key",
         "journal_entries_reverses_entry_id_key",
         "reservations_idempotency_key_key",
+        "reservations_intent_id_active_key",
         "reservations_intent_id_attempt_key",
         "reservations_journal_entry_id_key",
       ]),

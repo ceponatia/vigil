@@ -11,8 +11,13 @@
 
 export const PG_UNIQUE_VIOLATION = "23505";
 export const PG_CHECK_VIOLATION = "23514";
-export const PG_NOT_NULL_VIOLATION = "23502";
-export const PG_FOREIGN_KEY_VIOLATION = "23503";
+/**
+ * `numeric field overflow`: an amount with more digits than a
+ * `numeric(78, 0)` base-unit column holds. `@vigil/ledger` refuses such an
+ * amount before it is ever built into an entry, so reaching this code means
+ * a caller bypassed that check — it is still a diagnostic, never a crash.
+ */
+export const PG_NUMERIC_VALUE_OUT_OF_RANGE = "22003";
 /** Raised by the append-only trigger on the journal tables. */
 export const PG_RAISE_EXCEPTION = "P0001";
 
