@@ -20,7 +20,7 @@ This is the canonical documentation for vigil, an autonomous crypto research, tr
 ## Documentation rules
 
 - **Invoke the `vigil-docs` skill before editing anything under `docs/`.** It owns the authoring law this page does not: where a fact belongs, the reference-page shape, table formatting, and the validation checklist.
-- **These docs say what is true now.** Present tense, no rollout plans, no history. Work state — status, priority, iteration, assignment — lives on the Vigil Development board and in GitHub issues, never in a document.
+- **These docs say what is true now.** Present tense, no rollout plans, no history. Work state — status, priority, iteration, assignment — lives on the [Vigil Development board](https://github.com/users/ceponatia/projects/8) and in GitHub issues, never in a document.
 - **A reference doc contains its own substance.** Never defer a page's content to a document the reader has to go find elsewhere; state it here.
 - **Never name a retired document**, as a link or as plain text. If a rule came from one, state the rule instead of pointing at where it used to live.
 - **Tables are formatted for the raw Markdown, not just the rendered page** — every row one physical line, pipes aligned in the source.
