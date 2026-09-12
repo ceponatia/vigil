@@ -78,17 +78,72 @@ describe("evaluateQuoteFreshness — corruption and schema-invalid input", () =>
   });
 
   it("treats a future-dated quote-acquisition timestamp as corrupt, not as unusually fresh", () => {
-    const pastNow = parse("2024-01-01T00:00:00.000Z");
-    const result = evaluateQuoteFreshness({ raw: validQuote, now: pastNow, maxAgeMs: MAX_AGE_MS });
+    // validQuote's quoteAcquiredAt is 2024-01-01T00:00:00.000Z and its
+    // ingestedAt is 250ms later — use a "now" at or after ingestedAt so
+    // this sanity check exercises only the quoteAcquiredAt-vs-now
+    // comparison, not the separate ingestedAt-vs-now provenance check
+    // below.
+    const atIngestion = parse("2024-01-01T00:00:00.250Z");
+    const result = evaluateQuoteFreshness({ raw: validQuote, now: atIngestion, maxAgeMs: MAX_AGE_MS });
     // validQuote's quoteAcquiredAt is 2024-01-01T00:00:00.000Z; use a "now"
     // strictly before it to force a negative age.
     const earlierNow = parse("2023-12-31T23:59:59.000Z");
     const negativeAgeResult = evaluateQuoteFreshness({ raw: validQuote, now: earlierNow, maxAgeMs: MAX_AGE_MS });
-    expect(result.executable).toBe(true); // sanity: pastNow === acquisition time is age 0, not negative
+    expect(result.executable).toBe(true); // sanity: now at or after acquisition is a positive age, not negative
     expect(negativeAgeResult.executable).toBe(false);
     if (!negativeAgeResult.executable) {
       expect(negativeAgeResult.reasonCode).toBe("STALE_QUOTE");
       expect(negativeAgeResult.detail).toContain("after");
+    }
+  });
+
+  it("treats a NaN maxAgeMs as corrupt configuration — a naive `age > maxAgeMs` comparison is false whenever maxAgeMs is NaN, which would fail OPEN (every quote looks fresh) rather than closed", () => {
+    const result = evaluateQuoteFreshness({ raw: validQuote, now, maxAgeMs: Number.NaN });
+    expect(result.executable).toBe(false);
+    if (!result.executable) {
+      expect(result.reasonCode).toBe("STALE_QUOTE");
+    }
+  });
+
+  it("treats an infinite or negative maxAgeMs as corrupt configuration, not as 'nothing is ever stale' or 'everything is always stale'", () => {
+    const infiniteResult = evaluateQuoteFreshness({ raw: validQuote, now, maxAgeMs: Number.POSITIVE_INFINITY });
+    const negativeResult = evaluateQuoteFreshness({ raw: validQuote, now, maxAgeMs: -1 });
+    expect(infiniteResult.executable).toBe(false);
+    expect(negativeResult.executable).toBe(false);
+  });
+
+  it('treats an unparseable "now" as corrupt, not as "always fresh" — only reachable through a cast that bypasses the IsoUtcTimestamp brand, since ageMs("now" unparseable) is NaN and `NaN > maxAgeMs` is false', () => {
+    const badNow = "not-a-timestamp" as unknown as IsoUtcTimestamp;
+    const result = evaluateQuoteFreshness({ raw: validQuote, now: badNow, maxAgeMs: MAX_AGE_MS });
+    expect(result.executable).toBe(false);
+    if (!result.executable) {
+      expect(result.reasonCode).toBe("STALE_QUOTE");
+    }
+  });
+
+  it("treats ingestedAt earlier than quoteAcquiredAt as corrupt provenance — ingestion cannot precede acquisition (docs/evaluation.md \"Point-in-time integrity\")", () => {
+    const raw = {
+      ...validQuote,
+      timestamps: { quoteAcquiredAt: validQuote.timestamps.quoteAcquiredAt, ingestedAt: "2023-12-31T23:59:59.000Z" },
+    };
+    const result = evaluateQuoteFreshness({ raw, now, maxAgeMs: MAX_AGE_MS });
+    expect(result.executable).toBe(false);
+    if (!result.executable) {
+      expect(result.reasonCode).toBe("STALE_QUOTE");
+      expect(result.detail).toContain("precedes");
+    }
+  });
+
+  it('treats ingestedAt later than "now" as corrupt provenance — ingestion cannot happen in the future relative to the evaluation time', () => {
+    const raw = {
+      ...validQuote,
+      timestamps: { quoteAcquiredAt: validQuote.timestamps.quoteAcquiredAt, ingestedAt: "2024-01-01T00:00:05.000Z" },
+    };
+    const result = evaluateQuoteFreshness({ raw, now, maxAgeMs: MAX_AGE_MS });
+    expect(result.executable).toBe(false);
+    if (!result.executable) {
+      expect(result.reasonCode).toBe("STALE_QUOTE");
+      expect(result.detail).toContain("after");
     }
   });
 });
