@@ -11,15 +11,17 @@ ln -s "$HERE/mock-gh.sh" "$TMP/bin/gh"
 ln -s /usr/bin/true "$TMP/bin/sleep"
 
 run_case() {
-  local scenario=$1 expected_rc=$2 expected_text=$3 timeout=$5
+  local scenario=$1 expected_rc=$2 expected_text=$3 timeout=$5 also=${6:-}
   local state="$TMP/$scenario"
   mkdir -p "$state"
   set +e
   output=$(PATH="$TMP/bin:$PATH" VIGIL_REVIEW_ENV="$HERE/review.env" TEST_SCENARIO="$scenario" TEST_STATE_DIR="$state" "$SKILL/${4}" 1 --timeout-min "$timeout" --interval-sec 1 2>&1)
   rc=$?
   set -e
-  if [ "$rc" -ne "$expected_rc" ] || ! grep -Fq "$expected_text" <<<"$output"; then
-    printf 'FAIL %s: rc=%s, wanted rc=%s and %q\n%s\n' "$scenario" "$rc" "$expected_rc" "$expected_text" "$output" >&2
+  if [ "$rc" -ne "$expected_rc" ] || ! grep -Fq "$expected_text" <<<"$output" \
+    || { [ -n "$also" ] && ! grep -Fq "$also" <<<"$output"; }; then
+    printf 'FAIL %s: rc=%s, wanted rc=%s and %q%s\n%s\n' "$scenario" "$rc" "$expected_rc" "$expected_text" \
+      "${also:+ and $(printf '%q' "$also")}" "$output" >&2
     exit 1
   fi
   printf 'ok  %s\n' "$scenario"
@@ -43,25 +45,30 @@ run_review() {
 
 # Valid JSON remains authoritative even with gh's documented rc=8/rc=1.
 run_case wait-pending 0 'GREEN: required CI/verify succeeded for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 1
-# A draft-triggered run's skipped verify lingers in the rollup alongside the
-# ready-triggered run's own verify for the same head (PR #12's actual shape at
-# da96d76b: runs 34716578875 skipped, 34716584247 pending then success). The
-# newer run's verify — not the superseded skip — decides pending vs. green.
-run_case wait-draft-then-ready 0 'GREEN: required CI/verify succeeded for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 1
+# The live draft-then-ready sequence on PR #14 at head 72338c5, poll by poll.
+# The checks rollup holds ONE entry per check name and replaces it, so while the
+# ready-triggered run 34719267014 is in progress the only CI/verify on the head
+# is still the draft run 34719260700's SKIPPED one — the shape that made this
+# helper exit 1 on a PR whose CI went on to pass. The run list is the only
+# source that separates it from a lone skip, so the helper must name the newer
+# run and keep waiting, then go green on that run's own verify.
+run_case wait-draft-then-ready 0 \
+  'GREEN: required CI/verify succeeded for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 1 \
+  'CI/verify is absent for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (newest CI run 34719267014: in_progress/-)'
 run_case wait-failing 1 'FAILED for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 0
-# Only a superseded skip is dropped. A lone skipped CI/verify — a draft run's
-# verify with no newer run for this head — is still a failure; this kills a drop
-# written without the "a newer CI/verify exists" guard, which would turn the
-# documented exit 1 into an endless "CI/verify is absent" wait.
+# Only a superseded verify is dropped. A skipped CI/verify that belongs to the
+# NEWEST CI run for the head — a draft-guarded run with nothing behind it — is
+# still the documented exit 1; this kills a drop written on the bucket or on the
+# rollup alone, which would turn that failure into an endless wait.
 run_case wait-skipped-only 1 $'  SKIPPED\tCI/verify' wait-ci.sh 0
-# Only CI/verify is superseded, and only for its own check. Beside the very
+# Supersession is scoped to CI/verify and to its own workflow. Beside the very
 # draft-then-ready shape that triggers the drop, another workflow's skipped
 # required check is still a failure; this kills a drop written on the bucket
 # alone, which would report GREEN over a skipped required peer check.
 run_case wait-peer-skipped 1 'Security/security' wait-ci.sh 0
 # A draft run's verify left CANCELLED by the workflow's own
-# concurrency: cancel-in-progress (the ready run starts while the draft run is
-# still queued) is superseded the same way a skip is: the ready run's own
+# concurrency: cancel-in-progress (the ready run is created while the draft run
+# is still queued) is superseded the same way a skip is: the ready run's own
 # verify decides pending vs. green.
 run_case wait-draft-cancelled-then-ready 0 'GREEN: required CI/verify succeeded for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 1
 # An unrelated successful check cannot satisfy the required aggregate.
@@ -70,6 +77,10 @@ run_case wait-no-checks 2 'no required checks registered' wait-ci.sh 0
 run_case wait-required-peer-fail 1 'Security/security' wait-ci.sh 0
 # A successful sample is discarded when the full head changes during the read.
 run_case wait-stale 2 'discarded checks read for the previous head' wait-ci.sh 0
+# Two draft-guarded runs for one head and nothing newer: the rollup carries the
+# newer run's skipped verify (the older run's entry was replaced, not kept
+# beside it) and no run supersedes it, so this stays the documented exit 1.
+run_case wait-verify-all-skipped 1 $'  SKIPPED\tCI/verify' wait-ci.sh 0
 
 run_review review-clean clean
 run_review review-old-open-clean findings
@@ -114,17 +125,32 @@ grep -Fq 'CI:' <<<"$output" || { echo "FAIL no-reviewer: CI section did not run"
 grep -Fq 'threads: 0 total' <<<"$output" || { echo "FAIL no-reviewer: threads section did not run" >&2; exit 1; }
 echo 'ok  review-status degrades to unverified without a configured reviewer, without failing'
 
-# --- standing expectation for an open production defect ---------------------
+# --- the run list is load-bearing, not advisory -----------------------------
 
-# Two runs for the same head, both with a skipped CI/verify, and no live verify
-# to supersede either. wait-ci.sh's own contract — its header, "1 verify failed/
-# cancelled/skipped" — and the lone-skip case above both make this exit 1 naming
-# the skipped verify. The supersede clause added in 7f6e138 instead drops EVERY
-# skipped CI/verify once more than one verify exists, the newest included, so it
-# reports "required checks exist, but CI/verify is absent for head" — false, two
-# exist and both are skipped — and waits out the timeout for exit 2 instead.
-# This expectation stands as the evidence for that defect and is not relaxed to
-# match the code; the drop belongs behind "a non-skipped CI/verify exists".
-run_case wait-verify-all-skipped 1 $'  SKIPPED\tCI/verify' wait-ci.sh 0
+# wait-ci.sh cannot tell a superseded verify from a lone one without the run
+# list, so a run list it cannot read must spend the error budget and abort with
+# the API exit code — never fall back to judging the rollup alone, which is the
+# rule that produced the false red this suite exists to prevent.
+state="$TMP/runs-unreadable"
+mkdir -p "$state/bin"
+ln -s "$HERE/mock-gh.sh" "$state/bin/gh-real"
+cat >"$state/bin/gh" <<'SHIM'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "run list" ]; then
+  echo 'HTTP 503: unavailable' >&2
+  exit 1
+fi
+exec "$(dirname "$0")/gh-real" "$@"
+SHIM
+chmod +x "$state/bin/gh"
+ln -s /usr/bin/true "$state/bin/sleep"
+set +e
+output=$(PATH="$state/bin:$PATH" VIGIL_REVIEW_ENV="$HERE/review.env" TEST_SCENARIO=wait-pending TEST_STATE_DIR="$state" \
+  "$SKILL/wait-ci.sh" 1 --timeout-min 5 --interval-sec 1 --max-errors 2 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 5 ] || { echo "FAIL runs-unreadable: rc=$rc, wanted 5" >&2; echo "$output" >&2; exit 1; }
+grep -Fq 'gh run list rc=1' <<<"$output" || { echo "FAIL runs-unreadable: did not name the failing read: $output" >&2; exit 1; }
+echo 'ok  wait-ci aborts on a repeatedly unreadable run list instead of judging the rollup alone'
 
 echo 'all offline helper regressions passed'
