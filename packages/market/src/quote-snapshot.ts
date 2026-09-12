@@ -14,6 +14,14 @@ import { instrumentIdSchema } from "./instrument-identity";
  * Every price and quantity is a `DecimalString` (@vigil/contracts
  * money.ts): never a JavaScript number, never routed through
  * `parseFloat`/`Number()`/`toFixed`.
+ *
+ * This schema does not reject a crossed book (`askPrice` at or below
+ * `bidPrice`) — that comparison needs decimal arithmetic on two
+ * `DecimalString` values, and this package deliberately carries no
+ * decimal-arithmetic library yet (this package's README, "What it must
+ * never do"). A crossed-book check lands with whatever decimal-comparison
+ * primitive that future slice adds, not as an arithmetic implementation
+ * here.
  */
 export const quoteSnapshotSchema = z.object({
   instrumentId: instrumentIdSchema,

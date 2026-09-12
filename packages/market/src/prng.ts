@@ -13,6 +13,14 @@ import type { DecimalString } from "@vigil/contracts";
  * of that decision" — packages/contracts/README.md); `unitsToDecimalString`
  * below is scoped to this package's own synthetic-fixture need, not a
  * general-purpose money formatter for the whole workspace.
+ *
+ * `randomBigIntInRange` and `unitsToDecimalString` throw on invalid
+ * arguments (inverted bounds; a negative or non-integer scale) instead of
+ * returning a diagnostic. That is safe only because this module is never
+ * re-exported from `index.ts` — its only callers are this package's own
+ * source and tests, never external or untrusted input. If this module is
+ * ever added to the package's public surface, these guards must become
+ * reason-coded diagnostics instead (docs/resilience.md §4).
  */
 
 /**
@@ -81,10 +89,11 @@ export function unitsToDecimalString(units: bigint, scale: number): DecimalStrin
   const integerPart = scale === 0 ? padded : padded.slice(0, splitAt);
   const fractionPart = scale === 0 ? "" : padded.slice(splitAt);
 
-  // Negative zero (`-0`, `-0.00`, …) is not a valid DecimalString
-  // (packages/contracts/src/money.ts) — suppress the sign whenever the
-  // magnitude is exactly zero.
-  const sign = negative && absoluteUnits !== 0n ? "-" : "";
+  // bigint has no distinct negative zero (`-0n === 0n`), so `negative`
+  // being true already implies a strictly non-zero magnitude — no extra
+  // zero-check is needed to avoid ever emitting the negative-zero spelling
+  // (packages/contracts/src/money.ts) that decimalStringSchema rejects.
+  const sign = negative ? "-" : "";
   const raw = fractionPart.length > 0 ? `${sign}${integerPart}.${fractionPart}` : `${sign}${integerPart}`;
 
   return decimalStringSchema.parse(raw);

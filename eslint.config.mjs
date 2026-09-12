@@ -81,6 +81,7 @@ const MONEY_GUARD_FILES = [
   "packages/ledger/**/*.{ts,tsx}",
   "packages/policy/**/*.{ts,tsx}",
   "packages/strategies/**/*.{ts,tsx}",
+  "packages/market/**/*.{ts,tsx}",
   "apps/trading/**/*.{ts,tsx}",
 ];
 const MONEY_GUARD_MESSAGE = "money and quantities are decimal strings or integer base units; see docs/resilience.md";

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { decimalStringSchema } from "@vigil/contracts";
 
 import { createMulberry32, randomBigIntInRange, unitsToDecimalString } from "./prng";
 
@@ -95,16 +96,11 @@ describe("unitsToDecimalString", () => {
     expect(unitsToDecimalString(units, scale)).toBe(expected);
   });
 
-  it("never produces a value rejected by decimalStringSchema — catches a formatter that emits a leading zero, a trailing dot, or negative zero, which @vigil/contracts' money guard would reject at the next trust boundary", async () => {
-    const { decimalStringSchema } = await import("@vigil/contracts");
+  it("never produces a value rejected by decimalStringSchema — catches a formatter that emits a leading zero, a trailing dot, or negative zero, which @vigil/contracts' money guard would reject at the next trust boundary", () => {
     for (const { units, scale } of cases) {
       const rendered = unitsToDecimalString(units, scale);
       expect(decimalStringSchema.safeParse(rendered).success).toBe(true);
     }
-  });
-
-  it("never renders negative zero for a negative bigint whose magnitude is zero — bigint has no distinct -0n, but this guards the string-formatting path itself", () => {
-    expect(unitsToDecimalString(-0n, 2)).toBe("0.00");
   });
 
   it("throws for a negative scale — a programmer error, not external input", () => {
