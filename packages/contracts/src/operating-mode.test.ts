@@ -6,7 +6,19 @@ import type { OperatingMode } from "./operating-mode";
 // Table-driven from the registry itself (OPERATING_MODES), never a
 // hand-copied list, so this suite cannot drift from docs/policy.md
 // "Operating modes" the way a separately typed-out list of modes could.
+//
+// The consequence of deriving from the registry is that this suite does not
+// own the registry's *contents*: it cannot notice a mode being dropped from
+// OPERATING_MODES. That claim — that the registry names exactly the modes
+// docs/policy.md defines — belongs to the planned `scripts/check-docs.mjs`
+// section-citation check (`pnpm lint:docs`, see scripts/README.md), not
+// here. The cardinality guard below is the one thing this suite can do
+// about it: keep an emptied registry from passing vacuously.
 describe("operatingModeSchema", () => {
+  it("is driven by a non-empty registry — an emptied OPERATING_MODES would make every registry-derived case below generate zero tests and report green while no mode parsed at all", () => {
+    expect(OPERATING_MODES.length).toBeGreaterThan(0);
+  });
+
   it.each(OPERATING_MODES)("registry member %s parses to itself", (mode: OperatingMode) => {
     const result = operatingModeSchema.safeParse(mode);
     expect(result.success).toBe(true);
