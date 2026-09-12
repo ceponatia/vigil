@@ -75,6 +75,21 @@ run_case wait-peer-skipped 1 'Security/security' wait-ci.sh 0
 # is still queued) is superseded the same way a skip is: the ready run's own
 # verify decides pending vs. green.
 run_case wait-draft-cancelled-then-ready 0 'GREEN: required CI/verify succeeded for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 1
+# Codex review finding on PR #14 (raised against the checks-only 72338c5 and
+# marked outdated there, but the same gap exists in today's run-list-based
+# selection): a LATER CI run for the same head is cancelled before its own
+# verify job — which `needs` every other job — is ever scheduled, so the
+# rollup carries only an OLDER run's PASSING verify. The newest-run filter
+# correctly drops that superseded pass as not belonging to the newest run,
+# but the older code then waited out the full timeout reporting "CI/verify is
+# absent" — a completed, unsuccessful run can never register a verify later,
+# so that wait was never going to end in anything but a timeout. The helper
+# must never exit 0 here, and must not waste the timeout getting to exit 1.
+run_case wait-newer-cancelled-after-pass 1   'FAILED for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (newest CI run 34719291234: completed/cancelled)'   wait-ci.sh 0
+# The companion shape: the newer, terminal run's own CI/verify DID register,
+# as CANCELLED. Already correctly caught by the bucket == "cancel" test
+# before this fix; kept as a regression guard so that behaviour cannot drift.
+run_case wait-newer-cancelled-with-verify 1 $'  CANCELLED	CI/verify' wait-ci.sh 0
 # An unrelated successful check cannot satisfy the required aggregate.
 run_case wait-unrelated 2 'CI/verify is absent' wait-ci.sh 0
 run_case wait-no-checks 2 'no required checks registered' wait-ci.sh 0

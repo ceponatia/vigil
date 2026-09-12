@@ -22,6 +22,18 @@ at_older=2026-09-12T21:11:00Z
 at_draft=2026-09-12T21:11:59Z
 at_ready=2026-09-12T21:12:06Z
 
+# A second, unrelated head shape: an earlier CI run for the SAME head already
+# passed its verify, then a later push to the same branch (no new PR head —
+# think a re-run or a second CI trigger on the same commit) is cancelled
+# before its own verify job — which `needs` every other job — is ever
+# scheduled. Used by the wait-newer-cancelled-* scenarios below.
+run_pass_old=34719280512
+run_cancel_new=34719291234
+link_pass_old="https://github.com/ceponatia/vigil/actions/runs/$run_pass_old/job/103622500001"
+link_cancel_new="https://github.com/ceponatia/vigil/actions/runs/$run_cancel_new/job/103622600001"
+at_pass_old=2026-09-12T21:15:00Z
+at_cancel_new=2026-09-12T21:16:30Z
+
 next_count() {
   local name=$1 file="$state_dir/$1"
   local count=0
@@ -118,6 +130,22 @@ if [ "$1 $2" = "pr checks" ]; then
         json_array "$(check_json verify CI pass SUCCESS "$link_ready")"
       fi
       ;;
+    wait-newer-cancelled-after-pass)
+      # Codex review finding on PR #14 (raised against the checks-only 72338c5,
+      # still applicable to today's run-list-based selection): a later CI run
+      # for the same head is cancelled before its own verify job ever registers
+      # — `verify` `needs` every other job, so a run cancelled early enough
+      # produces no CI/verify check-run at all. The rollup therefore carries
+      # only the OLDER run's passing verify; the run list is what reveals a
+      # newer, already-terminal run exists and that pass is superseded.
+      json_array "$(check_json verify CI pass SUCCESS "$link_pass_old")"
+      ;;
+    wait-newer-cancelled-with-verify)
+      # The companion shape: the newer run's own CI/verify DID register, and
+      # it is CANCELLED. Already correctly caught by the bucket == "cancel"
+      # test — this scenario guards that behaviour against regressing.
+      json_array "$(check_json verify CI cancel CANCELLED "$link_cancel_new")"
+      ;;
     wait-failing|wait-stale)
       if [ "$scenario" = wait-stale ] && [ "$(next_count checks)" -eq 1 ]; then
         json_array "$(check_json verify CI pass SUCCESS "$link_ready")"
@@ -187,6 +215,12 @@ if [ "$1 $2" = "run list" ]; then
         json_array "$(run_json "$run_draft" completed cancelled "$at_draft")" \
                    "$(run_json "$run_ready" completed success "$at_ready")"
       fi
+      ;;
+    wait-newer-cancelled-after-pass|wait-newer-cancelled-with-verify)
+      # Both terminal already: an older run that passed, and a newer, later
+      # run for the same head that was cancelled. The newer run decides.
+      json_array "$(run_json "$run_pass_old" completed success "$at_pass_old")" \
+                 "$(run_json "$run_cancel_new" completed cancelled "$at_cancel_new")"
       ;;
     wait-failing)
       json_array "$(run_json "$run_ready" completed failure "$at_ready")"

@@ -199,6 +199,17 @@ while :; do
         pending=$(jq -r '[.[] | select(.bucket == "pending") | (.workflow + "/" + .name)] | join(", ")' <<<"$checks")
         echo "$(date +%H:%M:%S)  required checks pending for head $head: $pending"
       elif [ "$verify_count" -eq 0 ]; then
+        if [ -n "$newest_id" ] && [ "$newest_status" = completed ] && [ "$newest_conclusion" != success ]; then
+          # The newest CI run for this head has already finished and produced no
+          # CI/verify of its own — the realistic shape is a run cancelled before
+          # its verify job (which `needs` every other job) was ever scheduled.
+          # A completed run cannot register a verify later, so waiting out the
+          # timeout here is not fail-closed, it is a wasted timeout; report now.
+          echo "FAILED for head $head$run_note:"
+          echo "  no CI/verify was ever registered for the newest CI run"
+          echo "diagnose with ci-failure.sh $PR (from logs, never a local gate run)"
+          exit 1
+        fi
         echo "$(date +%H:%M:%S)  CI/verify is absent for head $head$run_note — waiting"
       elif jq -e 'all(.[]; .bucket == "pass" and .state == "SUCCESS")' <<<"$checks" >/dev/null \
         && jq -e 'all(.[]; .bucket == "pass" and .state == "SUCCESS")' <<<"$verify" >/dev/null; then
