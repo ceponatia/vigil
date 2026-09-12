@@ -1,70 +1,90 @@
+import { isoUtcTimestampSchema } from "@vigil/contracts";
 import { describe, expect, it } from "vitest";
 
-import { isStrictlyBefore, isoUtcTimestampSchema, ISO_UTC_TIMESTAMP_PATTERN } from "./timestamps";
+import { counterAccount, holdingsAccount } from "./accounts";
+import { parseJournalEntry } from "./journal";
+import { instantMs, isStrictlyBefore } from "./timestamps";
+import { TEST_PROVENANCE, TEST_STABLE_ASSET, TEST_STABLE_SCALE } from "./test-support/journal-fixtures";
 
-// The defect this file kills: an event time that is not the time the event
-// happened. A timestamp carrying precision finer than the millisecond this
-// application stores is truncated on the way into a `timestamptz(3)` column
-// and into `Date.parse`, so the record would say the event happened up to a
-// millisecond earlier than it did — and a point-in-time replay comparing
-// event times would read a value nobody ever wrote (docs/evaluation.md,
-// "Point-in-time integrity").
+// What the format is, and what it rejects, belongs to
+// `packages/contracts/src/timestamps.ts` and is tested there — including the
+// at-most-milliseconds precision cap, which protects every consumer of a
+// `timestamptz(3)` column rather than this package alone.
+//
+// What this file owns is the ledger's own path: that an entry carrying an
+// instant the application cannot store exactly is refused as a diagnostic
+// rather than posted, and that the two pure time helpers order instants the
+// way the reservation window depends on.
 
-const accepted: readonly string[] = [
-  "2026-01-02T03:04:05Z",
-  "2026-01-02T03:04:05.0Z",
-  "2026-01-02T03:04:05.00Z",
-  "2026-01-02T03:04:05.000Z",
-  "2026-01-02T03:04:05.123Z",
-];
+describe("a persisted entry's timestamps", () => {
+  // Through `parseJournalEntry`, which takes `unknown`: that is how a
+  // timestamp the application did not produce actually arrives — a database
+  // row, a replay file — and it is the path that has to refuse rather than
+  // throw (docs/resilience.md §5).
+  function persistedWith(occurredAt: string): unknown {
+    return {
+      entryId: "entry-timestamped",
+      kind: "contribution",
+      occurredAt,
+      recordedAt: "2026-01-02T03:04:06.000Z",
+      correlationId: "corr-timestamped",
+      idempotencyKey: "idem-timestamped",
+      intentId: null,
+      reversesEntryId: null,
+      provenance: TEST_PROVENANCE,
+      lines: [
+        {
+          account: holdingsAccount(TEST_STABLE_ASSET, "available"),
+          scale: TEST_STABLE_SCALE,
+          amountBase: 1n,
+          direction: "debit",
+        },
+        {
+          account: counterAccount("contributed-capital", TEST_STABLE_ASSET),
+          scale: TEST_STABLE_SCALE,
+          amountBase: 1n,
+          direction: "credit",
+        },
+      ],
+    };
+  }
 
-const rejected: ReadonlyArray<{ name: string; value: string; catches: string }> = [
-  {
-    name: "microseconds",
-    value: "2026-01-02T03:04:05.0004Z",
-    catches: "a pattern that allows more fractional digits than are stored, so the 0.4 ms is dropped and the record misstates the event time",
-  },
-  {
-    name: "nanoseconds",
-    value: "2026-01-02T03:04:05.000000001Z",
-    catches: "a chain or venue timestamp at nanosecond precision being accepted and silently rounded",
-  },
-  {
-    name: "a local time with an offset",
-    value: "2026-01-02T03:04:05+01:00",
-    catches: "a non-UTC instant, where two records an hour apart would compare as simultaneous",
-  },
-  {
-    name: "a calendar day that does not exist",
-    value: "2026-02-30T00:00:00.000Z",
-    catches: "`new Date` rolling February 30 forward to March 2 rather than failing",
-  },
-  { name: "a date with no time", value: "2026-01-02", catches: "a date-only value defaulting to midnight in some zone" },
-];
+  const refused: ReadonlyArray<{ name: string; occurredAt: string; catches: string }> = [
+    {
+      name: "microsecond precision",
+      occurredAt: "2026-01-02T03:04:05.0004Z",
+      catches:
+        "an event time finer than the millisecond the journal stores, which comes back 400 microseconds early with nothing in the record to say it changed",
+    },
+    {
+      name: "a calendar day that does not exist",
+      occurredAt: "2026-02-30T00:00:00.000Z",
+      catches: "a date `new Date` would roll forward to March 2 rather than reject, filing the entry on a day it did not happen",
+    },
+    {
+      name: "a local time with an offset",
+      occurredAt: "2026-01-02T03:04:05+01:00",
+      catches: "a non-UTC instant, where two entries an hour apart would replay as simultaneous",
+    },
+  ];
 
-describe("isoUtcTimestampSchema", () => {
-  it.each(accepted)("accepts %s — millisecond precision is exactly what the database column and Date.parse both keep", (value) => {
-    expect(isoUtcTimestampSchema.safeParse(value).success).toBe(true);
-  });
+  it.each(refused)("refuses a persisted entry whose occurredAt is $name — catches: $catches", ({ occurredAt }) => {
+    const result = parseJournalEntry(persistedWith(occurredAt));
 
-  it.each(rejected)("rejects $name without throwing — catches: $catches", ({ value }) => {
-    expect(() => isoUtcTimestampSchema.safeParse(value)).not.toThrow();
-    expect(isoUtcTimestampSchema.safeParse(value).success).toBe(false);
-  });
-
-  it("agrees with the exported pattern on every case above, for the cases the pattern can judge — catches the schema and the constant drifting into two different definitions of the same format", () => {
-    for (const value of accepted) {
-      expect([value, ISO_UTC_TIMESTAMP_PATTERN.test(value)]).toEqual([value, true]);
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.refusal.reason.code).toBe("MALFORMED_ENTRY");
     }
-    // The calendar-day case is the one the pattern alone cannot catch; it is
-    // the refine's job, and the schema above already proves it rejects.
-    for (const { value } of rejected.filter((testCase) => testCase.name !== "a calendar day that does not exist")) {
-      expect([value, ISO_UTC_TIMESTAMP_PATTERN.test(value)]).toEqual([value, false]);
+  });
+
+  it("accepts the precisions the journal can store exactly — catches a cap tightened to exactly three digits, which would refuse a producer that trims trailing zeros", () => {
+    for (const occurredAt of ["2026-01-02T03:04:05Z", "2026-01-02T03:04:05.0Z", "2026-01-02T03:04:05.123Z"]) {
+      expect([occurredAt, parseJournalEntry(persistedWith(occurredAt)).outcome]).toEqual([occurredAt, "valid"]);
     }
   });
 });
 
-describe("isStrictlyBefore", () => {
+describe("time arithmetic", () => {
   it("orders two validated instants and is false for equal ones — the reservation window check reads this, and a `<=` here would admit a hold that expires at the instant it is taken", () => {
     const earlier = isoUtcTimestampSchema.parse("2026-01-02T03:04:05.000Z");
     const later = isoUtcTimestampSchema.parse("2026-01-02T03:04:05.001Z");
@@ -72,5 +92,9 @@ describe("isStrictlyBefore", () => {
     expect(isStrictlyBefore(earlier, later)).toBe(true);
     expect(isStrictlyBefore(later, earlier)).toBe(false);
     expect(isStrictlyBefore(earlier, earlier)).toBe(false);
+  });
+
+  it("reads epoch milliseconds without a clock — catches a helper that reached for Date.now() and made every replay depend on when it ran", () => {
+    expect(instantMs(isoUtcTimestampSchema.parse("1970-01-01T00:00:01.500Z"))).toBe(1_500);
   });
 });

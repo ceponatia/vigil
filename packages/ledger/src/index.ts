@@ -14,14 +14,12 @@ export {
   counterAccount,
   holdingsAccount,
   accountFamilySchema,
-  assetIdSchema,
   holdingsStateSchema,
   ledgerAccountSchema,
   postingDirectionSchema,
   ACCOUNT_FAMILIES,
   ACCOUNT_FAMILY_NORMAL_SIDE,
   ACCOUNT_KEY_SEPARATOR,
-  ASSET_ID_PATTERN,
   HOLDINGS_STATES,
   HOLDINGS_STATE_RESERVABILITY,
   POSTING_DIRECTIONS,
@@ -98,10 +96,7 @@ export type {
   ReservationState,
 } from "./reservations";
 
-export {
-  instantMs,
-  isStrictlyBefore,
-  isoUtcTimestampSchema,
-  ISO_UTC_TIMESTAMP_PATTERN,
-} from "./timestamps";
-export type { IsoUtcTimestamp } from "./timestamps";
+// Time arithmetic only. The timestamp schema, its brand, and its type come
+// from `@vigil/contracts`, which is where every consumer of a
+// `timestamptz(3)` column shares the same definition.
+export { instantMs, isStrictlyBefore } from "./timestamps";

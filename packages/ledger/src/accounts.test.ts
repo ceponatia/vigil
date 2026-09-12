@@ -1,8 +1,8 @@
+import { assetIdSchema } from "@vigil/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
   accountKey,
-  assetIdSchema,
   counterAccount,
   holdingsAccount,
   ledgerAccountSchema,
@@ -87,11 +87,12 @@ describe("accountKey", () => {
   });
 });
 
-// Finding 7 (owner direction): the ledger's asset id is the canonical
-// contracts identity, not a ticker. `BTC` names a different asset on every
-// chain that lists something by that symbol; two of them sharing an account
-// merges two positions into one balance that reconciles against neither
-// venue.
+// The ledger's asset id IS `@vigil/contracts`' canonical identity — the
+// schema below is contracts', imported rather than restated. These cases
+// stay in this suite because the claim they protect is the ledger's: an
+// account key built from a ticker would merge two chains' positions into
+// one balance that reconciles against neither venue. Contracts owns the
+// format; this owns what the ledger does with it.
 describe("canonical asset identity", () => {
   const rejected: ReadonlyArray<{ name: string; assetId: string; catches: string }> = [
     { name: "a bare ticker", assetId: "BTC", catches: "symbol-as-identity, the defect this whole format exists to prevent" },
@@ -126,8 +127,14 @@ describe("canonical asset identity", () => {
   });
 
   it("keys two same-ticker assets on different chains to different accounts — this is the whole point: one account per asset, never one account per symbol", () => {
-    const ethereumUsdc = holdingsAccount("1|contract|0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48|ethereum", "available");
-    const polygonUsdc = holdingsAccount("137|contract|0x3c499c542cef5e3811e1192ce70d8cc03d5c3359|polygon", "available");
+    const ethereumUsdc = holdingsAccount(
+      assetIdSchema.parse("1|contract|0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48|ethereum"),
+      "available",
+    );
+    const polygonUsdc = holdingsAccount(
+      assetIdSchema.parse("137|contract|0x3c499c542cef5e3811e1192ce70d8cc03d5c3359|polygon"),
+      "available",
+    );
 
     expect(accountKey(ethereumUsdc)).not.toBe(accountKey(polygonUsdc));
   });

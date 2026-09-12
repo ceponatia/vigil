@@ -27,9 +27,11 @@ reads or writes a database itself.
   `TRANSACTION_UNRESOLVED` for funds in flight between locations, and the
   ledger-local `STATE_NOT_RESERVABLE`, naming the state, for a balance
   already committed to another intent or queued for exit.
-- Asset identity is the canonical `chainId|kind|value|withdrawalNetwork`
-  form `@vigil/contracts` derives — never a bare ticker, because `BTC` names
-  a different asset on every chain that lists one. Account keys are
+- Asset identity is `@vigil/contracts`' `AssetId` — the canonical
+  `chainId|kind|value|withdrawalNetwork` form `canonicalAssetId` derives,
+  imported rather than restated, so a ledger account and a market quote are
+  keyed by the same type. Never a bare ticker, because `BTC` names a
+  different asset on every chain that lists one. Account keys are
   `family/state/assetId`: `/` separates them because it is the one character
   an asset identity may not contain.
 - Provenance on every record: the policy and strategy versions that produced
@@ -82,8 +84,11 @@ reads or writes a database itself.
   high-water mark, and the drawdown measured from it.
 - `reservations` — planning a hold or a partial release against a balance
   sheet.
-- `timestamps` — the stage-appropriate timestamps a ledger record carries,
-  until `packages/contracts` owns the shared timestamp family.
+- `timestamps` — pure age and ordering arithmetic. The format, the UTC-only
+  rule, the calendar check, and the at-most-milliseconds precision cap are
+  `@vigil/contracts`', shared with every other consumer of a `timestamptz(3)`
+  column; what stays here is which stages a ledger record carries
+  (`occurredAt`, `recordedAt`, `expiresAt`).
 
 Reconciliation against exchange, wallet, and chain state at a consistent
 event watermark is not built; `compareBalanceSheets` is the piece of it that

@@ -2,7 +2,7 @@ import type { HoldingsState, LedgerAccount } from "../accounts";
 import { rebuildBalances, type BalanceSheet } from "../balances";
 import { buildEntry, type EntryKind, type EntryProvenance, type JournalEntry } from "../journal";
 import type { ReleaseRequest, ReservationRequest } from "../reservations";
-import { isoUtcTimestampSchema, type IsoUtcTimestamp } from "../timestamps";
+import { assetIdentitySchema, canonicalAssetId, isoUtcTimestampSchema, type AssetId, type IsoUtcTimestamp } from "@vigil/contracts";
 
 /**
  * Builders for this package's own suites only. Never imported by production
@@ -15,12 +15,29 @@ import { isoUtcTimestampSchema, type IsoUtcTimestamp } from "../timestamps";
  * kind appears here.
  */
 
+/**
+ * Derived through `canonicalAssetId` rather than written out as a string,
+ * so a fixture cannot name an asset the application could not have produced
+ * — and so these ids are canonical by construction rather than by the
+ * author having typed the four components in the right order.
+ */
+function syntheticAsset(denomination: string): AssetId {
+  return canonicalAssetId(
+    assetIdentitySchema.parse({
+      kind: "native",
+      chainId: "1337",
+      nativeDenomination: denomination,
+      withdrawalNetwork: "SYNTHETIC_TESTNET",
+    }),
+  );
+}
+
 /** A synthetic six-decimal settlement asset. */
-export const TEST_STABLE_ASSET = "1337|native|VGLSTABLE|SYNTHETIC_TESTNET";
+export const TEST_STABLE_ASSET = syntheticAsset("VGLSTABLE");
 export const TEST_STABLE_SCALE = 6;
 
 /** A synthetic eighteen-decimal asset, to keep scale handling honest. */
-export const TEST_VOLATILE_ASSET = "1337|native|VGLVOLATILE|SYNTHETIC_TESTNET";
+export const TEST_VOLATILE_ASSET = syntheticAsset("VGLVOLATILE");
 export const TEST_VOLATILE_SCALE = 18;
 
 /**
@@ -106,7 +123,7 @@ export type ReservationRequestInput = {
   readonly entryId?: string;
   readonly intentId?: string;
   readonly attempt?: number;
-  readonly assetId?: string;
+  readonly assetId?: AssetId;
   readonly scale?: number;
   readonly fromState?: HoldingsState;
   readonly occurredAt?: string;
@@ -137,7 +154,7 @@ export type ReleaseRequestInput = {
   readonly amountBase: bigint;
   readonly reservationId?: string;
   readonly entryId?: string;
-  readonly assetId?: string;
+  readonly assetId?: AssetId;
   readonly scale?: number;
 };
 

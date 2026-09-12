@@ -1,3 +1,5 @@
+import type { AssetId } from "@vigil/contracts";
+
 import { ledgerRefusal, type LedgerRefusal } from "./diagnostics";
 import { validateEntry, type JournalEntry } from "./journal";
 
@@ -25,7 +27,7 @@ import { validateEntry, type JournalEntry } from "./journal";
  */
 
 export type PerformanceMeasure = {
-  readonly assetId: string;
+  readonly assetId: AssetId;
   /** Owner deposits less withdrawals. Basis — never part of performance. */
   readonly contributedBase: bigint;
   /** Realized trading gain; negative on a net realized loss. */
@@ -50,7 +52,7 @@ export type PerformanceResult =
  * rebuild validates them: a figure computed from an unbalanced entry is a
  * wrong number presented as a right one.
  */
-export function measurePerformance(entries: readonly JournalEntry[], assetId: string): PerformanceResult {
+export function measurePerformance(entries: readonly JournalEntry[], assetId: AssetId): PerformanceResult {
   let contributedBase = 0n;
   let realizedPnlBase = 0n;
   let feesBase = 0n;

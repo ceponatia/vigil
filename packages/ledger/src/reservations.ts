@@ -1,3 +1,5 @@
+import type { AssetId, IsoUtcTimestamp } from "@vigil/contracts";
+
 import {
   holdingsAccount,
   HOLDINGS_STATE_RESERVABILITY,
@@ -6,7 +8,7 @@ import {
 import { holdingsBase, type BalanceSheet } from "./balances";
 import { ledgerRefusal, type LedgerDiagnosticCode, type LedgerRefusal } from "./diagnostics";
 import { buildEntry, type EntryProvenance, type JournalEntry } from "./journal";
-import { isStrictlyBefore, type IsoUtcTimestamp } from "./timestamps";
+import { isStrictlyBefore } from "./timestamps";
 
 /**
  * Reservations: the only way capital is committed to an intent.
@@ -53,7 +55,7 @@ export type ReservationRequest = {
   readonly correlationId: string;
   /** Id for the journal entry the hold posts. */
   readonly entryId: string;
-  readonly assetId: string;
+  readonly assetId: AssetId;
   readonly scale: number;
   readonly amountBase: bigint;
   /** Which holdings state the funds are taken from. Only `available` qualifies. */
@@ -188,7 +190,7 @@ export type ReleaseRequest = {
   readonly idempotencyKey: string;
   readonly correlationId: string;
   readonly entryId: string;
-  readonly assetId: string;
+  readonly assetId: AssetId;
   readonly scale: number;
   /** May be less than the reservation: a partial fill releases only the confirmed remainder. */
   readonly amountBase: bigint;

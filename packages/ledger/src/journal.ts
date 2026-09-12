@@ -1,3 +1,4 @@
+import { isoUtcTimestampSchema, type IsoUtcTimestamp } from "@vigil/contracts";
 import { z } from "zod";
 
 import {
@@ -12,7 +13,6 @@ import {
 } from "./accounts";
 import { assetScaleSchema, MAX_BASE_UNIT_MAGNITUDE } from "./base-units";
 import { ledgerRefusal, type LedgerDiagnosticCode, type LedgerRefusal } from "./diagnostics";
-import { isoUtcTimestampSchema, type IsoUtcTimestamp } from "./timestamps";
 
 /**
  * The append-only double-entry journal.

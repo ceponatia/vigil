@@ -1,3 +1,4 @@
+import { assetIdSchema, type AssetId } from "@vigil/contracts";
 import { z } from "zod";
 
 import { ledgerRefusal, policyRefusal, type LedgerRefusal } from "./diagnostics";
@@ -135,33 +136,6 @@ export const HOLDINGS_STATE_RESERVABILITY: Readonly<Record<HoldingsState, StateR
 };
 
 /**
- * A canonical asset id, in exactly the shape `@vigil/contracts`'
- * `canonicalAssetId` derives: four `|`-separated components,
- * `chainId|kind|value|withdrawalNetwork`, where `kind` is one of
- * `contract`, `mint`, or `native`, and no component may contain `|` or `/`
- * (both are reserved as canonical-id separators — `/` because
- * `@vigil/market` joins two asset ids with it to name an instrument).
- *
- * A bare ticker is not an identity. `BTC` names a different asset on every
- * chain that lists something by that symbol, and two of them sharing an
- * account would merge two positions into one balance that reconciles
- * against neither venue (`docs/testing.md`, "Chain/contract/mint differs
- * despite a matching ticker"). This pattern is what makes that
- * unrepresentable rather than merely discouraged.
- *
- * Seam: this mirrors `packages/contracts/src/asset-identity.ts` rather than
- * importing it, because that module lands on another branch. At the rebase
- * this constant is deleted and `AssetId` comes from `@vigil/contracts`; the
- * shape is identical on purpose, so nothing but the import changes.
- */
-export const ASSET_ID_PATTERN = /^[^|/]+\|(?:contract|mint|native)\|[^|/]+\|[^|/]+$/;
-
-export const assetIdSchema = z.string().regex(ASSET_ID_PATTERN, {
-  error:
-    "expected a canonical asset id: chainId|kind|value|withdrawalNetwork, kind one of contract/mint/native — never a bare ticker",
-});
-
-/**
  * The separator between an account key's components.
  *
  * `/` rather than `|`: a canonical asset id contains three `|` of its own,
@@ -172,9 +146,24 @@ export const assetIdSchema = z.string().regex(ASSET_ID_PATTERN, {
  */
 export const ACCOUNT_KEY_SEPARATOR = "/";
 
+/**
+ * Asset identity comes from `@vigil/contracts`: `AssetId` is the branded,
+ * canonical `chainId|kind|value|withdrawalNetwork` string that
+ * `canonicalAssetId` derives, and `assetIdSchema` is the only way to hold
+ * one. This package used to restate that shape as a local pattern; it no
+ * longer does, so a ledger account and a market quote are keyed by the same
+ * type rather than by two spellings of it.
+ *
+ * The rule it enforces has not changed: a bare ticker is not an identity.
+ * `BTC` names a different asset on every chain that lists something by that
+ * symbol, and two of them sharing an account would merge two positions into
+ * one balance that reconciles against neither venue (`docs/testing.md`,
+ * "Chain/contract/mint differs despite a matching ticker").
+ */
+
 export type LedgerAccount = {
   readonly family: AccountFamily;
-  readonly assetId: string;
+  readonly assetId: AssetId;
   /** Non-null exactly when `family` is `holdings`. */
   readonly holdingsState: HoldingsState | null;
 };
@@ -195,11 +184,11 @@ export const ledgerAccountSchema = z
     }
   });
 
-export function holdingsAccount(assetId: string, holdingsState: HoldingsState): LedgerAccount {
+export function holdingsAccount(assetId: AssetId, holdingsState: HoldingsState): LedgerAccount {
   return { family: "holdings", assetId, holdingsState };
 }
 
-export function counterAccount(family: Exclude<AccountFamily, "holdings">, assetId: string): LedgerAccount {
+export function counterAccount(family: Exclude<AccountFamily, "holdings">, assetId: AssetId): LedgerAccount {
   return { family, assetId, holdingsState: null };
 }
 

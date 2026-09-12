@@ -1,3 +1,5 @@
+import type { AssetId } from "@vigil/contracts";
+
 import { accountKey, type HoldingsState, type LedgerAccount } from "./accounts";
 import { ledgerRefusal, type LedgerDiagnosticCode, type LedgerRefusal } from "./diagnostics";
 import { describeReversalMismatch, validateEntry, type JournalEntry } from "./journal";
@@ -138,7 +140,7 @@ export function balanceOf(balances: BalanceSheet, account: LedgerAccount): Accou
 }
 
 /** Net base units held in one holdings state; zero when the account has no postings. */
-export function holdingsBase(balances: BalanceSheet, assetId: string, state: HoldingsState): bigint {
+export function holdingsBase(balances: BalanceSheet, assetId: AssetId, state: HoldingsState): bigint {
   const balance = balances.get(accountKey({ family: "holdings", assetId, holdingsState: state }));
   return balance === undefined ? 0n : netBase(balance);
 }
