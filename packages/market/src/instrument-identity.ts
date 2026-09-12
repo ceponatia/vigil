@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { assetIdentitySchema, canonicalAssetId } from "@vigil/contracts";
+import { assetIdentitySchema, assetIdSchema, canonicalAssetId } from "@vigil/contracts";
 
 /**
  * instrument-identity.ts — a tradable instrument/route built on top of
@@ -23,9 +23,36 @@ export type InstrumentIdentity = z.infer<typeof instrumentIdentitySchema>;
 /**
  * The canonical, opaque identifier for an instrument, derived from its
  * base and quote asset identities. Branded so a caller cannot construct
- * one except by deriving it with `canonicalInstrumentId`.
+ * one except by deriving it with `canonicalInstrumentId` — and, beyond
+ * mere non-emptiness, this schema requires the string to actually split
+ * into two halves on "/" that each independently satisfy
+ * `@vigil/contracts`' `assetIdSchema` canonical shape. Without this, an
+ * ad hoc or ticker-only string ("instrument-a", "BTC-USD") would brand
+ * successfully and a quote carrying it could be marked executable
+ * without ever having a chain-aware base/quote identity behind it. This
+ * does not recover the exact original `AssetIdentity` fields (a
+ * withdrawal network is still just an opaque string within its half),
+ * only that each half has the shape only `canonicalAssetId` produces.
  */
-export const instrumentIdSchema = z.string().min(1).brand<"InstrumentId">();
+export const instrumentIdSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) => {
+      const separatorIndex = value.indexOf("/");
+      if (separatorIndex === -1) {
+        return false;
+      }
+      const baseAssetId = value.slice(0, separatorIndex);
+      const quoteAssetId = value.slice(separatorIndex + 1);
+      return assetIdSchema.safeParse(baseAssetId).success && assetIdSchema.safeParse(quoteAssetId).success;
+    },
+    {
+      message:
+        "must be two canonical asset ids joined by a slash (baseAssetId/quoteAssetId), each matching the canonical asset-id shape from @vigil/contracts",
+    },
+  )
+  .brand<"InstrumentId">();
 
 export type InstrumentId = z.infer<typeof instrumentIdSchema>;
 

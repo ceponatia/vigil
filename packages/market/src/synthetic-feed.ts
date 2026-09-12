@@ -1,8 +1,8 @@
 import { isoUtcTimestampSchema } from "@vigil/contracts";
 import type { IsoUtcTimestamp } from "@vigil/contracts";
 
-import { canonicalInstrumentId } from "./instrument-identity";
-import type { InstrumentIdentity, InstrumentId } from "./instrument-identity";
+import { canonicalInstrumentId, instrumentIdentitySchema } from "./instrument-identity";
+import type { InstrumentId } from "./instrument-identity";
 import { createMulberry32, randomBigIntInRange, unitsToDecimalString } from "./prng";
 import { quoteSnapshotSchema } from "./quote-snapshot";
 import type { QuoteSnapshot } from "./quote-snapshot";
@@ -29,10 +29,15 @@ import type { QuoteSnapshot } from "./quote-snapshot";
  * recorded under `tests/fixtures/`.
  */
 
-const SYNTHETIC_INSTRUMENT: InstrumentIdentity = {
+// Constructed via instrumentIdentitySchema.parse rather than a plain typed
+// literal: AssetIdentity is branded (packages/contracts/src/asset-identity.ts),
+// so baseAsset/quoteAsset can only be obtained by actually validating them
+// through the schema — the same rule every other caller of this package's
+// identity types follows.
+const SYNTHETIC_INSTRUMENT = instrumentIdentitySchema.parse({
   baseAsset: { kind: "native", chainId: "1337", nativeDenomination: "VGLBASE", withdrawalNetwork: "SYNTHETIC_TESTNET" },
   quoteAsset: { kind: "native", chainId: "1337", nativeDenomination: "VGLQUOTE", withdrawalNetwork: "SYNTHETIC_TESTNET" },
-};
+});
 
 /**
  * The single synthetic instrument this package generates quotes for.

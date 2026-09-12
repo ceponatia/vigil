@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ASSET_IDENTITY_KINDS,
+  assetIdSchema,
   assetIdentitySchema,
   assetMetadataSchema,
   canonicalAssetId,
@@ -27,29 +28,29 @@ const sameTickerDifferentIdentityCases: ReadonlyArray<{
   {
     name: "same ticker, different chain, same native denomination string",
     symbol: "USDX",
-    declared: { kind: "native", chainId: "1", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" },
-    resolved: { kind: "native", chainId: "137", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" },
+    declared: assetIdentitySchema.parse({ kind: "native", chainId: "1", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" }),
+    resolved: assetIdentitySchema.parse({ kind: "native", chainId: "137", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" }),
     expectedReasonCode: "WRONG_CHAIN",
   },
   {
     name: "same ticker, same chain, different contract address",
     symbol: "USDX",
-    declared: { kind: "contract", chainId: "1", contractAddress: "contract-address-a", withdrawalNetwork: "ERC20" },
-    resolved: { kind: "contract", chainId: "1", contractAddress: "contract-address-b", withdrawalNetwork: "ERC20" },
+    declared: assetIdentitySchema.parse({ kind: "contract", chainId: "1", contractAddress: "contract-address-a", withdrawalNetwork: "ERC20" }),
+    resolved: assetIdentitySchema.parse({ kind: "contract", chainId: "1", contractAddress: "contract-address-b", withdrawalNetwork: "ERC20" }),
     expectedReasonCode: "UNAPPROVED_ASSET",
   },
   {
     name: "same ticker, same chain, contract declared but mint resolved (kind differs)",
     symbol: "USDX",
-    declared: { kind: "contract", chainId: "solana:mainnet-beta", contractAddress: "contract-address-c", withdrawalNetwork: "SPL" },
-    resolved: { kind: "mint", chainId: "solana:mainnet-beta", mintAddress: "mint-address-c", withdrawalNetwork: "SPL" },
+    declared: assetIdentitySchema.parse({ kind: "contract", chainId: "solana:mainnet-beta", contractAddress: "contract-address-c", withdrawalNetwork: "SPL" }),
+    resolved: assetIdentitySchema.parse({ kind: "mint", chainId: "solana:mainnet-beta", mintAddress: "mint-address-c", withdrawalNetwork: "SPL" }),
     expectedReasonCode: "UNAPPROVED_ASSET",
   },
   {
     name: "same ticker, same chain, same contract, different withdrawal network",
     symbol: "USDX",
-    declared: { kind: "contract", chainId: "1", contractAddress: "contract-address-d", withdrawalNetwork: "ERC20" },
-    resolved: { kind: "contract", chainId: "1", contractAddress: "contract-address-d", withdrawalNetwork: "ARBITRUM_ONE" },
+    declared: assetIdentitySchema.parse({ kind: "contract", chainId: "1", contractAddress: "contract-address-d", withdrawalNetwork: "ERC20" }),
+    resolved: assetIdentitySchema.parse({ kind: "contract", chainId: "1", contractAddress: "contract-address-d", withdrawalNetwork: "ARBITRUM_ONE" }),
     expectedReasonCode: "UNAPPROVED_ASSET",
   },
   {
@@ -60,8 +61,8 @@ const sameTickerDifferentIdentityCases: ReadonlyArray<{
     // an entirely different chain (docs/policy.md, WRONG_CHAIN).
     name: "same ticker, different chain AND a different contract address",
     symbol: "USDX",
-    declared: { kind: "contract", chainId: "1", contractAddress: "contract-address-e", withdrawalNetwork: "ERC20" },
-    resolved: { kind: "contract", chainId: "137", contractAddress: "contract-address-f", withdrawalNetwork: "POLYGON" },
+    declared: assetIdentitySchema.parse({ kind: "contract", chainId: "1", contractAddress: "contract-address-e", withdrawalNetwork: "ERC20" }),
+    resolved: assetIdentitySchema.parse({ kind: "contract", chainId: "137", contractAddress: "contract-address-f", withdrawalNetwork: "POLYGON" }),
     expectedReasonCode: "WRONG_CHAIN",
   },
 ];
@@ -124,6 +125,29 @@ describe("assetIdentitySchema", () => {
   });
 });
 
+// Kills the "ad hoc string branded as a valid asset id" bug class
+// (packages/market/src/instrument-identity.ts's instrumentIdSchema
+// depends on assetIdSchema correctly rejecting these, since it splits an
+// instrument id on "/" and validates each half against this schema): a
+// canonical asset id is not just "any non-empty string", it has the
+// exact shape "chainId|kind|value|withdrawalNetwork".
+describe("assetIdSchema", () => {
+  it("accepts a value canonicalAssetId actually produces", () => {
+    const identity = assetIdentitySchema.parse({ kind: "native", chainId: "1337", nativeDenomination: "VGLBASE", withdrawalNetwork: "SYNTHETIC_TESTNET" });
+    expect(assetIdSchema.safeParse(canonicalAssetId(identity)).success).toBe(true);
+  });
+
+  const adHocStrings = ["instrument-a", "BTC-USD", "", "1|native|VGLBASE"];
+  it.each(adHocStrings)("rejects the ad hoc string %s without throwing — it was never derived from an AssetIdentity", (value) => {
+    expect(() => assetIdSchema.safeParse(value)).not.toThrow();
+    expect(assetIdSchema.safeParse(value).success).toBe(false);
+  });
+
+  it("rejects a value whose kind segment is not one of the ASSET_IDENTITY_KINDS registry members, even though it otherwise has four pipe-separated segments", () => {
+    expect(assetIdSchema.safeParse("1|ticker|VGLBASE|ERC20").success).toBe(false);
+  });
+});
+
 describe("canonicalAssetId", () => {
   it.each(sameTickerDifferentIdentityCases)(
     "$name — declared and resolved derive different canonical ids despite sharing the ticker $symbol",
@@ -133,28 +157,39 @@ describe("canonicalAssetId", () => {
   );
 
   it("is deterministic: the same identity always derives the same id", () => {
-    const identity: AssetIdentity = { kind: "contract", chainId: "1", contractAddress: "contract-address-stable", withdrawalNetwork: "ERC20" };
-    expect(canonicalAssetId(identity)).toBe(canonicalAssetId({ ...identity }));
+    const identity = assetIdentitySchema.parse({ kind: "contract", chainId: "1", contractAddress: "contract-address-stable", withdrawalNetwork: "ERC20" });
+    // A second, independently-parsed value with the same fields — not a
+    // spread copy of `identity` — so this proves value equality drives
+    // the id, not object identity, without relying on how object spread
+    // interacts with a branded AssetIdentity's type.
+    const independentCopy = assetIdentitySchema.parse({ kind: "contract", chainId: "1", contractAddress: "contract-address-stable", withdrawalNetwork: "ERC20" });
+    expect(canonicalAssetId(identity)).toBe(canonicalAssetId(independentCopy));
   });
 
-  it("derives the id from the identity fields alone — a display ticker riding along on the object never reaches the id, so a renamed or re-used ticker can neither split one asset into two ids nor merge two assets into one", () => {
-    // Typed loosely on purpose: the excess `symbol` is exactly what a
-    // symbol-keyed lookup table would hand in, and the point is that the id
-    // derivation must ignore it rather than fold it in.
-    const withStrayTicker = {
-      kind: "native" as const,
-      chainId: "1",
-      nativeDenomination: "VGLBASE",
-      withdrawalNetwork: "ERC20",
-      symbol: "USDX",
-    };
-    const withoutTicker: AssetIdentity = {
+  it("derives the id from the identity fields alone — a display ticker riding along on the input never reaches the id, so a renamed or re-used ticker can neither split one asset into two ids nor merge two assets into one", () => {
+    // The excess `symbol` is exactly what a symbol-keyed lookup table
+    // would hand in. assetIdentitySchema strips it during parsing (zod's
+    // default "unknown keys are stripped" object behavior) before
+    // canonicalAssetId ever sees the result — proven here by checking the
+    // parsed value directly, since a raw object carrying `symbol` can no
+    // longer be passed to canonicalAssetId at all (AssetIdentity is
+    // branded; see the "cannot be constructed as a plain object literal"
+    // test below for that compile-time guarantee).
+    const withStrayTicker = assetIdentitySchema.parse({
       kind: "native",
       chainId: "1",
       nativeDenomination: "VGLBASE",
       withdrawalNetwork: "ERC20",
-    };
+      symbol: "USDX",
+    });
+    const withoutTicker = assetIdentitySchema.parse({
+      kind: "native",
+      chainId: "1",
+      nativeDenomination: "VGLBASE",
+      withdrawalNetwork: "ERC20",
+    });
 
+    expect(withStrayTicker).not.toHaveProperty("symbol");
     expect(canonicalAssetId(withStrayTicker)).toBe(canonicalAssetId(withoutTicker));
     expect(canonicalAssetId(withStrayTicker)).not.toContain("USDX");
   });
@@ -162,8 +197,12 @@ describe("canonicalAssetId", () => {
 
 describe("compareAssetIdentity", () => {
   it("reports a match for two structurally identical identities — the positive control for every mismatch case below", () => {
-    const identity: AssetIdentity = { kind: "native", chainId: "1337", nativeDenomination: "VGLBASE", withdrawalNetwork: "SYNTHETIC_TESTNET" };
-    const result = compareAssetIdentity(identity, { ...identity });
+    const identity = assetIdentitySchema.parse({ kind: "native", chainId: "1337", nativeDenomination: "VGLBASE", withdrawalNetwork: "SYNTHETIC_TESTNET" });
+    // A second, independently-parsed value with the same fields, not a
+    // spread copy, for the same reason as canonicalAssetId's determinism
+    // test above.
+    const sameIdentity = assetIdentitySchema.parse({ kind: "native", chainId: "1337", nativeDenomination: "VGLBASE", withdrawalNetwork: "SYNTHETIC_TESTNET" });
+    const result = compareAssetIdentity(identity, sameIdentity);
     expect(result.matches).toBe(true);
   });
 
@@ -180,15 +219,42 @@ describe("compareAssetIdentity", () => {
   );
 
   it("never throws, including on the mismatch path — a mismatch is a reason-coded diagnostic, never an exception (docs/resilience.md §4)", () => {
-    const a: AssetIdentity = { kind: "native", chainId: "1", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" };
-    const b: AssetIdentity = { kind: "native", chainId: "137", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" };
+    const a = assetIdentitySchema.parse({ kind: "native", chainId: "1", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" });
+    const b = assetIdentitySchema.parse({ kind: "native", chainId: "137", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" });
     expect(() => compareAssetIdentity(a, b)).not.toThrow();
+  });
+
+  // Kills the "revalidate before joining" bug class: before AssetIdentity
+  // was branded, canonicalAssetId and compareAssetIdentity accepted any
+  // object literal typed AssetIdentity without ever running
+  // withoutReservedSeparators — so a caller could bypass the schema
+  // entirely and hand in a component containing "|", and
+  // ("a|b","c")/("a","b|c") would both derive "1|contract|a|b|c". That
+  // bypass is now a compile-time error, not just a schema-parse-time
+  // rejection — the assignment below never gets to run with a value that
+  // skipped validation, because no such value type-checks as
+  // AssetIdentity any more.
+  it("cannot be constructed as a plain object literal that skips validation — only assetIdentitySchema.parse can produce a value assignable to AssetIdentity, so canonicalAssetId and compareAssetIdentity can never see an unvalidated separator-carrying component", () => {
+    // @ts-expect-error -- a plain object literal has no schema brand, so this assignment is a compile-time error even though every field name and type otherwise matches AssetIdentity
+    const bypassed: AssetIdentity = { kind: "contract", chainId: "1", contractAddress: "a|b", withdrawalNetwork: "c" };
+    const otherHalf = { kind: "contract", chainId: "1", contractAddress: "a", withdrawalNetwork: "b|c" };
+
+    // The two lines above still run at runtime (ts-expect-error only
+    // suppresses the compiler diagnostic); this is the reviewer's exact
+    // "contractAddress carries the pipe" / "withdrawalNetwork carries the
+    // pipe" pair — the two objects that would otherwise both derive
+    // "1|contract|a|b|c". Both halves are refused by the schema — the
+    // only gateway to an actual AssetIdentity — confirming the
+    // compile-time guarantee above and the schema-level refinement agree
+    // rather than one silently overriding the other.
+    expect(assetIdentitySchema.safeParse(bypassed).success).toBe(false);
+    expect(assetIdentitySchema.safeParse(otherHalf).success).toBe(false);
   });
 });
 
 describe("assetMetadataSchema", () => {
   it("accepts a canonical asset id paired with a display symbol", () => {
-    const identity: AssetIdentity = { kind: "native", chainId: "1337", nativeDenomination: "VGLBASE", withdrawalNetwork: "SYNTHETIC_TESTNET" };
+    const identity = assetIdentitySchema.parse({ kind: "native", chainId: "1337", nativeDenomination: "VGLBASE", withdrawalNetwork: "SYNTHETIC_TESTNET" });
     const result = assetMetadataSchema.safeParse({ assetId: canonicalAssetId(identity), symbol: "VGL" });
     expect(result.success).toBe(true);
   });
@@ -200,11 +266,11 @@ describe("assetMetadataSchema", () => {
 
   it("two AssetMetadata records may legitimately share a symbol while resolving to different canonical ids — proves symbol collisions do not collapse identity at the metadata layer either", () => {
     const usdxOnEthereum = assetMetadataSchema.parse({
-      assetId: canonicalAssetId({ kind: "native", chainId: "1", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" }),
+      assetId: canonicalAssetId(assetIdentitySchema.parse({ kind: "native", chainId: "1", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" })),
       symbol: "USDX",
     });
     const usdxOnPolygon = assetMetadataSchema.parse({
-      assetId: canonicalAssetId({ kind: "native", chainId: "137", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" }),
+      assetId: canonicalAssetId(assetIdentitySchema.parse({ kind: "native", chainId: "137", nativeDenomination: "USDX", withdrawalNetwork: "ERC20" })),
       symbol: "USDX",
     });
 

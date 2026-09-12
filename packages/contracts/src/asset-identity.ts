@@ -101,30 +101,71 @@ const nativeAssetIdentitySchema = z.object({
   withdrawalNetwork: withdrawalNetworkSchema,
 });
 
+export const ASSET_IDENTITY_KINDS = ["contract", "mint", "native"] as const;
+
 /**
  * The three ways an asset may be identified on its chain — exactly one of
  * contract address, mint address, or native denomination, discriminated by
  * `kind` so "exactly one" is a type-level guarantee rather than a
  * nullability combination a refine() has to police at runtime.
+ *
+ * Branded as a whole (not just its component strings): the only way to
+ * hold a value typed `AssetIdentity` is to have parsed it through this
+ * schema, which is what actually runs the `withoutReservedSeparators`
+ * refinements above. Before this brand, a caller could write a plain
+ * object literal — `const bad: AssetIdentity = { kind: "contract",
+ * chainId: "1", contractAddress: "a|b", withdrawalNetwork: "c" }` — that
+ * type-checked without ever going through `assetIdentitySchema`, so
+ * `canonicalAssetId` and `compareAssetIdentity` below had to either trust
+ * an unvalidated object or re-validate on every call. Branding turns that
+ * bypass into a compile-time error instead: `canonicalAssetId`'s type
+ * signature (`AssetIdentity -> AssetId`, never failing) is now honestly
+ * unconditional, because nothing can reach it without already having
+ * satisfied every field constraint. This is the same idiom
+ * `packages/contracts/src/money.ts`'s `DecimalString` already uses, kept
+ * consistent here rather than adding a second, weaker pattern (re-running
+ * `safeParse` inside every consumer and threading a reason-coded refusal
+ * through call sites that are otherwise pure derivations) that every
+ * future `@vigil/market`/`@vigil/ledger` caller would have to remember to
+ * repeat correctly.
  */
-export const assetIdentitySchema = z.discriminatedUnion("kind", [
-  contractAssetIdentitySchema,
-  mintAssetIdentitySchema,
-  nativeAssetIdentitySchema,
-]);
+export const assetIdentitySchema = z
+  .discriminatedUnion("kind", [contractAssetIdentitySchema, mintAssetIdentitySchema, nativeAssetIdentitySchema])
+  .brand<"AssetIdentity">();
 
 export type AssetIdentity = z.infer<typeof assetIdentitySchema>;
 
-export const ASSET_IDENTITY_KINDS = ["contract", "mint", "native"] as const;
+/**
+ * A canonical asset id has the exact shape
+ * "chainId|kind|value|withdrawalNetwork": three "|" delimiters, four
+ * non-empty segments, and `kind` drawn from the `ASSET_IDENTITY_KINDS`
+ * registry (derived from the registry, not hand-copied, so this pattern
+ * cannot drift from it). Every component field already excludes "|" and
+ * "/" (`withoutReservedSeparators` above), so this pattern excludes "/"
+ * from every segment too: a value `canonicalAssetId` actually produces
+ * can never contain one, and rejecting a hand-typed string that does is
+ * exactly what lets `@vigil/market`'s `instrumentIdSchema` tell two
+ * asset-id halves apart by splitting an instrument id on its own "/".
+ */
+const CANONICAL_ASSET_ID_PATTERN = new RegExp(String.raw`^[^|/]+\|(?:${ASSET_IDENTITY_KINDS.join("|")})\|[^|/]+\|[^|/]+$`);
 
 /**
  * The canonical, opaque identifier derived from an `AssetIdentity`. Two
  * identities that resolve to the same `AssetId` are the same asset; two
  * that do not are different assets regardless of any shared display
  * ticker. Branded so a caller cannot construct one except by deriving it
- * with `canonicalAssetId`.
+ * with `canonicalAssetId` — and the shape check above means an ad hoc,
+ * ticker-only, or otherwise hand-typed string (e.g. "BTC-USD") that never
+ * went through derivation at all is rejected too, not just an empty one.
  */
-export const assetIdSchema = z.string().min(1).brand<"AssetId">();
+export const assetIdSchema = z
+  .string()
+  .min(1)
+  .regex(CANONICAL_ASSET_ID_PATTERN, {
+    message:
+      "must match the canonical asset-id shape: chainId, kind (one of the ASSET_IDENTITY_KINDS registry members), value, and withdrawalNetwork, joined by the pipe character",
+  })
+  .brand<"AssetId">();
 
 export type AssetId = z.infer<typeof assetIdSchema>;
 
