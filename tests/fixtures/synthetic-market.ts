@@ -1,3 +1,5 @@
+import { isoUtcTimestampSchema } from "@vigil/contracts";
+
 /**
  * synthetic-market.ts — the recorded BOOT-03 synthetic-market fixture.
  *
@@ -24,8 +26,10 @@
 export const SYNTHETIC_MARKET_FIXTURE_PARAMS = {
   seed: 1337,
   count: 24,
-  startTimestamp: "2024-01-01T00:00:00.000Z",
-} as const;
+  // Parsed once here at module load — generateSyntheticQuotes now takes
+  // the branded IsoUtcTimestamp rather than a bare string.
+  startTimestamp: isoUtcTimestampSchema.parse("2024-01-01T00:00:00.000Z"),
+};
 
 export type SyntheticMarketFixtureQuote = {
   readonly instrumentId: string;

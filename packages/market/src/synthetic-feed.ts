@@ -1,4 +1,5 @@
 import { isoUtcTimestampSchema } from "@vigil/contracts";
+import type { IsoUtcTimestamp } from "@vigil/contracts";
 
 import { canonicalInstrumentId } from "./instrument-identity";
 import type { InstrumentIdentity, InstrumentId } from "./instrument-identity";
@@ -52,12 +53,28 @@ const TICK_INTERVAL_MS = 60_000; // one synthetic tick per simulated minute
 const INGESTION_LAG_MS = 250; // ingestedAt is always slightly after quoteAcquiredAt
 
 export type SyntheticFeedParams = {
-  /** Seeds the deterministic PRNG; the same seed always yields the same sequence. */
+  /**
+   * Seeds the deterministic PRNG; the same seed always yields the same
+   * sequence. Must be an integer — `createMulberry32` (prng.ts) truncates
+   * a fractional seed via `seed | 0` with no diagnostic, so this function
+   * checks first rather than silently generating from the truncated value.
+   */
   readonly seed: number;
-  /** Number of quotes to generate. */
+  /**
+   * Number of quotes to generate. Must be a non-negative safe integer: an
+   * infinite or NaN count would hang or corrupt the generation loop, and a
+   * non-integer count would round unpredictably at the loop boundary.
+   * Zero is valid and yields an empty sequence.
+   */
   readonly count: number;
-  /** ISO-8601 UTC timestamp of the first quote's quote-acquisition time. */
-  readonly startTimestamp: string;
+  /**
+   * ISO-8601 UTC timestamp of the first quote's quote-acquisition time.
+   * Branded `IsoUtcTimestamp` rather than a bare `string` so a caller must
+   * have gone through `isoUtcTimestampSchema` at least once — this
+   * generator is a test fixture, not a money path, so it trusts the brand
+   * rather than re-validating it on every call.
+   */
+  readonly startTimestamp: IsoUtcTimestamp;
 };
 
 /**
@@ -67,8 +84,18 @@ export type SyntheticFeedParams = {
  * (each call creates its own PRNG instance).
  */
 export function generateSyntheticQuotes(params: SyntheticFeedParams): readonly QuoteSnapshot[] {
-  const startTimestamp = isoUtcTimestampSchema.parse(params.startTimestamp);
-  const startMs = Date.parse(startTimestamp);
+  // Both checks below guard against a programmer error at the call site
+  // (this generator has no untrusted-input boundary of its own — its only
+  // callers are this package's own tests and fixtures), consistent with
+  // prng.ts's own `randomBigIntInRange`/`unitsToDecimalString` guards.
+  if (!Number.isInteger(params.seed)) {
+    throw new Error(`generateSyntheticQuotes: seed must be an integer, got ${String(params.seed)}`);
+  }
+  if (!Number.isSafeInteger(params.count) || params.count < 0) {
+    throw new Error(`generateSyntheticQuotes: count must be a non-negative safe integer, got ${String(params.count)}`);
+  }
+
+  const startMs = Date.parse(params.startTimestamp);
   const nextUint32 = createMulberry32(params.seed);
 
   let priceUnits = START_PRICE_UNITS;

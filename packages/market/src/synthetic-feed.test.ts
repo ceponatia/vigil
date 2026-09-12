@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { isoUtcTimestampSchema } from "@vigil/contracts";
 
 import { SYNTHETIC_INSTRUMENT_ID, generateSyntheticQuotes } from "./synthetic-feed";
 import { quoteSnapshotSchema } from "./quote-snapshot";
 
-const PARAMS = { seed: 99, count: 10, startTimestamp: "2024-06-01T00:00:00.000Z" };
+const PARAMS = { seed: 99, count: 10, startTimestamp: isoUtcTimestampSchema.parse("2024-06-01T00:00:00.000Z") };
 
 /**
  * Reads a rendered DecimalString back as exact integer base units, by
@@ -30,6 +31,17 @@ describe("generateSyntheticQuotes", () => {
   it("returns exactly `count` quotes, and zero for count 0", () => {
     expect(generateSyntheticQuotes(PARAMS)).toHaveLength(PARAMS.count);
     expect(generateSyntheticQuotes({ ...PARAMS, count: 0 })).toHaveLength(0);
+  });
+
+  it("throws for a non-integer seed — a programmer error, not external input; createMulberry32's `seed | 0` would otherwise silently truncate it with no diagnostic", () => {
+    expect(() => generateSyntheticQuotes({ ...PARAMS, seed: 1.5 })).toThrow();
+  });
+
+  it("throws for a negative, non-integer, NaN, or infinite count — a programmer error, not external input; an unguarded Infinity would hang the generation loop", () => {
+    expect(() => generateSyntheticQuotes({ ...PARAMS, count: -1 })).toThrow();
+    expect(() => generateSyntheticQuotes({ ...PARAMS, count: 1.5 })).toThrow();
+    expect(() => generateSyntheticQuotes({ ...PARAMS, count: Number.NaN })).toThrow();
+    expect(() => generateSyntheticQuotes({ ...PARAMS, count: Number.POSITIVE_INFINITY })).toThrow();
   });
 
   it("every generated quote is schema-valid — a construction bug that skipped the schema, or an integer-arithmetic bug that produced a malformed decimal string, would fail this", () => {
