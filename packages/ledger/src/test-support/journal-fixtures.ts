@@ -1,7 +1,7 @@
 import type { HoldingsState, LedgerAccount } from "../accounts";
 import { rebuildBalances, type BalanceSheet } from "../balances";
 import { buildEntry, type EntryKind, type JournalEntry } from "../journal";
-import type { ReservationRequest } from "../reservations";
+import type { ReleaseRequest, ReservationRequest } from "../reservations";
 import { isoUtcTimestampSchema, type IsoUtcTimestamp } from "../timestamps";
 
 /**
@@ -112,5 +112,30 @@ export function reservationRequest(input: ReservationRequestInput): ReservationR
     occurredAt: at(input.occurredAt ?? "2026-01-02T03:04:05.000Z"),
     recordedAt: at("2026-01-02T03:04:06.000Z"),
     expiresAt: at(input.expiresAt ?? "2026-01-02T03:09:05.000Z"),
+  };
+}
+
+export type ReleaseRequestInput = {
+  readonly amountBase: bigint;
+  readonly reservationId?: string;
+  readonly entryId?: string;
+  readonly assetId?: string;
+  readonly scale?: number;
+};
+
+export function releaseRequest(input: ReleaseRequestInput): ReleaseRequest {
+  const reservationId = input.reservationId ?? "reservation-1";
+  const entryId = input.entryId ?? `entry-release-${reservationId}`;
+  return {
+    reservationId,
+    intentId: `intent-${reservationId}`,
+    idempotencyKey: `idem-${entryId}`,
+    correlationId: `corr-${reservationId}`,
+    entryId,
+    assetId: input.assetId ?? TEST_STABLE_ASSET,
+    scale: input.scale ?? TEST_STABLE_SCALE,
+    amountBase: input.amountBase,
+    occurredAt: at("2026-01-02T03:06:05.000Z"),
+    recordedAt: at("2026-01-02T03:06:06.000Z"),
   };
 }

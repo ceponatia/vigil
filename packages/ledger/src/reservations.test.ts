@@ -10,9 +10,9 @@ import {
 import { holdingsBase, type BalanceSheet } from "./balances";
 import { LEDGER_DIAGNOSTIC_CODES, LEDGER_EMITTED_POLICY_REASON_CODES } from "./diagnostics";
 import { planRelease, planReservation } from "./reservations";
-import type { JournalEntry } from "./journal";
+import { postEntry, type JournalEntry } from "./journal";
 import {
-  at,
+  releaseRequest,
   reservationRequest,
   sheetFrom,
   twoLineEntry,
@@ -104,6 +104,68 @@ describe("planReservation against already-reserved funds", () => {
     }
   });
 
+  it("holds the funds once when the same reservation request is delivered twice — catches an at-least-once dispatcher that re-plans a hold under a fresh entry id and reserves the same capital for one intent twice over; the store-level half of this claim is packages/db/src/store/reservation-store.int.test.ts", () => {
+    const funded = [fundingEntry("available")];
+    const first = planReservation(sheetFrom(funded), reservationRequest({ amountBase: 250_000_000n }));
+    expect(first.outcome).toBe("reserved");
+    if (first.outcome !== "reserved") {
+      return;
+    }
+
+    const journal = postEntry(funded, first.entry);
+    expect(journal.outcome).toBe("posted");
+    if (journal.outcome !== "posted") {
+      return;
+    }
+
+    // Redelivered with a freshly generated entry id, as a retrying
+    // dispatcher would: only the idempotency key still ties it to the first
+    // delivery, and the arithmetic alone still finds it affordable.
+    const redelivered = planReservation(
+      sheetFrom(journal.entries),
+      reservationRequest({ amountBase: 250_000_000n, entryId: "entry-reservation-1-retry" }),
+    );
+    expect(redelivered.outcome).toBe("reserved");
+    if (redelivered.outcome !== "reserved") {
+      return;
+    }
+
+    const second = postEntry(journal.entries, redelivered.entry);
+
+    expect(second.outcome).toBe("refused");
+    if (second.outcome === "refused") {
+      expect(second.refusal.reason).toEqual({ source: "ledger", code: "DUPLICATE_IDEMPOTENCY_KEY" });
+    }
+    expect(holdingsBase(sheetFrom(journal.entries), TEST_STABLE_ASSET, "reserved")).toBe(250_000_000n);
+    expect(holdingsBase(sheetFrom(journal.entries), TEST_STABLE_ASSET, "available")).toBe(FUNDED_BASE - 250_000_000n);
+  });
+
+  it("refuses a reservation of zero or fewer base units — catches a path where direction and sign both carry meaning, so a negative request reads as a hold and moves capital the other way", () => {
+    const sheet = sheetFrom([fundingEntry("available")]);
+
+    for (const amountBase of [0n, -1n]) {
+      const held = planReservation(sheet, reservationRequest({ amountBase }));
+
+      expect(held.outcome).toBe("refused");
+      if (held.outcome === "refused") {
+        expect(held.refusal.reason).toEqual({ source: "ledger", code: "NON_POSITIVE_AMOUNT" });
+      }
+    }
+  });
+
+  it("refuses a reservation whose attempt is not a positive whole number — catches a retry that arrives unnumbered or as attempt 0, which would leave the store's (intent_id, attempt) uniqueness unable to tell a versioned retry from a second authorization to spend the same intent", () => {
+    const sheet = sheetFrom([fundingEntry("available")]);
+
+    for (const attempt of [0, -1, 1.5]) {
+      const result = planReservation(sheet, reservationRequest({ amountBase: 1n, attempt }));
+
+      expect(result.outcome).toBe("refused");
+      if (result.outcome === "refused") {
+        expect(result.refusal.reason).toEqual({ source: "ledger", code: "MALFORMED_ENTRY" });
+      }
+    }
+  });
+
   it("refuses a reservation that expires no later than the event it authorizes — catches a window check that admits an already-dead hold, which would authorize a spend nothing can time out", () => {
     const result = planReservation(
       sheetFrom([fundingEntry("available")]),
@@ -150,6 +212,17 @@ describe("which holdings states a reservation may consume", () => {
     expect(reservable).toEqual(["available"]);
   });
 
+  it("refuses staked, unbonding, and exit-queued funds with the policy code YIELD_LOCKED, and the other two unreservable states with a ledger diagnostic — the case above reads the same table it checks, so this is the pin on what docs/policy.md's YIELD_LOCKED actually covers: locked yield, never a balance that is merely committed elsewhere or in transit", () => {
+    const statesRefusedWith = (source: string, code: string): readonly HoldingsState[] =>
+      HOLDINGS_STATES.filter((state) => {
+        const declared = HOLDINGS_STATE_RESERVABILITY[state];
+        return !declared.reservable && declared.refusal.reason.source === source && declared.refusal.reason.code === code;
+      });
+
+    expect(statesRefusedWith("policy", "YIELD_LOCKED")).toEqual(["staked", "unbonding", "exit-queued"]);
+    expect(statesRefusedWith("ledger", "STATE_NOT_RESERVABLE")).toEqual(["reserved", "pending-transfer"]);
+  });
+
   it("keeps the policy and ledger vocabularies apart in every declared refusal — catches a ledger diagnostic smuggled into the policy vocabulary, where docs/policy.md would no longer be the only place reason codes are defined", () => {
     for (const state of HOLDINGS_STATES) {
       const declared = HOLDINGS_STATE_RESERVABILITY[state];
@@ -176,18 +249,7 @@ describe("planRelease", () => {
     }
 
     const afterHold = sheetFrom([...funded, held.entry]);
-    const released = planRelease(afterHold, {
-      reservationId: "reservation-1",
-      intentId: "intent-reservation-1",
-      idempotencyKey: "idem-release-1",
-      correlationId: "corr-reservation-1",
-      entryId: "entry-release-1",
-      assetId: TEST_STABLE_ASSET,
-      scale: 6,
-      amountBase: 250_000_000n,
-      occurredAt: at("2026-01-02T03:06:05.000Z"),
-      recordedAt: at("2026-01-02T03:06:06.000Z"),
-    });
+    const released = planRelease(afterHold, releaseRequest({ amountBase: 250_000_000n, entryId: "entry-release-1" }));
 
     expect(released.outcome).toBe("released");
     if (released.outcome !== "released") {
@@ -199,19 +261,24 @@ describe("planRelease", () => {
     expect(holdingsBase(afterRelease, TEST_STABLE_ASSET, "available")).toBe(650_000_000n);
   });
 
+  it("refuses a release of zero or fewer base units — catches the same sign confusion on the way back, where a negative release would take capital out of `available` under the name of freeing it", () => {
+    const sheet = sheetFrom([fundingEntry("available")]);
+
+    for (const amountBase of [0n, -1n]) {
+      const freed = planRelease(sheet, releaseRequest({ amountBase }));
+
+      expect(freed.outcome).toBe("refused");
+      if (freed.outcome === "refused") {
+        expect(freed.refusal.reason).toEqual({ source: "ledger", code: "NON_POSITIVE_AMOUNT" });
+      }
+    }
+  });
+
   it("refuses to release more than is on hold — catches a release path that would mint available balance out of an over-stated reservation", () => {
-    const result = planRelease(sheetFrom([fundingEntry("available")]), {
-      reservationId: "reservation-1",
-      intentId: "intent-reservation-1",
-      idempotencyKey: "idem-release-2",
-      correlationId: "corr-reservation-1",
-      entryId: "entry-release-2",
-      assetId: TEST_STABLE_ASSET,
-      scale: 6,
-      amountBase: 1n,
-      occurredAt: at("2026-01-02T03:06:05.000Z"),
-      recordedAt: at("2026-01-02T03:06:06.000Z"),
-    });
+    const result = planRelease(
+      sheetFrom([fundingEntry("available")]),
+      releaseRequest({ amountBase: 1n, entryId: "entry-release-2" }),
+    );
 
     expect(result.outcome).toBe("refused");
     if (result.outcome === "refused") {

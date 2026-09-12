@@ -1,12 +1,12 @@
-import { sql } from "drizzle-orm";
+import { is, sql } from "drizzle-orm";
+import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { createDbClient, type VigilDatabase } from "./client";
-import { reservations } from "./schema/intents";
+import { schema } from "./client";
 import { journalEntries, journalLines, ledgerBalances } from "./schema/journal";
 import { postJournalEntry } from "./store/journal-store";
 import { postgresErrorCode, PG_CHECK_VIOLATION, PG_RAISE_EXCEPTION } from "./store/pg-errors";
-import { fundingEntry } from "./test-support/journal-fixtures";
+import { fundingEntry, openLedgerTestDb } from "./test-support/journal-fixtures";
 
 // Lives beside src/, NOT under src/schema/: drizzle.config.ts globs
 // `packages/db/src/schema/*.ts`, so a test file in that directory would be
@@ -18,24 +18,56 @@ import { fundingEntry } from "./test-support/journal-fixtures";
 //   * an idempotency key with an index instead of a unique constraint, which
 //     stops nothing;
 //   * a posted journal entry that can be edited or deleted in place;
-//   * a holdings balance that can be driven negative by a direct write.
+//   * a holdings balance that can be driven negative by a direct write;
+//   * a constraint that exists in packages/db/src/schema/ but never reached
+//     drizzle/, so the migration CI applies does not carry it.
 //
-// Each claim is checked against the migrated database — the real schema CI
-// builds from `drizzle/` — not against the TypeScript schema objects, which
-// would only prove the source agrees with itself.
+// Almost every claim is asserted against the migrated database — the schema
+// CI actually builds from `drizzle/`, reached through `information_schema`,
+// `pg_indexes`, and `pg_constraint`. Where an expectation is derived from
+// the TypeScript schema it is only the left-hand side of that comparison:
+// the schema says what must exist, and the migrated database is asked
+// whether it does. The one claim made against the schema alone is the
+// financial-tables rule from AGENTS.md, whose literal key list is the
+// contract itself — deriving that one from the schema would assert the
+// schema against itself and prove nothing.
 
-const client = createDbClient({ connectionString: process.env.DATABASE_URL ?? "", applicationName: "vigil-schema-test" });
-const db: VigilDatabase = client.db;
+const { db, close, reset } = openLedgerTestDb("vigil-schema-test");
 
-afterAll(async () => {
-  await client.close();
-});
+afterAll(close);
+beforeEach(reset);
 
-beforeEach(async () => {
-  await db.execute(
-    sql`truncate table ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances} restart identity cascade`,
-  );
-});
+// Every table the Drizzle schema declares, discovered rather than listed:
+// a table added to packages/db/src/schema/ without a migration shows up
+// below as a missing constraint, not as a case nobody remembered to add.
+// `schema` also holds the enums and the precision constants, so the tables
+// are picked out by identity rather than by name.
+function asPgTable(value: unknown): PgTable | null {
+  return is(value, PgTable) ? value : null;
+}
+
+const schemaTables: readonly PgTable[] = Object.values(schema)
+  .map((value) => asPgTable(value))
+  .filter((table): table is PgTable => table !== null);
+
+function declaredUniqueIndexNames(): readonly string[] {
+  const fromIndexes = schemaTables
+    .flatMap((table) => getTableConfig(table).indexes)
+    .filter((declared) => declared.config.unique)
+    .map((declared) => declared.config.name);
+  const fromConstraints = schemaTables
+    .flatMap((table) => getTableConfig(table).uniqueConstraints)
+    .map((declared) => declared.name);
+
+  return [...fromIndexes, ...fromConstraints].filter((name): name is string => name !== undefined).sort();
+}
+
+function declaredCheckNames(): readonly string[] {
+  return schemaTables
+    .flatMap((table) => getTableConfig(table).checks)
+    .map((declared) => declared.name)
+    .sort();
+}
 
 async function errorFrom(run: () => Promise<unknown>): Promise<unknown> {
   try {
@@ -111,15 +143,12 @@ describe("money and quantity columns", () => {
 });
 
 describe("idempotency and correlation keys", () => {
-  it("enforces uniqueness with constraints, not merely indexes that allow duplicates — catches an idempotency key that is indexed for speed and unenforced for correctness", async () => {
-    const result = await db.execute<{ indexname: string; indexdef: string }>(sql`
-      select indexname, indexdef from pg_indexes where schemaname = 'public'
-    `);
-    const uniqueIndexes = new Set(
-      result.rows.filter((row) => row.indexdef.includes("CREATE UNIQUE INDEX")).map((row) => row.indexname),
-    );
-
-    expect([...uniqueIndexes].sort()).toEqual(
+  // The literal list is the contract, not a restatement of the schema:
+  // AGENTS.md "Database changes" requires a unique constraint — never a
+  // bare index — on every idempotency and correlation key, and a schema
+  // that quietly demoted one would satisfy a purely derived check.
+  it("declares a unique index on each key the financial-tables rule names — catches an idempotency key indexed for speed and unenforced for correctness, which stops nothing", () => {
+    expect(declaredUniqueIndexNames()).toEqual(
       expect.arrayContaining([
         "journal_entries_idempotency_key_key",
         "journal_entries_reverses_entry_id_key",
@@ -128,6 +157,35 @@ describe("idempotency and correlation keys", () => {
         "reservations_journal_entry_id_key",
       ]),
     );
+  });
+
+  it("has every unique index the schema declares, still unique, in the migrated database — catches a constraint that lives in packages/db/src/schema/ and never reached drizzle/, where uniqueness would be enforced in code review and nowhere the application actually writes", async () => {
+    const declared = declaredUniqueIndexNames();
+    expect(declared.length).toBeGreaterThan(0);
+
+    const result = await db.execute<{ indexname: string; indexdef: string }>(sql`
+      select indexname, indexdef from pg_indexes where schemaname = 'public'
+    `);
+    const uniqueInDatabase = new Set(
+      result.rows.filter((row) => row.indexdef.includes("CREATE UNIQUE INDEX")).map((row) => row.indexname),
+    );
+
+    expect(declared.filter((name) => !uniqueInDatabase.has(name))).toEqual([]);
+  });
+
+  it("has every check constraint the schema declares in the migrated database — catches ledger_balances_holdings_never_negative existing only in TypeScript, which would leave the no-overspend guarantee an application convention again", async () => {
+    const declared = declaredCheckNames();
+    expect(declared).toContain("ledger_balances_holdings_never_negative");
+
+    const result = await db.execute<{ conname: string }>(sql`
+      select c.conname
+      from pg_constraint c
+      join pg_namespace n on n.oid = c.connamespace
+      where n.nspname = 'public' and c.contype = 'c'
+    `);
+    const inDatabase = new Set(result.rows.map((row) => row.conname));
+
+    expect(declared.filter((name) => !inDatabase.has(name))).toEqual([]);
   });
 });
 

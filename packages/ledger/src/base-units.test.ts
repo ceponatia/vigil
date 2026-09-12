@@ -1,7 +1,7 @@
 import { decimalStringSchema } from "@vigil/contracts";
 import { describe, expect, it } from "vitest";
 
-import { fromBaseUnits, toBaseUnits, MAX_ASSET_SCALE } from "./base-units";
+import { fromBaseUnits, toBaseUnits, MAX_ASSET_SCALE, MIN_ASSET_SCALE } from "./base-units";
 
 // The defect this file kills: money entering the ledger through a float.
 // Every case below is one that `parseFloat`, `Number()`, or `toFixed()`
@@ -70,6 +70,20 @@ const conversions: ReadonlyArray<{
     scale: 9,
     base: 12_345_678_901_234_567_890_123_456_789n,
     catches: "any float-backed conversion, which loses the low-order digits of this amount entirely",
+  },
+  {
+    name: "a whole-unit asset at the minimum scale",
+    decimal: "7",
+    scale: MIN_ASSET_SCALE,
+    base: 7n,
+    catches: "a conversion whose padding and slicing arithmetic assumes a fractional part would render 7 units of a zero-decimal asset as 70, or as nothing at all",
+  },
+  {
+    name: "one unit at the maximum scale",
+    decimal: "1",
+    scale: MAX_ASSET_SCALE,
+    base: 10n ** 36n,
+    catches: "a conversion that accumulated the scale in a JS number, which loses exactness at 2^53 and so cannot reach the largest scale assetScaleSchema admits — the bound packages/db's numeric(78, 0) columns are sized for",
   },
 ];
 

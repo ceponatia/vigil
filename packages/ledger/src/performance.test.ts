@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { counterAccount, holdingsAccount } from "./accounts";
 import { holdingsBase } from "./balances";
 import { measurePerformance, type PerformanceMeasure } from "./performance";
-import type { JournalEntry } from "./journal";
+import type { EntryKind, JournalEntry } from "./journal";
 import { sheetFrom, twoLineEntry, TEST_STABLE_ASSET } from "./test-support/journal-fixtures";
 
 // The defect this file kills: measuring drawdown from total equity instead
@@ -68,6 +68,30 @@ const deposit = twoLineEntry({
   recordedAt: "2026-02-01T00:00:01.000Z",
 });
 
+const withdrawal = twoLineEntry({
+  entryId: "entry-owner-withdrawal",
+  kind: "distribution",
+  debit: contributedAccount,
+  credit: availableAccount,
+  amountBase: 200n * UNIT,
+  occurredAt: "2026-02-02T00:00:00.000Z",
+  recordedAt: "2026-02-02T00:00:01.000Z",
+});
+
+// Both directions of the owner's own money. A deposit and a withdrawal make
+// the identical claim on this module — basis moves, performance does not —
+// so they are one matrix rather than two near-identical suites.
+const cashFlows: ReadonlyArray<{
+  name: string;
+  entry: JournalEntry;
+  kind: EntryKind;
+  basisDeltaBase: bigint;
+  equityDeltaBase: bigint;
+}> = [
+  { name: "an owner deposit", entry: deposit, kind: "contribution", basisDeltaBase: 500n * UNIT, equityDeltaBase: 500n * UNIT },
+  { name: "an owner withdrawal", entry: withdrawal, kind: "distribution", basisDeltaBase: -200n * UNIT, equityDeltaBase: -200n * UNIT },
+];
+
 function measureOrThrow(entries: readonly JournalEntry[]): PerformanceMeasure {
   const result = measurePerformance(entries, TEST_STABLE_ASSET);
   if (result.outcome === "refused") {
@@ -89,37 +113,43 @@ describe("measurePerformance", () => {
     expect(measure.contributedBase).toBe(1_000n * UNIT);
   });
 
-  it("records an owner deposit as contributed basis and leaves the drawdown exactly where it was — catches a drawdown measured from equity, which this deposit would clear outright", () => {
-    const before = measureOrThrow(tradingHistory);
-    const withDeposit = [...tradingHistory, deposit];
-    const after = measureOrThrow(withDeposit);
+  it.each(cashFlows)(
+    "records $name as contributed basis and leaves the drawdown exactly where it was — catches a drawdown measured from equity, which a deposit clears outright and a withdrawal deepens into a pause the owner caused by moving their own money",
+    ({ entry, kind, basisDeltaBase, equityDeltaBase }) => {
+      const before = measureOrThrow(tradingHistory);
+      const withCashFlow = [...tradingHistory, entry];
+      const after = measureOrThrow(withCashFlow);
 
-    // The deposit is basis.
-    expect(deposit.kind).toBe("contribution");
-    expect(after.contributedBase).toBe(before.contributedBase + 500n * UNIT);
+      // The cash flow is basis.
+      expect(entry.kind).toBe(kind);
+      expect(after.contributedBase).toBe(before.contributedBase + basisDeltaBase);
 
-    // It is not profit, and it is not a recovery.
-    expect(after.realizedPnlBase).toBe(before.realizedPnlBase);
-    expect(after.feesBase).toBe(before.feesBase);
-    expect(after.performanceBase).toBe(before.performanceBase);
-    expect(after.highWaterBase).toBe(before.highWaterBase);
-    expect(after.drawdownBase).toBe(before.drawdownBase);
+      // It is not profit, not a loss, and not a recovery.
+      expect(after.realizedPnlBase).toBe(before.realizedPnlBase);
+      expect(after.feesBase).toBe(before.feesBase);
+      expect(after.performanceBase).toBe(before.performanceBase);
+      expect(after.highWaterBase).toBe(before.highWaterBase);
+      expect(after.drawdownBase).toBe(before.drawdownBase);
 
-    // And the pause a caller keys on that figure does not clear, even though
-    // the account now holds 500 more units than it did while paused.
-    expect(pausedByDrawdown(before)).toBe(true);
-    expect(pausedByDrawdown(after)).toBe(true);
+      // And the pause a caller keys on that figure neither clears nor
+      // tightens, however much capital the owner has just added or removed.
+      expect(pausedByDrawdown(before)).toBe(true);
+      expect(pausedByDrawdown(after)).toBe(true);
 
-    const equityBefore = holdingsBase(sheetFrom(tradingHistory), TEST_STABLE_ASSET, "available");
-    const equityAfter = holdingsBase(sheetFrom(withDeposit), TEST_STABLE_ASSET, "available");
-    expect(equityAfter - equityBefore).toBe(500n * UNIT);
-  });
+      const equityBefore = holdingsBase(sheetFrom(tradingHistory), TEST_STABLE_ASSET, "available");
+      const equityAfter = holdingsBase(sheetFrom(withCashFlow), TEST_STABLE_ASSET, "available");
+      expect(equityAfter - equityBefore).toBe(equityDeltaBase);
+    },
+  );
 
-  it("posts a deposit only to holdings and contributed capital — catches a deposit routed through the realized-pnl account, which would read as profit for the rest of the account's life", () => {
-    const families = deposit.lines.map((line) => line.account.family).sort();
+  it.each(cashFlows)(
+    "posts $name only to holdings and contributed capital — catches an owner cash flow routed through the realized-pnl account, which would read as profit or loss for the rest of the account's life",
+    ({ entry }) => {
+      const families = entry.lines.map((line) => line.account.family).sort();
 
-    expect(families).toEqual(["contributed-capital", "holdings"]);
-  });
+      expect(families).toEqual(["contributed-capital", "holdings"]);
+    },
+  );
 
   it("keeps the high-water mark at a new peak rather than trailing the current value — catches a mark recomputed as the latest performance, which would report zero drawdown forever", () => {
     const measure = measureOrThrow(tradingHistory);
@@ -148,6 +178,20 @@ describe("measurePerformance", () => {
     expect(openingLoss.performanceBase).toBe(-7n * UNIT);
     expect(openingLoss.highWaterBase).toBe(0n);
     expect(openingLoss.drawdownBase).toBe(7n * UNIT);
+  });
+
+  it("refuses to produce a figure from an entry that does not validate, and names the entry — catches a fold that skips a corrupt record and reports the remaining total as if the series were complete", () => {
+    // Built by hand, past buildEntry, exactly as a corrupt persisted row
+    // would reach the fold.
+    const truncated: JournalEntry = { ...deposit, entryId: "entry-truncated", lines: deposit.lines.slice(0, 1) };
+
+    const result = measurePerformance([...tradingHistory, truncated], TEST_STABLE_ASSET);
+
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.refusal.reason).toEqual({ source: "ledger", code: "MALFORMED_ENTRY" });
+      expect(result.entryId).toBe("entry-truncated");
+    }
   });
 
   it("measures one asset at a time and never nets two assets together — catches a measure that summed base units across assets, which is an invented exchange rate", () => {

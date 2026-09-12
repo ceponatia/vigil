@@ -11,6 +11,7 @@ import { rebuildBalances } from "./balances";
 import * as ledger from "./index";
 import {
   buildEntry,
+  parseJournalEntry,
   postEntry,
   reverseEntry,
   ENTRY_KINDS,
@@ -346,6 +347,64 @@ describe("postEntry duplicate and reversal guards", () => {
     expect(result.outcome).toBe("refused");
     if (result.outcome === "refused") {
       expect(result.refusal.reason.code).toBe("DUPLICATE_REVERSAL");
+    }
+  });
+});
+
+describe("the reversal link and the persistence boundary", () => {
+  it("refuses a reversal that names no original, and any other kind that claims to reverse one — catches a reversal link filled in by convention rather than checked, where a correction subtracts from an entry nobody can identify (the ledger half of the journal_entries_reversal_link check constraint)", () => {
+    const lines = [
+      { account: availableAccount, scale: TEST_STABLE_SCALE, amountBase: 1n, direction: "debit" as const },
+      { account: contributedAccount, scale: TEST_STABLE_SCALE, amountBase: 1n, direction: "credit" as const },
+    ];
+    const shared = {
+      occurredAt: at("2026-01-03T00:00:00.000Z"),
+      recordedAt: at("2026-01-03T00:00:01.000Z"),
+      correlationId: "corr-reversal-link",
+      lines,
+    };
+
+    const reversalWithoutTarget = buildEntry({
+      ...shared,
+      entryId: "entry-reversal-without-target",
+      kind: "reversal",
+      idempotencyKey: "idem-reversal-without-target",
+    });
+    const contributionClaimingOne = buildEntry({
+      ...shared,
+      entryId: "entry-contribution-claiming-reversal",
+      kind: "contribution",
+      idempotencyKey: "idem-contribution-claiming-reversal",
+      reversesEntryId: "entry-somewhere-else",
+    });
+
+    for (const built of [reversalWithoutTarget, contributionClaimingOne]) {
+      expect(built.outcome).toBe("refused");
+      if (built.outcome === "refused") {
+        expect(built.refusal.reason).toEqual({ source: "ledger", code: "MALFORMED_ENTRY" });
+      }
+    }
+  });
+
+  it("re-validates a persisted record and refuses a corrupt one with a diagnostic instead of throwing — catches a rebuild that trusts a database row it never checked, and one that a single bad row takes down entirely (docs/resilience.md §5)", () => {
+    const persisted: unknown = contribution("entry-persisted", 10n);
+    const parsed = parseJournalEntry(persisted);
+
+    expect(parsed.outcome).toBe("valid");
+    if (parsed.outcome === "valid") {
+      expect(parsed.entry.entryId).toBe("entry-persisted");
+    }
+
+    // Well-formed text naming a calendar day that does not exist: Date.parse
+    // rolls it forward to March 2 rather than failing, so a NaN check alone
+    // would let this row through.
+    const corrupt: unknown = { ...contribution("entry-corrupt", 10n), occurredAt: "2026-02-30T00:00:00.000Z" };
+
+    expect(() => parseJournalEntry(corrupt)).not.toThrow();
+    const refusedParse = parseJournalEntry(corrupt);
+    expect(refusedParse.outcome).toBe("refused");
+    if (refusedParse.outcome === "refused") {
+      expect(refusedParse.refusal.reason).toEqual({ source: "ledger", code: "MALFORMED_ENTRY" });
     }
   });
 });

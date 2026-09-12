@@ -206,6 +206,26 @@ describe("rebuilding balances from the journal alone", () => {
     expect(compareBalanceSheets(rebuilt.balances, persisted)).toEqual([]);
   });
 
+  it("reports a difference when the replay is one posted entry short, and refuses a replay that reads one twice — catches a comparison that would report agreement whatever the rebuild did with these rows, which is the only way the assertion above can pass while the rebuild is wrong", async () => {
+    const persisted = toBalanceSheet(await loadBalances(db));
+    const entries = replayed(await loadJournalEntries(db));
+    expect(entries.length).toBeGreaterThan(1);
+
+    const dropped = rebuildBalances(entries.slice(0, -1));
+    expect(dropped.outcome).toBe("rebuilt");
+    if (dropped.outcome === "rebuilt") {
+      expect(compareBalanceSheets(dropped.balances, persisted)).not.toEqual([]);
+    }
+
+    // Double-counting cannot even produce a sheet: an overlapping read is
+    // refused rather than folded in twice.
+    const doubled = rebuildBalances([...entries, ...entries.slice(-1)]);
+    expect(doubled.outcome).toBe("refused");
+    if (doubled.outcome === "refused") {
+      expect(doubled.refusal.reason.code).toBe("DUPLICATE_ENTRY_ID");
+    }
+  });
+
   it("keeps each asset at its own scale through the rebuild — catches a replay that reads one scale for every asset, which would misprice an 18-decimal balance by twelve orders of magnitude", async () => {
     const rebuilt = rebuildBalances(replayed(await loadJournalEntries(db)));
     expect(rebuilt.outcome).toBe("rebuilt");

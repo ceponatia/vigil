@@ -94,6 +94,26 @@ describe("rebuildBalances", () => {
   it("reports a zero balance for an account with no postings — catches a lookup that returns undefined and lets `undefined - amount` become NaN downstream", () => {
     expect(holdingsBase(sheetFrom([contribution("entry-only", 10n)]), TEST_STABLE_ASSET, "staked")).toBe(0n);
   });
+
+  it("refuses a journal that posts one asset at two scales in different entries, and says which entry — catches a rebuild that tracks scale per line instead of per asset, where one row recorded at scale 18 is folded into a scale-6 account twelve orders of magnitude too large", () => {
+    const atSixDecimals = contribution("entry-scale-6", 1_000_000n);
+    const atEighteenDecimals = twoLineEntry({
+      entryId: "entry-scale-18",
+      kind: "contribution",
+      debit: availableAccount,
+      credit: contributedAccount,
+      amountBase: 1_000_000n,
+      scale: 18,
+    });
+
+    const result = rebuildBalances([atSixDecimals, atEighteenDecimals]);
+
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.refusal.reason.code).toBe("SCALE_MISMATCH");
+      expect(result.entryId).toBe("entry-scale-18");
+    }
+  });
 });
 
 describe("compareBalanceSheets", () => {
@@ -109,5 +129,24 @@ describe("compareBalanceSheets", () => {
 
     expect(differences).toHaveLength(2);
     expect(differences.every((difference) => difference.actualNetBase === null)).toBe(true);
+  });
+
+  it("reports an account whose two sides agree on the amount but disagree on the scale — catches a reconciliation that compares only the net, where a scale drift between the stored projection and the rebuild reads as agreement about two different sums of money", () => {
+    const atSixDecimals = sheetFrom([contribution("entry-scale-a", 1_000_000n)]);
+    const atEighteenDecimals = sheetFrom([
+      twoLineEntry({
+        entryId: "entry-scale-a",
+        kind: "contribution",
+        debit: availableAccount,
+        credit: contributedAccount,
+        amountBase: 1_000_000n,
+        scale: 18,
+      }),
+    ]);
+
+    const differences = compareBalanceSheets(atSixDecimals, atEighteenDecimals);
+
+    expect(differences).toHaveLength(2);
+    expect(differences.every((difference) => difference.expectedNetBase === difference.actualNetBase)).toBe(true);
   });
 });

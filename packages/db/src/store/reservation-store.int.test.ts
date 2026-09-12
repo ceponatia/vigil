@@ -1,12 +1,8 @@
-import { sql } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { createDbClient, type VigilDatabase } from "../client";
-import { reservations } from "../schema/intents";
-import { journalEntries, journalLines, ledgerBalances } from "../schema/journal";
 import { loadBalances, loadJournalEntries, postJournalEntry } from "./journal-store";
 import { loadActiveReservations, reserveAvailable, type ReserveRequest } from "./reservation-store";
-import { fundingEntry, TEST_ASSET, TEST_SCALE } from "../test-support/journal-fixtures";
+import { fundingEntry, openLedgerTestDb, TEST_ASSET, TEST_SCALE } from "../test-support/journal-fixtures";
 
 // The defects this file kills:
 //   * a reservation that is written but never reflected in the balances it
@@ -18,11 +14,7 @@ import { fundingEntry, TEST_ASSET, TEST_SCALE } from "../test-support/journal-fi
 // of them is about what survives a commit or a rollback, which an in-memory
 // store cannot answer for.
 
-const client = createDbClient({
-  connectionString: process.env.DATABASE_URL ?? "",
-  applicationName: "vigil-reservation-test",
-});
-const db: VigilDatabase = client.db;
+const { db, close, reset } = openLedgerTestDb("vigil-reservation-test");
 
 const FUNDED_BASE = 1_000_000_000n;
 
@@ -44,14 +36,10 @@ function request(overrides: Partial<ReserveRequest> = {}): ReserveRequest {
   };
 }
 
-afterAll(async () => {
-  await client.close();
-});
+afterAll(close);
 
 beforeEach(async () => {
-  await db.execute(
-    sql`truncate table ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances} restart identity cascade`,
-  );
+  await reset();
   const funded = await postJournalEntry(db, fundingEntry("entry-funding", FUNDED_BASE));
   expect(funded.outcome).toBe("posted");
 });
@@ -60,6 +48,13 @@ async function availableBase(): Promise<bigint> {
   const balances = await loadBalances(db);
   const row = balances.find((balance) => balance.accountKey === `holdings|available|${TEST_ASSET}`);
   return row === undefined ? 0n : row.debitBase - row.creditBase;
+}
+
+/** The funded account, untouched: the assertion a rolled-back attempt owes. */
+async function expectNothingWritten(): Promise<void> {
+  expect(await availableBase()).toBe(FUNDED_BASE);
+  expect(await loadJournalEntries(db)).toHaveLength(1);
+  expect(await loadActiveReservations(db, TEST_ASSET)).toHaveLength(0);
 }
 
 describe("reserveAvailable", () => {
@@ -112,6 +107,39 @@ describe("reserveAvailable", () => {
     expect(await loadJournalEntries(db)).toHaveLength(1);
     const balances = await loadBalances(db);
     expect(balances.map((balance) => balance.accountKey)).not.toContain(`holdings|reserved|${TEST_ASSET}`);
+  });
+
+  it("reserves exactly the available balance and leaves nothing behind — catches the store's own feasibility check written as `<=`, which would strand the last base unit of every asset permanently unreservable", async () => {
+    const result = await reserveAvailable(db, request({ amountBase: FUNDED_BASE }));
+
+    expect(result.outcome).toBe("reserved");
+    if (result.outcome === "reserved") {
+      expect(result.availableBeforeBase).toBe(FUNDED_BASE);
+      expect(result.availableAfterBase).toBe(0n);
+    }
+    expect(await availableBase()).toBe(0n);
+  });
+
+  it("refuses a reservation of zero base units under the row lock and writes nothing — catches an empty or sign-flipped request reaching the journal as a hold that authorizes nothing while still consuming the intent's one attempt number", async () => {
+    const result = await reserveAvailable(db, request({ amountBase: 0n }));
+
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.code).toBe("MALFORMED_ENTRY");
+      expect(result.availableBase).toBe(FUNDED_BASE);
+    }
+    await expectNothingWritten();
+  });
+
+  it("refuses a hold whose expiry is not after the event it authorizes, and rolls the whole attempt back — @vigil/ledger refuses that window in its pure planner, but nothing stops a store caller from skipping the planner, so the reservations_window check constraint is what actually holds; catches a driver error surfacing as a crash instead of a diagnostic", async () => {
+    const result = await reserveAvailable(db, request({ expiresAt: "2026-01-02T03:05:00.000Z" }));
+
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.code).toBe("CONSTRAINT_VIOLATION");
+      expect(result.detail).toContain("reservations_window");
+    }
+    await expectNothingWritten();
   });
 
   it("refuses a second reservation claiming the same attempt number on one intent — catches a retry treated as a fresh authorization instead of a versioned attempt", async () => {
