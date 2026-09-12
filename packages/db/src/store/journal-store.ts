@@ -134,12 +134,31 @@ export type PostEntryResult =
   | { readonly outcome: "refused"; readonly code: StoreDiagnosticCode; readonly detail: string };
 
 /**
- * The account key both packages derive the same way. Seam: this formula
- * belongs in `packages/contracts` beside asset identity, so there is one
- * definition rather than two that must be tested against each other.
+ * The separator between an account key's components — the same character
+ * `@vigil/ledger` exports as `ACCOUNT_KEY_SEPARATOR`, and deliberately not
+ * `|`: a canonical asset id contains three `|` of its own, so a `|`-joined
+ * key could not be split back into its parts, while `/` is forbidden inside
+ * every component of an asset identity.
+ */
+export const ACCOUNT_KEY_SEPARATOR = "/";
+
+/**
+ * The account key both packages derive the same way.
+ *
+ * "The same way" is enforced by `tests/seams/ledger-db-vocabulary.test.ts`
+ * and by nothing else: the layer graph forbids either package importing the
+ * other, so this formula is duplicated on purpose and the two copies can
+ * only be held together by a test that derives a key from each and compares
+ * them. When the two disagree, every balance is written under one key and
+ * read under another, and the projection silently reads as empty.
+ *
+ * Seam: this belongs in `packages/contracts` beside asset identity, so
+ * there is one definition rather than two that must be tested against each
+ * other.
  */
 export function accountKeyFor(account: StoreAccount): string {
-  return `${account.family}|${account.holdingsState ?? "-"}|${account.assetId}`;
+  const state = account.holdingsState ?? "-";
+  return `${account.family}${ACCOUNT_KEY_SEPARATOR}${state}${ACCOUNT_KEY_SEPARATOR}${account.assetId}`;
 }
 
 /**

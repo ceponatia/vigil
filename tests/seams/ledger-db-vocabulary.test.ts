@@ -1,6 +1,7 @@
 import {
   accountKeyFor,
   accountFamilyEnum,
+  ACCOUNT_KEY_SEPARATOR as STORE_ACCOUNT_KEY_SEPARATOR,
   holdingsStateEnum,
   journalEntryKindEnum,
   postingDirectionEnum,
@@ -10,6 +11,7 @@ import {
 import {
   accountKey,
   ACCOUNT_FAMILIES,
+  ACCOUNT_KEY_SEPARATOR as LEDGER_ACCOUNT_KEY_SEPARATOR,
   ENTRY_KINDS,
   HOLDINGS_STATES,
   POSTING_DIRECTIONS,
@@ -71,7 +73,14 @@ describe("the persisted vocabulary and the ledger's vocabulary", () => {
     expect(reservationStateEnum.enumValues).toEqual([...RESERVATION_STATES]);
   });
 
-  it("derive the same account key for every family and state the vocabulary allows — catches one side changing the separator or the placeholder for an absent state, which would silently split one account into two", () => {
+  it("agree on the separator, and leave exactly two of them in a key — catches both sides drifting the same way onto `|`, which the comparison below would call agreement even though a key carrying an asset id's own three separators cannot be split back into its parts", () => {
+    expect(STORE_ACCOUNT_KEY_SEPARATOR).toBe(LEDGER_ACCOUNT_KEY_SEPARATOR);
+
+    const key = accountKey({ family: "holdings", assetId: SAMPLE_ASSET, holdingsState: "available" });
+    expect(key.split(LEDGER_ACCOUNT_KEY_SEPARATOR)).toHaveLength(3);
+  });
+
+  it("derive the same account key for every family and state the vocabulary allows — catches one side changing the separator or the placeholder for an absent state, which would silently split one account into two, so every balance is written under one key and read under another", () => {
     for (const family of ACCOUNT_FAMILIES) {
       const states = family === "holdings" ? HOLDINGS_STATES : ([null] as const);
       for (const holdingsState of states) {

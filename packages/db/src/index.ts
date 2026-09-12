@@ -37,6 +37,7 @@ export type { ReservationStateValue } from "./schema/intents";
 
 export {
   accountKeyFor,
+  ACCOUNT_KEY_SEPARATOR,
   loadBalances,
   loadJournalEntries,
   postJournalEntry,
