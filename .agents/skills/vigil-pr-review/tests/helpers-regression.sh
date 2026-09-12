@@ -49,6 +49,16 @@ run_case wait-pending 0 'GREEN: required CI/verify succeeded for head aaaaaaaaaa
 # newer run's verify — not the superseded skip — decides pending vs. green.
 run_case wait-draft-then-ready 0 'GREEN: required CI/verify succeeded for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 1
 run_case wait-failing 1 'FAILED for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 0
+# Only a superseded skip is dropped. A lone skipped CI/verify — a draft run's
+# verify with no newer run for this head — is still a failure; this kills a drop
+# written without the "a newer CI/verify exists" guard, which would turn the
+# documented exit 1 into an endless "CI/verify is absent" wait.
+run_case wait-skipped-only 1 $'  SKIPPED\tCI/verify' wait-ci.sh 0
+# Only CI/verify is superseded, and only for its own check. Beside the very
+# draft-then-ready shape that triggers the drop, another workflow's skipped
+# required check is still a failure; this kills a drop written on the bucket
+# alone, which would report GREEN over a skipped required peer check.
+run_case wait-peer-skipped 1 'Security/security' wait-ci.sh 0
 # An unrelated successful check cannot satisfy the required aggregate.
 run_case wait-unrelated 2 'CI/verify is absent' wait-ci.sh 0
 run_case wait-no-checks 2 'no required checks registered' wait-ci.sh 0
@@ -98,5 +108,18 @@ grep -Fq 'review: unverified — reviewer not configured (set VIGIL_REVIEWER_LOG
 grep -Fq 'CI:' <<<"$output" || { echo "FAIL no-reviewer: CI section did not run" >&2; exit 1; }
 grep -Fq 'threads: 0 total' <<<"$output" || { echo "FAIL no-reviewer: threads section did not run" >&2; exit 1; }
 echo 'ok  review-status degrades to unverified without a configured reviewer, without failing'
+
+# --- standing expectation for an open production defect ---------------------
+
+# Two runs for the same head, both with a skipped CI/verify, and no live verify
+# to supersede either. wait-ci.sh's own contract — its header, "1 verify failed/
+# cancelled/skipped" — and the lone-skip case above both make this exit 1 naming
+# the skipped verify. The supersede clause added in 7f6e138 instead drops EVERY
+# skipped CI/verify once more than one verify exists, the newest included, so it
+# reports "required checks exist, but CI/verify is absent for head" — false, two
+# exist and both are skipped — and waits out the timeout for exit 2 instead.
+# This expectation stands as the evidence for that defect and is not relaxed to
+# match the code; the drop belongs behind "a non-skipped CI/verify exists".
+run_case wait-verify-all-skipped 1 $'  SKIPPED\tCI/verify' wait-ci.sh 0
 
 echo 'all offline helper regressions passed'

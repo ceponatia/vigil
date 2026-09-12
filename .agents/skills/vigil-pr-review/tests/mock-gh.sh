@@ -52,6 +52,22 @@ if [ "$1 $2" = "pr checks" ]; then
       fi
       printf '[{"name":"verify","workflow":"CI","bucket":"skipping","state":"SKIPPED","event":"pull_request","link":"https://github.com/ceponatia/vigil/actions/runs/34716578875"},{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://github.com/ceponatia/vigil/actions/runs/34716584247"}]\n'
       ;;
+    wait-skipped-only)
+      # One draft-triggered run's skipped verify, with no newer run for this head.
+      printf '[{"name":"verify","workflow":"CI","bucket":"skipping","state":"SKIPPED","event":"pull_request","link":"https://example.test/run/skipped"}]\n'
+      ;;
+    wait-verify-all-skipped)
+      # Two runs for the same head, both with a skipped verify and no live verify
+      # to supersede them (a draft run re-run, or a draft PR reopened, before the
+      # ready-triggered run registers its own verify).
+      printf '[{"name":"verify","workflow":"CI","bucket":"skipping","state":"SKIPPED","event":"pull_request","link":"https://example.test/run/skipped-1"},{"name":"verify","workflow":"CI","bucket":"skipping","state":"SKIPPED","event":"pull_request","link":"https://example.test/run/skipped-2"}]\n'
+      ;;
+    wait-peer-skipped)
+      # The draft-then-ready shape (superseded CI/verify skip, live CI/verify
+      # pass) plus another workflow's own skipped required check, which nothing
+      # supersedes: the CI/verify skip is dropped, the peer skip is not.
+      printf '[{"name":"verify","workflow":"CI","bucket":"skipping","state":"SKIPPED","event":"pull_request","link":"https://example.test/run/skipped"},{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://example.test/run/1"},{"name":"security","workflow":"Security","bucket":"skipping","state":"SKIPPED","event":"pull_request","link":"https://example.test/run/2"}]\n'
+      ;;
     wait-failing|wait-stale)
       if [ "$scenario" = wait-stale ] && [ "$(next_count checks)" -eq 1 ]; then
         printf '[{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://example.test/run/old"}]\n'
