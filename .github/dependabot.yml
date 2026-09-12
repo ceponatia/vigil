@@ -26,6 +26,14 @@ updates:
       - dependency-name: "@eslint/js"
         update-types:
           - "version-update:semver-major"
+      # @types/node majors track the Node major, and .node-version pins Node
+      # 24. A major bump here (Dependabot offered 26.x in PR #2) targets a
+      # runtime this repository does not run; the type definitions move with
+      # the Node upgrade, as one deliberate change. Minors and patches within
+      # the current major still arrive through the grouped update.
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
 
   - package-ecosystem: "github-actions"
     directory: "/"
