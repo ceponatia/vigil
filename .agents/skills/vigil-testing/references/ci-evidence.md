@@ -3,10 +3,11 @@
 Read this before claiming a test ran or a change is fully covered.
 
 The repository and its CI exist: `.github/workflows/ci.yml` runs on
-GitHub-hosted runners for every pull request and push against `main` and
-`prod`. Evidence is the workflow run at the exact head SHA under review —
-never a neighboring run, a stale head, or an inference from a green badge
-elsewhere.
+GitHub-hosted runners for every pull request into `main` or `prod` and on a
+manual `workflow_dispatch` — deliberately never on a push, so a commit that
+reaches `main` outside a PR carries no run of its own. Evidence is the
+workflow run at the exact head SHA under review — never a neighboring run, a
+stale head, or an inference from a green badge elsewhere.
 
 The fixed job names are `classify changes`, `lint`, `static checks`,
 `unit tests`, `integration`, and the required aggregate `verify`. The
