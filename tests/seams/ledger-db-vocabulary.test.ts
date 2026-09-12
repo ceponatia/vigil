@@ -5,6 +5,7 @@ import {
   journalEntryKindEnum,
   postingDirectionEnum,
   reservationStateEnum,
+  type StoreProvenance,
 } from "@vigil/db";
 import {
   accountKey,
@@ -13,6 +14,7 @@ import {
   HOLDINGS_STATES,
   POSTING_DIRECTIONS,
   RESERVATION_STATES,
+  type EntryProvenance,
 } from "@vigil/ledger";
 import { describe, expect, it } from "vitest";
 
@@ -31,9 +33,33 @@ import { describe, expect, it } from "vitest";
 // Seam: when `packages/contracts` owns these registries, both sides take
 // them from there and this file goes away.
 
-const SAMPLE_ASSET = "test:stable-6";
+const SAMPLE_ASSET = "1337|native|VGLSTABLE|SYNTHETIC_TESTNET";
+
+// The record contract is declared twice for the same reason the enums are.
+// A field on one side and not the other is not a type error anywhere — it is
+// a column that is never written, or a value that is never persisted.
+const LEDGER_PROVENANCE: EntryProvenance = {
+  policyVersion: "policy-seam-0",
+  strategyVersion: "strategy-seam-0",
+  modelVersion: null,
+  portfolioSnapshotVersion: null,
+  marketSnapshotVersion: null,
+};
+
+const STORE_PROVENANCE: StoreProvenance = LEDGER_PROVENANCE;
 
 describe("the persisted vocabulary and the ledger's vocabulary", () => {
+  it("describe an economic record's provenance with the same fields — catches a version added to one side only, which persists as a column nobody writes or a value nobody stores", () => {
+    expect(Object.keys(STORE_PROVENANCE).toSorted()).toEqual(Object.keys(LEDGER_PROVENANCE).toSorted());
+    expect(Object.keys(LEDGER_PROVENANCE).toSorted()).toEqual([
+      "marketSnapshotVersion",
+      "modelVersion",
+      "policyVersion",
+      "portfolioSnapshotVersion",
+      "strategyVersion",
+    ]);
+  });
+
   it("declare exactly the same holdings states, in the same order — catches a seventh state added to one side only, which would make a rebuild drop or invent a balance", () => {
     expect(holdingsStateEnum.enumValues).toEqual([...HOLDINGS_STATES]);
   });

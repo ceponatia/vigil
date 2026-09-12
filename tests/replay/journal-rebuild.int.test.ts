@@ -1,4 +1,5 @@
 import {
+  assetScales,
   createDbClient,
   journalEntries,
   journalLines,
@@ -9,6 +10,7 @@ import {
   reservations,
   reserveAvailable,
   type StoreEntry,
+  type StoreProvenance,
   type VigilDatabase,
 } from "@vigil/db";
 import {
@@ -50,9 +52,18 @@ const db: VigilDatabase = client.db;
  */
 const EXPECTED_ACCOUNTS = 8;
 
-const STABLE = "test:stable-6";
+/** Synthetic provenance: every record says what produced it. */
+const REPLAY_PROVENANCE: StoreProvenance = {
+  policyVersion: "policy-replay-0",
+  strategyVersion: "strategy-replay-0",
+  modelVersion: null,
+  portfolioSnapshotVersion: "portfolio-replay-0",
+  marketSnapshotVersion: "market-replay-0",
+};
+
+const STABLE = "1337|native|VGLSTABLE|SYNTHETIC_TESTNET";
 const STABLE_SCALE = 6;
-const VOLATILE = "test:volatile-18";
+const VOLATILE = "1337|native|VGLVOLATILE|SYNTHETIC_TESTNET";
 const VOLATILE_SCALE = 18;
 
 function line(
@@ -82,6 +93,7 @@ function entry(
     idempotencyKey: `idem-${entryId}`,
     intentId: null,
     reversesEntryId,
+    provenance: REPLAY_PROVENANCE,
     lines,
   };
 }
@@ -155,7 +167,7 @@ function replayed(entries: readonly StoreEntry[]): readonly JournalEntry[] {
 
 beforeAll(async () => {
   await db.execute(
-    sql`truncate table ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances} restart identity cascade`,
+    sql`truncate table ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances}, ${assetScales} restart identity cascade`,
   );
 
   for (const record of history) {
@@ -176,6 +188,7 @@ beforeAll(async () => {
     occurredAt: "2026-03-01T00:06:00.000Z",
     recordedAt: "2026-03-01T00:06:01.000Z",
     expiresAt: "2026-03-01T00:11:00.000Z",
+    provenance: REPLAY_PROVENANCE,
   });
   expect(held.outcome).toBe("reserved");
 });

@@ -1,4 +1,5 @@
 import {
+  assetScales,
   createDbClient,
   journalEntries,
   journalLines,
@@ -12,6 +13,7 @@ import {
   type DbClient,
   type ReserveRequest,
   type StoreEntry,
+  type StoreProvenance,
 } from "@vigil/db";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
@@ -29,10 +31,19 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 // lock, and a committed transaction boundary. Replacing Postgres with an
 // in-memory store would delete the claim rather than move it.
 
-const ASSET = "test:stable-6";
+const ASSET = "1337|native|VGLSTABLE|SYNTHETIC_TESTNET";
 const SCALE = 6;
 const FUNDED_BASE = 1_000_000_000n;
 const HALF_PLUS_BASE = 600_000_000n;
+
+/** Synthetic provenance; both strategies run under the same policy version. */
+const CONTENDED_PROVENANCE: StoreProvenance = {
+  policyVersion: "policy-contended-0",
+  strategyVersion: "strategy-contended-0",
+  modelVersion: null,
+  portfolioSnapshotVersion: null,
+  marketSnapshotVersion: null,
+};
 
 const connectionString = process.env.DATABASE_URL ?? "";
 const strategyOne: DbClient = createDbClient({ connectionString, maxConnections: 2, applicationName: "vigil-strategy-one" });
@@ -48,6 +59,7 @@ function fundingEntry(): StoreEntry {
     idempotencyKey: "idem-contended-funding",
     intentId: null,
     reversesEntryId: null,
+    provenance: CONTENDED_PROVENANCE,
     lines: [
       {
         account: { family: "holdings", assetId: ASSET, holdingsState: "available" },
@@ -79,6 +91,7 @@ function contendingRequest(strategy: string, amountBase: bigint): ReserveRequest
     occurredAt: "2026-04-01T00:01:00.000Z",
     recordedAt: "2026-04-01T00:01:01.000Z",
     expiresAt: "2026-04-01T00:06:00.000Z",
+    provenance: CONTENDED_PROVENANCE,
   };
 }
 
@@ -89,7 +102,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await strategyOne.db.execute(
-    sql`truncate table ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances} restart identity cascade`,
+    sql`truncate table ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances}, ${assetScales} restart identity cascade`,
   );
   const funded = await postJournalEntry(strategyOne.db, fundingEntry());
   expect(funded.outcome).toBe("posted");
@@ -105,7 +118,7 @@ beforeEach(async () => {
 async function availableAndReserved(): Promise<{ available: bigint; reserved: bigint }> {
   const balances = await loadBalances(strategyOne.db);
   const net = (state: string): bigint => {
-    const row = balances.find((balance) => balance.accountKey === `holdings|${state}|${ASSET}`);
+    const row = balances.find((balance) => balance.accountKey === `holdings/${state}/${ASSET}`);
     return row === undefined ? 0n : row.debitBase - row.creditBase;
   };
   return { available: net("available"), reserved: net("reserved") };
