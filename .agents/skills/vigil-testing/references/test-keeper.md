@@ -51,15 +51,13 @@ a claim about the commit alone.
    through the code path it exercises. When the change is on a PR, read the
    current head's CI with
    `.agents/skills/vigil-pr-review/ci-failure.sh <pr>` and reconcile every
-   reported failure — until the GitHub repository and its CI exist, say so
-   explicitly instead of citing a run. A suite outside the selected jobs is
-   unverified and is reported as such.
+   reported failure against the run at that head SHA. A suite outside the
+   selected jobs is unverified and is reported as such.
 7. **Report.** Per test file: the claim each changed or added test protects
    and the CI job that selects it. Then: behaviors with no owning test and why
    (another gate owns it, or a defect to fix); production defects found;
-   suites left unverified. Never "all tests pass" without a CI run on that
-   head — and there is no CI to run against until the repository exists on
-   GitHub.
+   suites left unverified. Never "all tests pass" without reading the actual
+   CI run at that head.
 
 ## What the role never does
 

@@ -100,8 +100,7 @@ implementation is reported complete.
 
 Name the test file changed, the claim it protects, and the CI job or script
 that actually selects it. A green aggregate `verify` result means all
-applicable jobs succeeded; it does not mean every repository suite ran — and
-until the GitHub repository exists, no CI has run at all.
+applicable jobs succeeded; it does not mean every repository suite ran.
 
 Read [CI evidence and uncovered suites](references/ci-evidence.md) before
 claiming any coverage. Do not substitute a prohibited local run.
