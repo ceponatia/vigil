@@ -997,6 +997,29 @@ class CheckFunctionTests(unittest.TestCase):
         the model-override check's neighbours."""
         self.assertEqual(HOOK.PINNED & HOOK.READ_ONLY_TYPES, set())
 
+    def test_issue_filer_is_pinned_to_sonnet_and_denies_a_model_override(self):
+        self.assertIn("vigil-issue-filer", HOOK.PINNED)
+        self.assertEqual(HOOK.PINNED_MODEL["vigil-issue-filer"], "sonnet")
+        deny = HOOK.check({
+            "subagent_type": "vigil-issue-filer",
+            "model": "opus",
+            "prompt": "File the BOOT-01 issue on the board.",
+        })
+        self.assertIsNotNone(deny)
+        self.assertIn("sonnet", deny)
+
+    def test_an_issue_filing_assignment_naming_a_repo_file_is_allowed_on_the_filer(self):
+        # "Create … from docs/product.md" is a build verb in imperative position
+        # next to a repository file, so an unpinned role is refused it; the
+        # filer is pinned, so the same prompt is its ordinary work.
+        prompt = (
+            "Create the BOOT-01 through BOOT-03 issues from docs/product.md "
+            "and file them on the board with parent #12."
+        )
+        self.assertIsNone(HOOK.check({"subagent_type": "vigil-issue-filer", "prompt": prompt}))
+        self.assertIsNotNone(HOOK.check({"subagent_type": "general-purpose", "prompt": prompt}))
+
+
 
 class ProcessTests(unittest.TestCase):
     """Exercise the stdin-to-exit-code wiring, matching how Claude Code actually invokes the hook."""

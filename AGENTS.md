@@ -99,6 +99,7 @@ escalation record or `Risk area:` line, and an explicit `model` override on a pi
 | `vigil-escalation` | Opus | Takes over a slice from that record, or owns from the start a slice in a risk area: ledger, policy, execution, signer, migration, authz, persistence, replay, idempotency, reconciliation. Reconsiders the approach instead of repairing the previous patch. |
 | `vigil-reviewer` | Opus | Read-only semantic review of a diff before integration or a PR: scope, fail-closed resilience, money arithmetic, idempotency and reason codes, tests at the owning layer, docs, migrations, secrets. |
 | `vigil-test-keeper` | Opus | Test reconciliation after a coding task; see Skills and work state. |
+| `vigil-issue-filer` | Sonnet | Files and classifies issues from a settled brief — parent and sub-issues, blocked-by relations, labels, board fields — through the `vigil-docs` body template and the `vigil-board` helpers. Edits no repository files; never implements; files only when the brief authorizes it. |
 
 Escalate when the builder returns an escalation record or reports a failed attempt; a second
 plausible approach would have different architectural consequences; the root cause cannot be
@@ -124,6 +125,9 @@ per-role pins. Subagents never run on the session's own model when that model is
   Edit the canonical source and follow a matching skill when its trigger applies.
 - `vigil-docs` owns issue text and durable docs; `vigil-board` owns issue creation and lifecycle
   mechanics on the Vigil Development board.
+- On Claude, a batch of issues is filed by the `vigil-issue-filer` role from a brief that names
+  the work packages, their sources, the dependency order, the parent issue, and the board
+  classification. It deduplicates before filing and reports numbers and relations as saved.
 - `vigil-agent-build` owns delegated implementation; `vigil-testing` test placement and CI
   selection; `vigil-pr-review` CI, review, and merge.
 - `vigil-branch-recovery`: stale branches, abandoned worktrees, suspected lost work, cleanup.

@@ -5,15 +5,15 @@ description: Create and classify Vigil issues, link branches and PRs, and update
 
 # Vigil board operations
 
-Board: **Vigil Development**, owner `ceponatia`. The board's repository,
-project number, and project node ID are not yet known — set
-`VIGIL_BOARD_REPO`, `VIGIL_BOARD_NUMBER`, and `VIGIL_BOARD_PROJECT_ID` in
-[board.env](board.env) once the board and repository exist. Every helper in
-this skill sources `board.env` and fails immediately with
-`not configured: set <VAR> in board.env` instead of guessing when a required
-value is still a `TODO(bootstrap)` placeholder. The helpers resolve option and
+Board: **Vigil Development**, owner `ceponatia`, project 8
+(`https://github.com/users/ceponatia/projects/8`), linked to `ceponatia/vigil`.
+Every helper in this skill sources [board.env](board.env) for the repository,
+project number, project node id, and assignee, and fails immediately with
+`not configured: set <VAR> in board.env` instead of guessing if a required
+value ever reads `TODO(bootstrap)` again. The helpers resolve option and
 field ids through small direct GraphQL queries; do not copy static ids,
-option lists, or dates into code.
+option lists, or dates into code. On Claude, a batch of issues is filed by the
+`vigil-issue-filer` role (Sonnet), which follows this skill and `vigil-docs`.
 
 ## Field vocabulary (handoff §14.3)
 
