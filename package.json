@@ -27,6 +27,8 @@
     "@types/node": "catalog:",
     "@types/pg": "catalog:",
     "@vigil/contracts": "workspace:*",
+    "@vigil/db": "workspace:*",
+    "@vigil/ledger": "workspace:*",
     "@vigil/market": "workspace:*",
     "@vitest/coverage-v8": "catalog:",
     "dotenv": "catalog:",

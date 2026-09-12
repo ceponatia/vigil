@@ -27,6 +27,10 @@ excludes every `*.int.test.ts`; its `integration` project includes every
 `*.int.test.ts` in the repository. Nothing under `tests/` needs its own
 Vitest config or `package.json` — the root config already reaches it by glob.
 
-## Status
+## What lives here
 
-Empty. No fixtures, replays, or fault-injection scenarios exist yet.
+`replay/` holds the journal-rebuild replay, which drives a multi-asset
+history through `@vigil/db` and rebuilds it with `@vigil/ledger` from an
+empty runtime state. `fault-injection/` holds the concurrent-reservation
+scenario, which drives two independent connections at one balance. Both are
+`*.int.test.ts` and need Postgres. `fixtures/` holds no fixtures yet.
