@@ -90,6 +90,38 @@ describe("assetIdentitySchema", () => {
     ).not.toThrow();
     expect(assetIdentitySchema.safeParse({ kind: "ticker-only", chainId: "1", symbol: "USDX" }).success).toBe(false);
   });
+
+  // A component containing the "|" canonicalAssetId uses as its separator
+  // could otherwise let two distinct identities collide on one canonical
+  // id: `contractAddress: "a|b", withdrawalNetwork: "c"` joins to the same
+  // string as `contractAddress: "a", withdrawalNetwork: "b|c"`. The schema
+  // now rejects the separator outright, so the assertion that matches the
+  // code is "parsing rejects it without throwing" rather than "the two
+  // derive different ids" — there is no id to derive from a value the
+  // schema never accepts in the first place.
+  it("rejects a contractAddress or withdrawalNetwork containing the reserved "|" separator, without throwing — a value that reached canonicalAssetId undetected could collide with a differently-split pair that joins to the same string", () => {
+    const pipeInContractAddress = { kind: "contract", chainId: "1", contractAddress: "a|b", withdrawalNetwork: "c" };
+    const pipeInWithdrawalNetwork = { kind: "contract", chainId: "1", contractAddress: "a", withdrawalNetwork: "b|c" };
+
+    expect(() => assetIdentitySchema.safeParse(pipeInContractAddress)).not.toThrow();
+    expect(() => assetIdentitySchema.safeParse(pipeInWithdrawalNetwork)).not.toThrow();
+    expect(assetIdentitySchema.safeParse(pipeInContractAddress).success).toBe(false);
+    expect(assetIdentitySchema.safeParse(pipeInWithdrawalNetwork).success).toBe(false);
+  });
+
+  it("rejects a chainId, mintAddress, or nativeDenomination containing the reserved "/" separator, without throwing — that character is reserved for @vigil/market's canonicalInstrumentId, one layer up", () => {
+    const slashInChainId = { kind: "native", chainId: "1/337", nativeDenomination: "VGLBASE", withdrawalNetwork: "SYNTHETIC_TESTNET" };
+    const slashInMintAddress = { kind: "mint", chainId: "solana:mainnet-beta", mintAddress: "mint/address", withdrawalNetwork: "SPL" };
+
+    expect(() => assetIdentitySchema.safeParse(slashInChainId)).not.toThrow();
+    expect(assetIdentitySchema.safeParse(slashInChainId).success).toBe(false);
+    expect(assetIdentitySchema.safeParse(slashInMintAddress).success).toBe(false);
+  });
+
+  it("declares exactly the ASSET_IDENTITY_KINDS registry as its discriminant values — a fourth kind added to the schema without updating the registry (or vice versa) would silently drop out of every test loop driven by ASSET_IDENTITY_KINDS", () => {
+    const schemaKinds = assetIdentitySchema.options.map((option) => option.shape.kind.value).sort();
+    expect(schemaKinds).toEqual([...ASSET_IDENTITY_KINDS].sort());
+  });
 });
 
 describe("canonicalAssetId", () => {

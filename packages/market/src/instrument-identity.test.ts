@@ -17,6 +17,22 @@ describe("instrumentIdentitySchema", () => {
     expect(() => instrumentIdentitySchema.safeParse({ baseAsset: base })).not.toThrow();
     expect(instrumentIdentitySchema.safeParse({ baseAsset: base }).success).toBe(false);
   });
+
+  // The analogous instrument-level case for asset-identity.test.ts's
+  // reserved-separator rejections: canonicalInstrumentId joins two
+  // canonicalAssetId outputs with "/", so a "/" inside an underlying asset
+  // component is rejected at the asset-identity layer before an instrument
+  // could ever be built from it — proven here through the composed
+  // instrumentIdentitySchema rather than re-implemented.
+  it("rejects a base or quote asset whose nativeDenomination contains the reserved "/" separator, without throwing — canonicalInstrumentId joins two asset ids with "/", so this must be caught at the asset-identity layer before an instrument can be built at all", () => {
+    const slashInBaseDenomination = {
+      baseAsset: { kind: "native", chainId: "1337", nativeDenomination: "VGL/BASE", withdrawalNetwork: "SYNTHETIC_TESTNET" },
+      quoteAsset: quote,
+    };
+
+    expect(() => instrumentIdentitySchema.safeParse(slashInBaseDenomination)).not.toThrow();
+    expect(instrumentIdentitySchema.safeParse(slashInBaseDenomination).success).toBe(false);
+  });
 });
 
 describe("canonicalInstrumentId", () => {

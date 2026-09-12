@@ -45,27 +45,59 @@ import type { ReasonCode } from "./reason-codes";
  *   identity.
  */
 
-const chainIdSchema = z.string().min(1, "chainId must be a non-empty string");
-const withdrawalNetworkSchema = z.string().min(1, "withdrawalNetwork must be a non-empty string");
+/**
+ * Both characters below are reserved as canonical-id separators:
+ * `canonicalAssetId` joins its components with `|`, and
+ * `@vigil/market`'s `canonicalInstrumentId` joins two asset ids with `/`.
+ * A component value containing either one could make two distinct
+ * identities derive the same canonical id (e.g. `contractAddress: "a|b",
+ * withdrawalNetwork: "c"` colliding with `contractAddress: "a",
+ * withdrawalNetwork: "b|c"`), or make a canonical asset id itself
+ * ambiguous inside a canonical instrument id. Every identity component
+ * field is therefore constrained to exclude both characters, here in
+ * `@vigil/contracts` rather than re-validated per derivation.
+ */
+const RESERVED_IDENTITY_SEPARATORS = ["|", "/"] as const;
+
+function withoutReservedSeparators(schema: z.ZodString, fieldName: string): z.ZodString {
+  return schema.refine((value) => !RESERVED_IDENTITY_SEPARATORS.some((separator) => value.includes(separator)), {
+    message: `${fieldName} must not contain "|" or "/" — both are reserved as canonical-id separators`,
+  });
+}
+
+const chainIdSchema = withoutReservedSeparators(
+  z.string().min(1, "chainId must be a non-empty string"),
+  "chainId",
+);
+const withdrawalNetworkSchema = withoutReservedSeparators(
+  z.string().min(1, "withdrawalNetwork must be a non-empty string"),
+  "withdrawalNetwork",
+);
 
 const contractAssetIdentitySchema = z.object({
   kind: z.literal("contract"),
   chainId: chainIdSchema,
-  contractAddress: z.string().min(1, "contractAddress must be a non-empty string"),
+  contractAddress: withoutReservedSeparators(
+    z.string().min(1, "contractAddress must be a non-empty string"),
+    "contractAddress",
+  ),
   withdrawalNetwork: withdrawalNetworkSchema,
 });
 
 const mintAssetIdentitySchema = z.object({
   kind: z.literal("mint"),
   chainId: chainIdSchema,
-  mintAddress: z.string().min(1, "mintAddress must be a non-empty string"),
+  mintAddress: withoutReservedSeparators(z.string().min(1, "mintAddress must be a non-empty string"), "mintAddress"),
   withdrawalNetwork: withdrawalNetworkSchema,
 });
 
 const nativeAssetIdentitySchema = z.object({
   kind: z.literal("native"),
   chainId: chainIdSchema,
-  nativeDenomination: z.string().min(1, "nativeDenomination must be a non-empty string"),
+  nativeDenomination: withoutReservedSeparators(
+    z.string().min(1, "nativeDenomination must be a non-empty string"),
+    "nativeDenomination",
+  ),
   withdrawalNetwork: withdrawalNetworkSchema,
 });
 
