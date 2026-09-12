@@ -114,6 +114,16 @@ while :; do
       errors=0
       verify=$(jq -c '[.[] | select(.name == "verify" and .workflow == "CI")]' <<<"$checks")
       verify_count=$(jq 'length' <<<"$verify")
+      if [ "$verify_count" -gt 1 ] && jq -e 'any(.[]; .bucket == "skipping")' <<<"$verify" >/dev/null; then
+        # A draft-triggered run's skipped verify can linger in the rollup until the
+        # ready-triggered run creates its own verify check for the same head. Once a
+        # newer CI/verify exists for this head, the superseded skip is not a failure —
+        # drop it and judge readiness from the newer run's verify instead. A skipped
+        # verify with no newer run present (verify_count == 1) still fails below.
+        checks=$(jq -c '[.[] | select(.name != "verify" or .workflow != "CI" or .bucket != "skipping")]' <<<"$checks")
+        verify=$(jq -c '[.[] | select(.name == "verify" and .workflow == "CI")]' <<<"$checks")
+        verify_count=$(jq 'length' <<<"$verify")
+      fi
       if jq -e 'any(.[]; .bucket == "fail" or .bucket == "cancel" or .bucket == "skipping")' <<<"$checks" >/dev/null; then
         echo "FAILED for head $head:"
         jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel" or .bucket == "skipping") | "  \(.state)\t\(.workflow)/\(.name)"' <<<"$checks"

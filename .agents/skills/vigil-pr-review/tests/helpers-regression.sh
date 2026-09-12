@@ -43,6 +43,11 @@ run_review() {
 
 # Valid JSON remains authoritative even with gh's documented rc=8/rc=1.
 run_case wait-pending 0 'GREEN: required CI/verify succeeded for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 1
+# A draft-triggered run's skipped verify lingers in the rollup alongside the
+# ready-triggered run's own verify for the same head (PR #12's actual shape at
+# da96d76b: runs 34716578875 skipped, 34716584247 pending then success). The
+# newer run's verify — not the superseded skip — decides pending vs. green.
+run_case wait-draft-then-ready 0 'GREEN: required CI/verify succeeded for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 1
 run_case wait-failing 1 'FAILED for head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' wait-ci.sh 0
 # An unrelated successful check cannot satisfy the required aggregate.
 run_case wait-unrelated 2 'CI/verify is absent' wait-ci.sh 0

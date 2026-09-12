@@ -44,6 +44,14 @@ if [ "$1 $2" = "pr checks" ]; then
       fi
       printf '[{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://example.test/run/1"}]\n'
       ;;
+    wait-draft-then-ready)
+      count=$(next_count checks)
+      if [ "$count" -eq 1 ]; then
+        printf '[{"name":"verify","workflow":"CI","bucket":"skipping","state":"SKIPPED","event":"pull_request","link":"https://github.com/ceponatia/vigil/actions/runs/34716578875"},{"name":"verify","workflow":"CI","bucket":"pending","state":"IN_PROGRESS","event":"pull_request","link":"https://github.com/ceponatia/vigil/actions/runs/34716584247"}]\n'
+        exit 8
+      fi
+      printf '[{"name":"verify","workflow":"CI","bucket":"skipping","state":"SKIPPED","event":"pull_request","link":"https://github.com/ceponatia/vigil/actions/runs/34716578875"},{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://github.com/ceponatia/vigil/actions/runs/34716584247"}]\n'
+      ;;
     wait-failing|wait-stale)
       if [ "$scenario" = wait-stale ] && [ "$(next_count checks)" -eq 1 ]; then
         printf '[{"name":"verify","workflow":"CI","bucket":"pass","state":"SUCCESS","event":"pull_request","link":"https://example.test/run/old"}]\n'
