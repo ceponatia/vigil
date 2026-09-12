@@ -1,6 +1,6 @@
 import type { HoldingsState, LedgerAccount } from "../accounts";
 import { rebuildBalances, type BalanceSheet } from "../balances";
-import { buildEntry, type EntryKind, type JournalEntry } from "../journal";
+import { buildEntry, type EntryKind, type EntryProvenance, type JournalEntry } from "../journal";
 import type { ReleaseRequest, ReservationRequest } from "../reservations";
 import { isoUtcTimestampSchema, type IsoUtcTimestamp } from "../timestamps";
 
@@ -8,18 +8,33 @@ import { isoUtcTimestampSchema, type IsoUtcTimestamp } from "../timestamps";
  * Builders for this package's own suites only. Never imported by production
  * code, and never exported from `src/index.ts`.
  *
- * Every identifier here is obviously synthetic: `test:` prefixed asset ids
- * that cannot be a real chain-plus-contract identity, and no address, key,
- * or holding of any kind.
+ * Every identifier here is obviously synthetic. The asset ids are canonical
+ * four-component identities, as production ones are, but on chain `1337` —
+ * the id this codebase reserves for the synthetic test chain — with
+ * denominations no real chain issues. No address, key, or holding of any
+ * kind appears here.
  */
 
-/** A synthetic six-decimal settlement asset. Not a real asset id. */
-export const TEST_STABLE_ASSET = "test:stable-6";
+/** A synthetic six-decimal settlement asset. */
+export const TEST_STABLE_ASSET = "1337|native|VGLSTABLE|SYNTHETIC_TESTNET";
 export const TEST_STABLE_SCALE = 6;
 
 /** A synthetic eighteen-decimal asset, to keep scale handling honest. */
-export const TEST_VOLATILE_ASSET = "test:volatile-18";
+export const TEST_VOLATILE_ASSET = "1337|native|VGLVOLATILE|SYNTHETIC_TESTNET";
 export const TEST_VOLATILE_SCALE = 18;
+
+/**
+ * The provenance a fixture record carries. Deterministic and obviously
+ * synthetic; `modelVersion` is null because no LLM is involved in any path
+ * this package has.
+ */
+export const TEST_PROVENANCE: EntryProvenance = {
+  policyVersion: "policy-test-0",
+  strategyVersion: "strategy-test-0",
+  modelVersion: null,
+  portfolioSnapshotVersion: null,
+  marketSnapshotVersion: null,
+};
 
 /** Parse a literal into a validated timestamp. Time is always an input. */
 export function at(value: string): IsoUtcTimestamp {
@@ -39,6 +54,7 @@ export type TwoLineEntryInput = {
   readonly idempotencyKey?: string;
   readonly intentId?: string | null;
   readonly reversesEntryId?: string | null;
+  readonly provenance?: EntryProvenance;
 };
 
 /**
@@ -57,6 +73,7 @@ export function twoLineEntry(input: TwoLineEntryInput): JournalEntry {
     idempotencyKey: input.idempotencyKey ?? `idem-${input.entryId}`,
     intentId: input.intentId ?? null,
     reversesEntryId: input.reversesEntryId ?? null,
+    provenance: input.provenance ?? TEST_PROVENANCE,
     lines: [
       { account: input.debit, scale, amountBase: input.amountBase, direction: "debit" },
       { account: input.credit, scale, amountBase: input.amountBase, direction: "credit" },
@@ -112,6 +129,7 @@ export function reservationRequest(input: ReservationRequestInput): ReservationR
     occurredAt: at(input.occurredAt ?? "2026-01-02T03:04:05.000Z"),
     recordedAt: at("2026-01-02T03:04:06.000Z"),
     expiresAt: at(input.expiresAt ?? "2026-01-02T03:09:05.000Z"),
+    provenance: TEST_PROVENANCE,
   };
 }
 
@@ -137,5 +155,6 @@ export function releaseRequest(input: ReleaseRequestInput): ReleaseRequest {
     amountBase: input.amountBase,
     occurredAt: at("2026-01-02T03:06:05.000Z"),
     recordedAt: at("2026-01-02T03:06:06.000Z"),
+    provenance: TEST_PROVENANCE,
   };
 }

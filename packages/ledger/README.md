@@ -13,10 +13,29 @@ reads or writes a database itself.
   this package may not have.
 - Append-only correction: a mistake is fixed by posting a reversing entry
   and then the corrected entry. No function here edits or deletes a posted
-  entry, and `packages/db` enforces the same rule with a trigger.
+  entry, and `packages/db` enforces the same rule with a trigger. A reversal
+  must be the exact inverse of the entry it names — same accounts, scales,
+  and amounts, opposite sides — because it also consumes that entry's one
+  correction slot.
+- Reservation postings are the exact state move they name: a hold credits
+  `available` and debits `reserved`, a release does the inverse, and nothing
+  else is a reservation posting at all.
 - Holdings states: available, reserved, staked, unbonding, pending-transfer,
   and exit-queued, as six distinct values (`docs/product.md` TASK-07). Only
-  `available` is reservable.
+  `available` is reservable. Each refusal carries the code an operator needs
+  (owner ruling, 2026-09-12): `YIELD_LOCKED` for staked and unbonding,
+  `TRANSACTION_UNRESOLVED` for funds in flight between locations, and the
+  ledger-local `STATE_NOT_RESERVABLE`, naming the state, for a balance
+  already committed to another intent or queued for exit.
+- Asset identity is the canonical `chainId|kind|value|withdrawalNetwork`
+  form `@vigil/contracts` derives — never a bare ticker, because `BTC` names
+  a different asset on every chain that lists one. Account keys are
+  `family/state/assetId`: `/` separates them because it is the one character
+  an asset identity may not contain.
+- Provenance on every record: the policy and strategy versions that produced
+  it, the model version where an LLM was involved, and the market and
+  portfolio snapshot versions where those informed it. An outcome that
+  cannot be attributed to the behavior that caused it teaches nothing.
 - Atomic reservations against a supplied balance sheet: a reservation may
   consume only `available`, and the second of two reservations whose sum
   exceeds the balance is refused with a reason code. Serializing two

@@ -83,12 +83,22 @@ export const ACCOUNT_FAMILY_NORMAL_SIDE: Readonly<Record<AccountFamily, PostingD
  * (`docs/architecture.md`: the allocator is the only path to a reservation,
  * and two strategies never reserve the same capital).
  *
- * `staked`, `unbonding`, and `exit-queued` are exactly what `YIELD_LOCKED`
- * already names in `docs/policy.md`, so they refuse with that policy code.
- * `reserved` and `pending-transfer` are not locked yield — one is already
- * committed to another intent, the other is in flight between locations —
- * so they refuse with a ledger diagnostic rather than borrowing a policy
- * code that would tell an operator the wrong story.
+ * Which code each refusal carries is an owner ruling (2026-09-12), because
+ * a reason code is what an operator reads when funds they expected to be
+ * spendable are not:
+ *
+ * - `staked` and `unbonding` are exactly what `YIELD_LOCKED` names in
+ *   `docs/policy.md`.
+ * - `pending-transfer` funds are in flight between controlled locations, so
+ *   they carry `TRANSACTION_UNRESOLVED` — the approved code for a prior
+ *   transaction whose outcome still blocks action on the same funds.
+ * - `exit-queued` funds are committed to an exit that has been requested and
+ *   not completed. That is not necessarily a yield lock: an exchange
+ *   withdrawal queue is one too. It carries the ledger-local
+ *   `STATE_NOT_RESERVABLE` with a detail naming the state, rather than
+ *   telling an operator a story about staking that may not be true.
+ * - `reserved` funds are already committed to another intent — an
+ *   accounting fact, not a policy decision — so it is ledger-local as well.
  */
 export type StateReservability =
   | { readonly reservable: true }
@@ -110,32 +120,57 @@ export const HOLDINGS_STATE_RESERVABILITY: Readonly<Record<HoldingsState, StateR
   },
   "pending-transfer": {
     reservable: false,
-    refusal: ledgerRefusal("STATE_NOT_RESERVABLE", "funds in transit between locations are not spendable inventory"),
+    refusal: policyRefusal(
+      "TRANSACTION_UNRESOLVED",
+      "funds in transit between locations are not spendable inventory until the transfer resolves",
+    ),
   },
   "exit-queued": {
     reservable: false,
-    refusal: policyRefusal("YIELD_LOCKED", "exit-queued funds are not available to reserve"),
+    refusal: ledgerRefusal(
+      "STATE_NOT_RESERVABLE",
+      "exit-queued funds are committed to a requested exit and are not available to reserve",
+    ),
   },
 };
 
 /**
- * A canonical asset id: chain plus contract/mint or native denomination,
- * never a bare ticker (`AGENTS.md` "Financial authority and safety"). This
- * package does not resolve identity, it only refuses to key an account on a
- * string that cannot be a canonical id. `|` is excluded because it is the
- * account-key separator and a literal one would make a key hard to read or
- * split by hand — not because the key would otherwise be ambiguous.
- * `accountKey` is injective either way: its first two segments come from
- * closed vocabularies, so whatever follows the second `|` is the asset id.
+ * A canonical asset id, in exactly the shape `@vigil/contracts`'
+ * `canonicalAssetId` derives: four `|`-separated components,
+ * `chainId|kind|value|withdrawalNetwork`, where `kind` is one of
+ * `contract`, `mint`, or `native`, and no component may contain `|` or `/`
+ * (both are reserved as canonical-id separators — `/` because
+ * `@vigil/market` joins two asset ids with it to name an instrument).
  *
- * Seam: `packages/contracts`'s asset-identity module owns this vocabulary
- * once it lands, and `assetId` becomes its type instead of a local string.
+ * A bare ticker is not an identity. `BTC` names a different asset on every
+ * chain that lists something by that symbol, and two of them sharing an
+ * account would merge two positions into one balance that reconciles
+ * against neither venue (`docs/testing.md`, "Chain/contract/mint differs
+ * despite a matching ticker"). This pattern is what makes that
+ * unrepresentable rather than merely discouraged.
+ *
+ * Seam: this mirrors `packages/contracts/src/asset-identity.ts` rather than
+ * importing it, because that module lands on another branch. At the rebase
+ * this constant is deleted and `AssetId` comes from `@vigil/contracts`; the
+ * shape is identical on purpose, so nothing but the import changes.
  */
-export const ASSET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+export const ASSET_ID_PATTERN = /^[^|/]+\|(?:contract|mint|native)\|[^|/]+\|[^|/]+$/;
 
 export const assetIdSchema = z.string().regex(ASSET_ID_PATTERN, {
-  error: "expected a canonical asset id: no whitespace, no control characters, no '|'",
+  error:
+    "expected a canonical asset id: chainId|kind|value|withdrawalNetwork, kind one of contract/mint/native — never a bare ticker",
 });
+
+/**
+ * The separator between an account key's components.
+ *
+ * `/` rather than `|`: a canonical asset id contains three `|` of its own,
+ * so a `|`-joined key could not be split back into its parts, while `/` is
+ * forbidden inside every component of an asset identity. The key stays
+ * injective *and* readable — `holdings/available/1|native|ETH|mainnet`
+ * splits at the first two separators and the remainder is the asset id.
+ */
+export const ACCOUNT_KEY_SEPARATOR = "/";
 
 export type LedgerAccount = {
   readonly family: AccountFamily;
@@ -170,9 +205,14 @@ export function counterAccount(family: Exclude<AccountFamily, "holdings">, asset
 
 /**
  * The stable string a balance row is keyed by, in both the rebuilt map and
- * the `ledger_balances` table. Injective because `|` cannot appear in a
- * family, a state, or an asset id.
+ * the `ledger_balances` table.
+ *
+ * Injective: the first two components come from closed vocabularies that
+ * contain no `/`, and a canonical asset id may not contain one either, so
+ * exactly two separators precede the asset id and no two distinct accounts
+ * can derive the same key.
  */
 export function accountKey(account: LedgerAccount): string {
-  return `${account.family}|${account.holdingsState ?? "-"}|${account.assetId}`;
+  const state = account.holdingsState ?? "-";
+  return `${account.family}${ACCOUNT_KEY_SEPARATOR}${state}${ACCOUNT_KEY_SEPARATOR}${account.assetId}`;
 }

@@ -212,15 +212,27 @@ describe("which holdings states a reservation may consume", () => {
     expect(reservable).toEqual(["available"]);
   });
 
-  it("refuses staked, unbonding, and exit-queued funds with the policy code YIELD_LOCKED, and the other two unreservable states with a ledger diagnostic — the case above reads the same table it checks, so this is the pin on what docs/policy.md's YIELD_LOCKED actually covers: locked yield, never a balance that is merely committed elsewhere or in transit", () => {
+  it("carries the owner's ruling on which code each unreservable state refuses with — the case above reads the same table it checks, so this is the pin on what an operator is actually told: YIELD_LOCKED only for locked yield, TRANSACTION_UNRESOLVED for funds in flight, and a ledger diagnostic where no approved policy code fits", () => {
     const statesRefusedWith = (source: string, code: string): readonly HoldingsState[] =>
       HOLDINGS_STATES.filter((state) => {
         const declared = HOLDINGS_STATE_RESERVABILITY[state];
         return !declared.reservable && declared.refusal.reason.source === source && declared.refusal.reason.code === code;
       });
 
-    expect(statesRefusedWith("policy", "YIELD_LOCKED")).toEqual(["staked", "unbonding", "exit-queued"]);
-    expect(statesRefusedWith("ledger", "STATE_NOT_RESERVABLE")).toEqual(["reserved", "pending-transfer"]);
+    // Owner ruling, 2026-09-12.
+    expect(statesRefusedWith("policy", "YIELD_LOCKED")).toEqual(["staked", "unbonding"]);
+    expect(statesRefusedWith("policy", "TRANSACTION_UNRESOLVED")).toEqual(["pending-transfer"]);
+    expect(statesRefusedWith("ledger", "STATE_NOT_RESERVABLE")).toEqual(["reserved", "exit-queued"]);
+  });
+
+  it("names the state in every ledger-local refusal detail — an operator reading `STATE_NOT_RESERVABLE` with no further word cannot tell a committed balance from a queued exit, which are different problems with different remedies", () => {
+    for (const state of HOLDINGS_STATES) {
+      const declared = HOLDINGS_STATE_RESERVABILITY[state];
+      if (declared.reservable || declared.refusal.reason.source !== "ledger") {
+        continue;
+      }
+      expect([state, declared.refusal.detail.includes(state)]).toEqual([state, true]);
+    }
   });
 
   it("keeps the policy and ledger vocabularies apart in every declared refusal — catches a ledger diagnostic smuggled into the policy vocabulary, where docs/policy.md would no longer be the only place reason codes are defined", () => {

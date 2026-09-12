@@ -55,16 +55,30 @@ export const LEDGER_DIAGNOSTIC_CODES = [
   "INVALID_RESERVATION_WINDOW",
   /** The release asks for more base units than the reservation still holds. */
   "RELEASE_EXCEEDS_RESERVED",
+  /** A reversal's postings are not the exact inverse of the entry it reverses. */
+  "REVERSAL_NOT_MIRRORED",
+  /** A reservation posting is not the exact available/reserved move it claims. */
+  "RESERVATION_POSTING_SHAPE",
+  /** The timestamp carries precision finer than the millisecond that is stored. */
+  "SUBMILLISECOND_PRECISION",
+  /** The record does not say which policy and strategy versions produced it. */
+  "MISSING_PROVENANCE",
 ] as const;
 
 export type LedgerDiagnosticCode = (typeof LEDGER_DIAGNOSTIC_CODES)[number];
 
 /**
  * The policy reason codes this package emits verbatim (`docs/policy.md`
- * "Reason codes"). Deliberately a one-element list: every other refusal the
- * ledger can produce is an accounting fact, not a policy decision.
+ * "Reason codes"). Deliberately short: every other refusal the ledger can
+ * produce is an accounting fact, not a policy decision.
+ *
+ * Owner ruling (2026-09-12): funds in flight between controlled locations
+ * refuse with `TRANSACTION_UNRESOLVED` — "a prior transaction's outcome is
+ * still unknown and blocks new economic action on the same funds" is exactly
+ * what a pending transfer is, and it is already approved vocabulary, so no
+ * extension to `docs/policy.md` is needed.
  */
-export const LEDGER_EMITTED_POLICY_REASON_CODES = ["YIELD_LOCKED"] as const;
+export const LEDGER_EMITTED_POLICY_REASON_CODES = ["YIELD_LOCKED", "TRANSACTION_UNRESOLVED"] as const;
 
 export type LedgerEmittedPolicyReasonCode = (typeof LEDGER_EMITTED_POLICY_REASON_CODES)[number];
 
