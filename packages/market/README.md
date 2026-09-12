@@ -35,4 +35,10 @@ deterministic tests, and recording of what was observed and when.
 
 ## Status
 
-Empty scaffold. First filled under planning ID BOOT-03.
+`instrument-identity`, `quote-snapshot`, `freshness`, and the seeded
+synthetic feed (`synthetic-feed` — this package's `synthetic-fixtures`
+module) exist, covering exactly one synthetic instrument/route
+(planning ID BOOT-03). `recording` remains planned. This package includes
+no read-only adapter: no venue has a capability record yet, and this
+package performs no live network IO on its own initiative (see "What it
+must never do" above).

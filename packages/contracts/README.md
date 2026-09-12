@@ -47,4 +47,5 @@ None. `zod` is the only runtime dependency.
 
 ## Status
 
-`money` and `operating-mode` exist. The other modules above are planned.
+`money`, `operating-mode`, `asset-identity`, `timestamps`, and
+`reason-codes` exist. The other modules above are planned.
