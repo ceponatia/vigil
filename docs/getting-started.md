@@ -30,7 +30,7 @@ pnpm dev:trading
 pnpm dev:control
 ```
 
-Both start nothing yet: `apps/trading` and `apps/control` are scaffolded, not implemented. Once they are, `dev:trading` runs the deterministic runtime against Postgres and the paper adapter, and `dev:control` serves the dashboard and control API. Every surface that shows state carries an unmistakable operating-mode banner — PAPER, SHADOW, PAUSED, or LIVE — so PAPER is never mistaken for a live-capable state.
+`dev:trading` runs the deterministic runtime's entry point: it loads configuration — refusing to start under SHADOW or LIVE, since no market, strategy, or execution pipeline exists behind either mode yet — connects to Postgres, and runs a heartbeat loop recording this instance's operating mode and last-quote age. `dev:control` serves the dashboard on `CONTROL_PORT`. Every surface it renders carries an unmistakable operating-mode banner — PAPER, PAUSED, or an explicit "not reachable" state for SHADOW and LIVE — and its overview reads holdings, reservations, candidate validity, costs, the audit trail, and runtime health from Postgres, rendering an explicit error state rather than an empty page when configuration is invalid or a read fails.
 
 ## Environment variables
 
