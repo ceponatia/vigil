@@ -36,6 +36,16 @@ export { reservations, reservationStateEnum } from "./schema/intents";
 export type { ReservationStateValue } from "./schema/intents";
 
 export {
+  candidateEvaluations,
+  candidateHorizonEnum,
+  candidateOutcomeEnum,
+  candidates,
+  candidateTranches,
+} from "./schema/decisions";
+
+export { heartbeats } from "./schema/ops";
+
+export {
   accountKeyFor,
   ACCOUNT_KEY_SEPARATOR,
   loadBalances,
@@ -55,6 +65,38 @@ export type {
 
 export { loadActiveReservations, reserveAvailable } from "./store/reservation-store";
 export type { ReserveRequest, ReserveResult } from "./store/reservation-store";
+
+export {
+  loadCandidates,
+  recordCandidate,
+  recordCandidateEvaluation,
+  CANDIDATE_HORIZONS,
+  CANDIDATE_OUTCOMES,
+  DECISION_STORE_DIAGNOSTIC_CODES,
+} from "./store/decision-store";
+export type {
+  CandidateHorizon,
+  CandidateOutcome,
+  DecisionStoreDiagnosticCode,
+  RecordCandidateResult,
+  RecordEvaluationResult,
+  StoreCandidate,
+  StoreCandidateEvaluation,
+  StoredCandidate,
+  StoreTranche,
+} from "./store/decision-store";
+
+export {
+  loadLatestHeartbeats,
+  recordHeartbeat,
+  HEARTBEAT_STORE_DIAGNOSTIC_CODES,
+} from "./store/heartbeat-store";
+export type {
+  HeartbeatStoreDiagnosticCode,
+  RecordHeartbeatResult,
+  StoredHeartbeat,
+  StoreHeartbeat,
+} from "./store/heartbeat-store";
 
 export {
   postgresConstraintName,

@@ -2,8 +2,10 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import type { Pool, PoolConfig } from "pg";
 
+import * as decisionsSchema from "./schema/decisions";
 import * as intentsSchema from "./schema/intents";
 import * as journalSchema from "./schema/journal";
+import * as opsSchema from "./schema/ops";
 
 /**
  * The Postgres client factory. It takes the connection string as an argument
@@ -14,7 +16,7 @@ import * as journalSchema from "./schema/journal";
  * test — is where `DATABASE_URL` is read.
  */
 
-export const schema = { ...journalSchema, ...intentsSchema };
+export const schema = { ...journalSchema, ...intentsSchema, ...decisionsSchema, ...opsSchema };
 
 export type VigilSchema = typeof schema;
 
