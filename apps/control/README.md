@@ -45,4 +45,12 @@ venue works alike.
 
 ## Status
 
-Empty scaffold. First filled under planning ID BOOT-07.
+The Overview page exists (planning ID BOOT-07): the mode banner on every
+surface, and Holdings, Reservations, Candidates, Costs, an Audit trail, and
+Runtime health, all read from `@vigil/db` — no mock or static data. A stale
+heartbeat or quote, and a paused runtime instance, are shown explicitly
+rather than hidden. An invalid `VIGIL_MODE`, a missing `DATABASE_URL`, or a
+failed read renders a full-page error instead of an empty dashboard.
+Opportunities, Positions, Yield, Treasury/Venues, Learning, and
+Audit/Controls remain planned, and this slice issues no commands: no
+approvals UI, no controls, and no authentication provider yet.
