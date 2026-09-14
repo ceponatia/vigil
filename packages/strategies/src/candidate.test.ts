@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { decimalStringSchema, isoUtcTimestampSchema } from "@vigil/contracts";
+import { REASON_CODES, decimalStringSchema, isoUtcTimestampSchema } from "@vigil/contracts";
 import type { DecimalString, IsoUtcTimestamp } from "@vigil/contracts";
 
-import { DEFAULT_STRATEGY_CONFIG, candidateSchema, generateCandidate } from "./candidate";
+import { DEFAULT_STRATEGY_CONFIG, STRATEGY_NO_SIGNAL_CODES, candidateSchema, generateCandidate } from "./candidate";
 import type { StrategyConfig } from "./candidate";
 import { addDecimal, compareDecimal } from "./scaled-decimal";
 import { validRawQuote } from "./test-support/quote-fixtures";
@@ -47,6 +47,37 @@ describe("generateCandidate — every required field is populated and internally
     expect(candidate.invalidationConditions.length).toBeGreaterThan(0);
     expect(candidate.benchmarkId.length).toBeGreaterThan(0);
     expect(candidate.positionPlan.tranches.length).toBeGreaterThan(0);
+  });
+
+  // The field-by-field assertions above prove each field is populated, but
+  // not that the record still HAS every field: dropping one from
+  // candidateSchema and from the generator together is a change no schema
+  // check can notice by itself. The vocabulary is a cross-package contract
+  // — packages/db's `candidates` table mirrors these exact names as
+  // `StoreCandidate` — so a silently removed field is a column nobody
+  // writes, not a local tidy-up.
+  it("carries exactly the documented field vocabulary — a field dropped from the schema and the generator together still fails here", () => {
+    const candidate = freshCandidate();
+    expect(Object.keys(candidate).toSorted()).toEqual([
+      "action",
+      "actionDetail",
+      "allowedExtension",
+      "benchmarkId",
+      "candidateId",
+      "correlationId",
+      "entryZone",
+      "expiresAt",
+      "generatedAt",
+      "horizon",
+      "idempotencyKey",
+      "instrumentId",
+      "invalidationConditions",
+      "invalidationPrice",
+      "marketSnapshot",
+      "positionPlan",
+      "strategyId",
+      "strategyVersion",
+    ]);
   });
 
   it("computes the bounded pullback zone from the ask price using the exact configured offsets", () => {
@@ -156,6 +187,10 @@ describe("generateCandidate — a stale or corrupt quote never becomes a candida
     expect(result.outcome).toBe("no-candidate");
     if (result.outcome === "no-candidate") {
       expect(result.reasonCode).toBe("STALE_QUOTE");
+      // Derived from the registry, not from the literal above: the refusal
+      // path must report a docs/policy.md code, never one this package
+      // invented for itself.
+      expect(REASON_CODES).toContain(result.reasonCode);
     }
   });
 
@@ -164,6 +199,7 @@ describe("generateCandidate — a stale or corrupt quote never becomes a candida
     expect(result.outcome).toBe("no-candidate");
     if (result.outcome === "no-candidate") {
       expect(result.reasonCode).toBe("STALE_QUOTE");
+      expect(REASON_CODES).toContain(result.reasonCode);
     }
   });
 });
@@ -202,6 +238,28 @@ describe("generateCandidate — no-signal: the rule found nothing to propose, ne
     if (result.outcome === "no-signal") {
       expect(result.code).toBe("PRICE_LEVEL_BELOW_RULE_RANGE");
       expect(result.detail.length).toBeGreaterThan(0);
+    }
+  });
+
+  // The whole point of the third outcome is that its vocabulary is NOT
+  // policy vocabulary: "the rule found nothing at this price" is a TASK-12
+  // valid output, not a fail-closed refusal. Derived from both registries
+  // rather than from the literal code above — kills a future edit that
+  // spells a no-signal code as a REASON_CODES member (OUTSIDE_ENTRY_ZONE
+  // is the tempting one), which would make a strategy non-result
+  // indistinguishable from a policy refusal everywhere downstream.
+  it("STRATEGY_NO_SIGNAL_CODES shares no member with the REASON_CODES registry, and the no-signal branch reports one of its own codes", () => {
+    const policyCodes = new Set<string>(REASON_CODES);
+    expect(STRATEGY_NO_SIGNAL_CODES.length).toBeGreaterThan(0);
+    for (const code of STRATEGY_NO_SIGNAL_CODES) {
+      expect(policyCodes.has(code)).toBe(false);
+    }
+
+    const cheapQuote = { ...validRawQuote, askPrice: decimalStringSchema.parse("5.00"), bidPrice: decimalStringSchema.parse("4.90") };
+    const result = generateCandidate({ quote: cheapQuote, now: FRESH_NOW, maxQuoteAgeMs: MAX_QUOTE_AGE_MS, config: DEFAULT_STRATEGY_CONFIG });
+    expect(result.outcome).toBe("no-signal");
+    if (result.outcome === "no-signal") {
+      expect(STRATEGY_NO_SIGNAL_CODES).toContain(result.code);
     }
   });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { decimalStringSchema, isoUtcTimestampSchema } from "@vigil/contracts";
-import type { DecimalString, IsoUtcTimestamp } from "@vigil/contracts";
+import { REASON_CODES, decimalStringSchema, isoUtcTimestampSchema } from "@vigil/contracts";
+import type { DecimalString, IsoUtcTimestamp, ReasonCode } from "@vigil/contracts";
 import { canonicalInstrumentId, instrumentIdentitySchema } from "@vigil/market";
 
 import type { Candidate } from "./candidate";
@@ -70,29 +70,31 @@ describe("evaluateEntry — the attractive historical low never gets chased", ()
     expect(returnedCandidate.entryZone).toEqual(originalEntryZone); // zone untouched, against the pre-call snapshot
   });
 
-  // S4: each row of the decision table pinned to its exact outcome, not
-  // merely "not ENTRY_ELIGIBLE" — an implementation that returned MISSED
-  // for row 7 (invalidationPrice <= ask < min) instead of WAIT would
+  // S4: each row of the decision table pinned to its exact outcome AND its
+  // exact reason code, not merely "not ENTRY_ELIGIBLE" with some code
+  // attached — an implementation that returned MISSED for row 7
+  // (invalidationPrice <= ask < min) instead of WAIT, or that reported row
+  // 7 as THESIS_INVALIDATED rather than OUTSIDE_ENTRY_ZONE, would
   // otherwise pass this grid undetected.
-  it("pins the exact outcome for every price outside the approved zone, across a grid spanning below invalidation through beyond the allowed extension", () => {
+  it("pins the exact outcome and reason code for every price outside the approved zone, across a grid spanning below invalidation through beyond the allowed extension", () => {
     const candidate = baseCandidate();
     const laterNow = ts("2024-01-01T01:00:00.000Z");
     const acquiredAt = "2024-01-01T00:59:59.000Z";
 
-    const outsidePrices: ReadonlyArray<readonly [string, DecimalString, "WAIT" | "MISSED"]> = [
-      ["below invalidation", subtractDecimal(candidate.invalidationPrice, decimalStringSchema.parse("1.00")), "MISSED"],
-      ["exactly at invalidation (row 3 is strict '<', so not yet invalidated)", candidate.invalidationPrice, "WAIT"],
-      ["between invalidation and min", addDecimal(candidate.invalidationPrice, decimalStringSchema.parse("0.50")), "WAIT"],
-      ["above max, within extension", addDecimal(candidate.entryZone.max, decimalStringSchema.parse("0.50")), "WAIT"],
-      ["exactly at the extension boundary", addDecimal(candidate.entryZone.max, candidate.allowedExtension), "WAIT"],
-      ["beyond the extension", addDecimal(candidate.entryZone.max, decimalStringSchema.parse("5.00")), "MISSED"],
+    const outsidePrices: ReadonlyArray<readonly [string, DecimalString, "WAIT" | "MISSED", ReasonCode]> = [
+      ["below invalidation", subtractDecimal(candidate.invalidationPrice, decimalStringSchema.parse("1.00")), "MISSED", "THESIS_INVALIDATED"],
+      ["exactly at invalidation (row 3 is strict '<', so not yet invalidated)", candidate.invalidationPrice, "WAIT", "OUTSIDE_ENTRY_ZONE"],
+      ["between invalidation and min", addDecimal(candidate.invalidationPrice, decimalStringSchema.parse("0.50")), "WAIT", "OUTSIDE_ENTRY_ZONE"],
+      ["above max, within extension", addDecimal(candidate.entryZone.max, decimalStringSchema.parse("0.50")), "WAIT", "OUTSIDE_ENTRY_ZONE"],
+      ["exactly at the extension boundary", addDecimal(candidate.entryZone.max, candidate.allowedExtension), "WAIT", "OUTSIDE_ENTRY_ZONE"],
+      ["beyond the extension", addDecimal(candidate.entryZone.max, decimalStringSchema.parse("5.00")), "MISSED", "OUTSIDE_ENTRY_ZONE"],
     ];
 
-    for (const [label, askPrice, expectedOutcome] of outsidePrices) {
+    for (const [label, askPrice, expectedOutcome, expectedReasonCode] of outsidePrices) {
       const quote = quoteAt(askPrice, acquiredAt);
       const { evaluation } = evaluateEntry({ candidate, quote, now: laterNow, maxQuoteAgeMs: MAX_QUOTE_AGE_MS });
       expect(evaluation.outcome, label).toBe(expectedOutcome);
-      expect(evaluation.reasonCode, label).not.toBeNull();
+      expect(evaluation.reasonCode, label).toBe(expectedReasonCode);
     }
   });
 });
@@ -228,6 +230,53 @@ describe("evaluateEntry — the rest of the decision table", () => {
 
   it("CANDIDATE_OUTCOMES is exactly the four-member vocabulary this decision table produces — no BUY, no fifth state", () => {
     expect(CANDIDATE_OUTCOMES).toEqual(["ENTRY_ELIGIBLE", "WAIT", "MISSED", "BLOCKED"]);
+  });
+
+  // The per-row tests above pin their own literals, which is right: for one
+  // branch the exact code IS the contract. This one is the registry check —
+  // expectations derived from CANDIDATE_OUTCOMES and from @vigil/contracts'
+  // REASON_CODES rather than hand-copied, so it stays true when either
+  // registry legitimately grows. Kills an implementation that answers some
+  // row with a vocabulary of its own invention (a "WRONG_INSTRUMENT" code
+  // for the instrument-mismatch row, or a "BUY" outcome for an eligible
+  // one) — neither would parse downstream through reasonCodeSchema, and
+  // neither is reachable by any per-row literal a future row forgets to
+  // add.
+  it("emits only CANDIDATE_OUTCOMES members and only REASON_CODES reason codes, sweeping every row of the table and reaching all four outcomes", () => {
+    const candidate = baseCandidate();
+    const laterNow = ts("2024-01-01T01:00:00.000Z");
+    const acquiredAt = "2024-01-01T00:59:59.000Z";
+    const afterExpiry = ts(new Date(Date.parse(candidate.expiresAt) + 1_000).toISOString());
+
+    const evaluations = [
+      // Rows 3-7: a price grid from below invalidation, through the zone,
+      // out past the allowed extension.
+      ...["240.00", "243.10", "244.00", "245.10", "246.60", "248.10", "248.60", "249.10", "260.00"].map((askPrice) =>
+        evaluateEntry({ candidate, quote: quoteAt(decimalStringSchema.parse(askPrice), acquiredAt), now: laterNow, maxQuoteAgeMs: MAX_QUOTE_AGE_MS }),
+      ),
+      // Row 1 (BLOCKED) and row 2 (MISSED/RESEARCH_EXPIRED) — the two that
+      // short-circuit before the zone is consulted at all.
+      evaluateEntry({ candidate, quote: quoteAt(candidate.entryZone.min, "2024-01-01T00:00:00.000Z"), now: laterNow, maxQuoteAgeMs: MAX_QUOTE_AGE_MS }),
+      evaluateEntry({
+        candidate,
+        quote: quoteAt(candidate.entryZone.min, new Date(Date.parse(afterExpiry) - 1_000).toISOString()),
+        now: afterExpiry,
+        maxQuoteAgeMs: MAX_QUOTE_AGE_MS,
+      }),
+    ];
+
+    const producedOutcomes = new Set<string>();
+    for (const { evaluation } of evaluations) {
+      expect(CANDIDATE_OUTCOMES).toContain(evaluation.outcome);
+      producedOutcomes.add(evaluation.outcome);
+      if (evaluation.reasonCode !== null) {
+        expect(REASON_CODES).toContain(evaluation.reasonCode);
+      }
+    }
+
+    // Without this, "every code is a registry member" would be vacuously
+    // true of a sweep that only ever reached one row.
+    expect(producedOutcomes).toEqual(new Set<string>(CANDIDATE_OUTCOMES));
   });
 });
 
