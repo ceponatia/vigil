@@ -30,7 +30,7 @@ export type EntryEvaluationRecord = {
   readonly detail: string;
   /** The ask price this evaluation decided against; `null` only for `BLOCKED`, where no price was executable at all. */
   readonly executablePrice: DecimalString | null;
-  /** `null` when the quote failed to parse at all (`BLOCKED`/`STALE_QUOTE`) — there is no validated acquisition time to report. */
+  /** `null` on every `BLOCKED` row: when the quote failed to parse there is no validated acquisition time, and on the instrument-mismatch row the parsed time belongs to another instrument's quote and is deliberately not reported as this candidate's provenance. */
   readonly quoteAcquiredAt: IsoUtcTimestamp | null;
   readonly evaluatedAt: IsoUtcTimestamp;
 };

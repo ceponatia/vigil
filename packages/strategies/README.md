@@ -56,7 +56,9 @@ invalidation.
   rewritten `BUY` (`docs/product.md` "Action vocabulary"). A stale or
   corrupt quote blocks the check closed (`BLOCKED`, `STALE_QUOTE`) via
   `@vigil/market`'s `evaluateQuoteFreshness`, the same gate `candidate`
-  uses on generation.
+  uses on generation; a quote for a different instrument than the
+  candidate's is blocked the same way, since it is no evidence about this
+  candidate's price.
 - `scaled-decimal` — `toScaled`/`fromScaled`/`compareDecimal`/
   `addDecimal`/`subtractDecimal`: a minimal bigint-on-scaled-integers
   helper for this package's own entry-zone and tranche arithmetic, kept
