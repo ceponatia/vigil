@@ -88,10 +88,33 @@ class BodyParsingTests(unittest.TestCase):
         self.assertTrue(AUDIT.body_complete(body()))
         self.assertFalse(AUDIT.body_complete(body().replace("PAPER-only.", "")))
 
-    def test_parent_reference_forms(self):
+    def test_an_issue_number_annotation_is_not_a_second_blocker(self):
+        # #25 (2026-09-13): "(BOOT-07)" identifies #10, it does not name a second blocker.
+        deps = "Blocked by #10 (BOOT-07) — the store function lands after PR #24 merges. No other hard blockers."
+        self.assertEqual(AUDIT.blocker_refs(deps), ["#10"])
+        self.assertEqual(AUDIT.blocker_refs("Blocked by: #4 (BOOT-01), BOOT-02 (research)."), ["BOOT-02", "#4"])
+
+    def test_planning_id_is_only_a_leading_title_prefix(self):
+        self.assertEqual(AUDIT.planning_id("BOOT-07: Minimal dashboard and runtime health"), "BOOT-07")
+        self.assertEqual(AUDIT.planning_id("  NEXT-01 : Research integration"), "NEXT-01")
+        # #26 (2026-09-13): a title that mentions another issue's planning ID carries none of its own.
+        for title in (
+            "Decide the apps/control authentication model: docs/architecture.md says authenticated, "
+            "BOOT-07 shipped read-only local",
+            "Follow-up to BOOT-07: reservations store function",
+            "BOOT-07 minimal dashboard (no colon, not the filing convention)",
+        ):
+            self.assertIsNone(AUDIT.planning_id(title), title)
+
+    def test_parent_reference_forms_are_read_from_dependencies_only(self):
         for text in ("Part of #3.", "Sub-issue of #3", "Parent: #3", "parent issue #3"):
-            self.assertEqual(AUDIT.parent_ref(text), 3, text)
-        self.assertIsNone(AUDIT.parent_ref("no parent here"))
+            self.assertEqual(AUDIT.parent_ref(body(dependencies=text)), 3, text)
+        self.assertIsNone(AUDIT.parent_ref(body(dependencies="no parent here")))
+        # #27 (2026-09-13): a Context sentence quoting a PR's own "Part of #N" is not a parent claim.
+        quoted = body(dependencies="None; it builds on PR #22 once merged.").replace(
+            "Handoff §14.4.", "The `candidates` table (packages/db, PR #22, Part of #8 and #10) stores the snapshot.")
+        self.assertIsNone(AUDIT.parent_ref(quoted))
+        self.assertIsNone(AUDIT.parent_ref("Part of #3 in a body with no sections at all"))
 
 
 class SnapshotTests(unittest.TestCase):
@@ -215,6 +238,30 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(found["suggestion"], "High")
         self.assertIn("#5, #6", found["rule"])
         self.assertNotIn("#99", found["rule"])
+
+    def test_a_descriptive_planning_id_mention_and_a_quoted_part_of_are_not_links(self):
+        # Reproduces the 2026-09-13 audit of #25–#28 with #10 (the real BOOT-07) outside the batch:
+        # the old matchers suggested `--blocked-by 26` on #25 and `--parent 8` on #27.
+        batch = {
+            25: issue(25, "Active-reservations read for the dashboard belongs in a packages/db store function",
+                      fields=FULL | {"Status": WAITING, "Horizon": "Next", "Area": "UI/Ops"}, blocked_by=((10, "OPEN"),),
+                      labels=("technical-debt", "agent-found"),
+                      text=body(dependencies="Blocked by #10 (BOOT-07) — it lands after PR #24 merges. No other hard blockers.")),
+            26: issue(26, "Decide the apps/control authentication model: docs/architecture.md says authenticated, "
+                          "BOOT-07 shipped read-only local",
+                      fields=FULL | {"Status": DECISION, "Horizon": "Next", "Area": "UI/Ops", "Size": "S", "Owning role": "Owner"},
+                      labels=("decision-needed", "agent-found"), assignees=("owner",), text=body(dependencies="None.")),
+            27: issue(27, "Opportunity journal: candidate records do not store available capital or portfolio state",
+                      fields=FULL | {"Status": "Ready", "Horizon": "Next", "Area": "Evaluation"},
+                      labels=("technical-debt", "agent-found"),
+                      text=body(dependencies="None; it builds on PR #22 once merged.").replace(
+                          "Handoff §14.4.", "The `candidates` table (PR #22, Part of #8 and #10) stores the market snapshot.")),
+        }
+        report = AUDIT.audit(batch, OPTIONS)
+        self.assertEqual(report["summary"]["findings"], 0)
+        for n in (25, 26, 27):
+            self.assertEqual(codes(report, n), [], n)
+        self.assertIsNone(next(r for r in report["issues"] if r["number"] == 26)["planning_id"])
 
     def test_a_blocker_named_in_the_body_without_a_native_link_is_fixable(self):
         batch = {

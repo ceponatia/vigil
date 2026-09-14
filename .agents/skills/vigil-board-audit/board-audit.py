@@ -66,6 +66,11 @@ TAXONOMY = {
     "research", "evaluation", "initiative", "decision-needed", "agent-found",
 }
 PLANNING_ID = re.compile(r"\b(BOOT|NEXT|BACK)-(\d{2})\b")
+# A title carries a planning ID only as its leading `PREFIX-NN:` prefix. One mentioned
+# mid-title ("…, BOOT-07 shipped read-only local") describes another issue.
+TITLE_PLANNING_ID = re.compile(r"^\s*(BOOT|NEXT|BACK)-(\d{2})\s*:")
+# "#10 (BOOT-07)": the parenthetical annotates #10; it is not a second reference.
+ISSUE_REF_ANNOTATION = re.compile(r"(#\d+)\s*\([^()]*\)")
 ISSUE_REF = re.compile(r"#(\d+)\b")
 PARENT_REF = re.compile(r"(?:part of|sub-issue of|parent(?: issue)?:?)\s*#(\d+)", re.IGNORECASE)
 BLOCKED_BY = re.compile(r"blocked by\s*:?\s*", re.IGNORECASE)
@@ -265,20 +270,23 @@ def sections(body: str) -> dict[str, str]:
     return found
 
 
-def planning_id(text: str) -> str | None:
-    match = PLANNING_ID.search(text)
+def planning_id(title: str) -> str | None:
+    """The planning ID a title carries as its leading `PREFIX-NN:` prefix, if any."""
+    match = TITLE_PLANNING_ID.match(title)
     return f"{match.group(1)}-{match.group(2)}" if match else None
 
 
 def blocker_refs(dependencies: str) -> list[str]:
     """Planning IDs and #numbers named as blockers: the clause after each "Blocked by:",
     up to the first sentence end, dash aside, semicolon, or line break — so
-    "Blocked by: BOOT-04. BOOT-06 is optional context" names only BOOT-04."""
+    "Blocked by: BOOT-04. BOOT-06 is optional context" names only BOOT-04. A
+    parenthetical right after an issue number annotates it ("#10 (BOOT-07)" names
+    only #10), so an aside is never read as a second blocker."""
     refs: list[str] = []
     for match in BLOCKED_BY.finditer(dependencies):
         rest = dependencies[match.end():]
         end = CLAUSE_END.search(rest)
-        clause = rest[: end.start()] if end else rest
+        clause = ISSUE_REF_ANNOTATION.sub(r"\1", rest[: end.start()] if end else rest)
         for pid in PLANNING_ID.finditer(clause):
             refs.append(f"{pid.group(1)}-{pid.group(2)}")
         for ref in ISSUE_REF.finditer(clause):
@@ -288,7 +296,10 @@ def blocker_refs(dependencies: str) -> list[str]:
 
 
 def parent_ref(body: str) -> int | None:
-    match = PARENT_REF.search(body)
+    """The parent the Dependencies section names ("Part of #N", "Sub-issue of #N",
+    "Parent: #N"). Only that section: a Context sentence quoting a PR's own
+    "Part of #N" line describes the PR, not this issue's parent."""
+    match = PARENT_REF.search(sections(body).get("Dependencies", ""))
     return int(match.group(1)) if match else None
 
 

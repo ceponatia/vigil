@@ -10,7 +10,7 @@ board's live option names. A renamed option turns the suggestion into
 | Field | Rule, in order | Never |
 | --- | --- | --- |
 | Status | Closed issue: no suggestion. Open parent with an open sub-issue: `Todo` (a parent is worked through its children). Open with an open native blocker: `Waiting on dependency`. Open with the `decision-needed` label: `Needs decision`. Open, unblocked, all eight body sections present and non-empty: `Ready`. Open, unblocked, body incomplete: `Todo`. | `Done`, `In progress`, `In review` — those track work and acceptance, not filing. |
-| Horizon | The parent's Horizon when the parent is in the batch and has one. Else the planning-ID prefix in the title: `BOOT` → Now, `NEXT` → Next, `BACK` → Backlog. | A value with neither a parent nor a planning ID; report instead. |
+| Horizon | The parent's Horizon when the parent is in the batch and has one. Else the title's leading `PREFIX-NN:` planning ID: `BOOT` → Now, `NEXT` → Next, `BACK` → Backlog. A planning ID mentioned later in a title ("…, BOOT-07 shipped read-only local") describes another issue and derives nothing. | A value with neither a parent nor a planning ID; report instead. |
 | Phase | The parent's Phase when set. Else by planning ID: every `BOOT-xx` → Bootstrap & Paper; `NEXT-01` → Research Integration; `NEXT-02`, `NEXT-03` → Live Canary; `NEXT-04` → Controlled Learning; `BACK-01`, `BACK-02`, `BACK-03` → Strategy Expansion; `BACK-04` → Controlled Learning. | A guess for an issue with no planning ID; report instead. |
 | Area | Keyword scores over the title, Outcome, and Scope only (Context and Out of scope name neighbouring areas on purpose). Offered when one area scores at least 2 and strictly beats the runner-up. An issue with sub-issues may leave Area unset (`info`, not a finding). | An ambiguous tie — the report shows both scores; choose by hand. |
 | Priority | `High` when the issue natively blocks two or more open issues in the batch; otherwise `Normal`. | `Critical` — an owner call, never derived (handoff §14.3). |
@@ -26,12 +26,15 @@ vocabulary of each area. Extend it there when a new package or area appears.
 
 - **Blockers named in the body.** The clause after each `Blocked by:` in the
   Dependencies section, up to the first sentence end, ` — ` aside, semicolon,
-  or line break. Planning IDs resolve through the batch's titles; `#N`
-  resolves directly. "Blocked by: BOOT-04. BOOT-06 is optional context" names
-  only BOOT-04.
+  or line break. Planning IDs resolve through the batch's titles (their
+  leading `PREFIX-NN:` prefix); `#N` resolves directly. A parenthetical right
+  after an issue number annotates it: "Blocked by #10 (BOOT-07)" names only
+  #10. "Blocked by: BOOT-04. BOOT-06 is optional context" names only BOOT-04.
 - **Parent named in the body.** `Part of #N`, `Sub-issue of #N`,
-  `Parent: #N`, `parent issue #N`. With `--parent N`, every other issue in
-  the batch is expected to have N as its native parent.
+  `Parent: #N`, `parent issue #N` — in the Dependencies section only. A
+  Context sentence quoting a PR's own "Part of #N" line describes that PR,
+  not this issue's parent. With `--parent N`, every other issue in the
+  batch is expected to have N as its native parent.
 
 ## Finding codes
 
