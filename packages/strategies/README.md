@@ -28,12 +28,44 @@ invalidation.
 - `@vigil/contracts`
 - `@vigil/market`
 
-## Planned modules
+## Modules
 
-- `candidate` — the numeric evaluation producing a directional candidate.
-- `position-plan` — the staged plan: tranches, expiry, invalidation, horizon.
-- `no-chasing` — the WAIT/MISSED reclassification rule for an expired zone.
+- `candidate` — `candidateSchema`/`Candidate`: a frozen, schema-validated
+  candidate record (entry zone, expiry, invalidation price and conditions,
+  horizon, staged position plan, benchmark reference), and
+  `generateCandidate`, the deterministic numeric rule that proposes one
+  from a quote: a bounded pullback band below the current ask, per a
+  documented `StrategyConfig` (`DEFAULT_STRATEGY_CONFIG`). Three distinct
+  outcomes: a `"candidate"`; a policy-vocabulary `"no-candidate"` refusal
+  (a `REASON_CODES` member such as `STALE_QUOTE`, fail closed on bad
+  market data); or `"no-signal"` (`StrategyNoSignalCode`, e.g.
+  `PRICE_LEVEL_BELOW_RULE_RANGE`) when the ask is schema-legal but too low
+  for the rule's configured offsets — never a thrown error. Ids
+  (`candidateId`, `idempotencyKey`, `correlationId`) are derived
+  deterministically from the strategy identity, instrument, and the
+  quote's own acquisition time, so the same event delivered twice
+  persists once.
+- `position-plan` — `buildPositionPlan`: splits a candidate's
+  `totalQuantity` into bounded, idempotent tranches whose quantities sum
+  exactly to the total (bigint arithmetic, no remainder dropped) and whose
+  trigger prices always fall inside the entry zone.
+- `no-chasing` — `evaluateEntry`: classifies the current executable price
+  against a candidate's already-approved zone —
+  `ENTRY_ELIGIBLE | WAIT | MISSED | BLOCKED` — without ever deriving a new
+  zone from today's price. A missed entry stays `WAIT`/`MISSED`, never a
+  rewritten `BUY` (`docs/product.md` "Action vocabulary"). A stale or
+  corrupt quote blocks the check closed (`BLOCKED`, `STALE_QUOTE`) via
+  `@vigil/market`'s `evaluateQuoteFreshness`, the same gate `candidate`
+  uses on generation; a quote for a different instrument than the
+  candidate's is blocked the same way, since it is no evidence about this
+  candidate's price.
+- `scaled-decimal` — `toScaled`/`fromScaled`/`compareDecimal`/
+  `addDecimal`/`subtractDecimal`: a minimal bigint-on-scaled-integers
+  helper for this package's own entry-zone and tranche arithmetic, kept
+  independent of `@vigil/ledger`'s `base-units.ts` because this package
+  cannot import `@vigil/ledger` (see "Allowed workspace imports" above).
+  Issue #20 owns unifying the two seams later.
 
-## Status
-
-Empty scaffold. First filled under planning ID BOOT-05.
+Sizing policy, cost/edge checks, and turning `ENTRY_ELIGIBLE` into an
+actual `BUY` intent are not this package's job — they read a `Candidate`
+and an `EntryEvaluation` this package produces, but decide nothing here.
