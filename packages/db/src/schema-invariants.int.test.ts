@@ -1,9 +1,10 @@
-import { assetIdSchema } from "@vigil/contracts";
+import { assetIdSchema, decimalStringSchema } from "@vigil/contracts";
 import { is, sql } from "drizzle-orm";
 import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { schema } from "./client";
+import { candidates } from "./schema/decisions";
 import { assetScales, journalEntries, journalLines, ledgerBalances } from "./schema/journal";
 import { postJournalEntry } from "./store/journal-store";
 import {
@@ -12,7 +13,7 @@ import {
   PG_CHECK_VIOLATION,
   PG_RAISE_EXCEPTION,
 } from "./store/pg-errors";
-import { fundingEntry, openLedgerTestDb } from "./test-support/journal-fixtures";
+import { fundingEntry, openLedgerTestDb, TEST_ASSET, TEST_OTHER_ASSET } from "./test-support/journal-fixtures";
 
 // Lives beside src/, NOT under src/schema/: drizzle.config.ts globs
 // `packages/db/src/schema/*.ts`, so a test file in that directory would be
@@ -26,7 +27,11 @@ import { fundingEntry, openLedgerTestDb } from "./test-support/journal-fixtures"
 //   * a posted journal entry that can be edited or deleted in place;
 //   * a holdings balance that can be driven negative by a direct write;
 //   * a constraint that exists in packages/db/src/schema/ but never reached
-//     drizzle/, so the migration CI applies does not carry it.
+//     drizzle/, so the migration CI applies does not carry it;
+//   * a decision record persisted by a writer that did not come through
+//     decision-store.ts — against a ticker pair, or with a float artifact
+//     where a price belongs — because a shape the candidates constraints
+//     restate in SQL drifted from the one every caller validates against.
 //
 // Almost every claim is asserted against the migrated database — the schema
 // CI actually builds from `drizzle/`, reached through `information_schema`,
@@ -82,6 +87,43 @@ async function errorFrom(run: () => Promise<unknown>): Promise<unknown> {
   } catch (error) {
     return error;
   }
+}
+
+/**
+ * One candidate, every required column filled, so a case below varies
+ * exactly one field and everything else is known-good.
+ *
+ * Raw SQL rather than `recordCandidate` on purpose: the store validates an
+ * instrument id and every amount against `@vigil/contracts` before any
+ * write, so the candidates check constraints are reachable only through a
+ * writer that skipped it — a backfill, a repair script, a later app
+ * inserting rows directly. Those are the writers a ticker pair or a float
+ * artifact would reach a durable decision record through, and the
+ * constraints are the only thing standing in their way.
+ */
+async function insertCandidate(
+  candidateId: string,
+  fields: { readonly instrumentId?: string; readonly entryZoneMin?: string } = {},
+): Promise<void> {
+  const instrumentId = fields.instrumentId ?? `${TEST_OTHER_ASSET}/${TEST_ASSET}`;
+  const entryZoneMin = fields.entryZoneMin ?? "100.00";
+
+  await db.execute(sql`
+    insert into ${candidates} (
+      candidate_id, idempotency_key, correlation_id, strategy_id, instrument_id,
+      action, action_detail, horizon, entry_zone_min, entry_zone_max,
+      allowed_extension, invalidation_price, invalidation_conditions, expires_at, benchmark_id,
+      quote_acquired_at, quote_ingested_at, bid_price, ask_price,
+      generated_at, recorded_at, policy_version, strategy_version
+    ) values (
+      ${candidateId}, ${candidateId}, 'corr-schema', 'strategy-schema-0', ${instrumentId},
+      'BUY', 'SMALL_STARTER', 'swing', ${entryZoneMin}, '104.00',
+      '0.50', '92.00', array['closes below the prior swing low'],
+      '2026-01-02T12:00:00.000Z', 'benchmark-schema-0',
+      '2026-01-02T03:04:05.000Z', '2026-01-02T03:04:05.500Z', '101.50', '101.75',
+      '2026-01-02T03:04:06.000Z', '2026-01-02T03:04:06.250Z', 'policy-test-0', 'strategy-test-0'
+    )
+  `);
 }
 
 type ColumnRow = {
@@ -146,6 +188,43 @@ describe("money and quantity columns", () => {
       expect([table, tablesWithScale.has(table)]).toEqual([table, true]);
     }
   });
+
+  // A decisions-family amount is decimal text rather than base units, so
+  // its column is guarded by a regex that restates `DECIMAL_STRING_PATTERN`
+  // minus the leading `-` — a price, a quantity, and a distance between two
+  // prices are never negative. Every decimal check in that family is
+  // generated from that one restatement, so holding one column to
+  // `@vigil/contracts` holds all of them.
+  const amountSpellings: readonly string[] = [
+    "100.00",
+    "0",
+    "0.50",
+    // The spellings a float, a formatter, or a display string arrives in.
+    "1.04e2",
+    "-92.00",
+    "-0",
+    "01",
+    "1.",
+    ".5",
+    "NaN",
+    "1,000",
+    " 1",
+  ];
+
+  it.each(amountSpellings)(
+    "stores the price %s exactly when @vigil/contracts calls it a non-negative decimal string — catches the candidates constraint's restated shape drifting from the schema every caller validates against, after which a float artifact or a negative price has somewhere to land in a durable decision record",
+    async (entryZoneMin) => {
+      const acceptedBySchema = !entryZoneMin.startsWith("-") && decimalStringSchema.safeParse(entryZoneMin).success;
+
+      const failure = await errorFrom(() => insertCandidate("cand-price-shape", { entryZoneMin }));
+      const acceptedByDatabase = failure === null;
+
+      expect([entryZoneMin, acceptedByDatabase]).toEqual([entryZoneMin, acceptedBySchema]);
+      if (!acceptedByDatabase) {
+        expect(postgresConstraintName(failure)).toBe("candidates_prices_decimal");
+      }
+    },
+  );
 });
 
 describe("idempotency and correlation keys", () => {
@@ -156,6 +235,12 @@ describe("idempotency and correlation keys", () => {
   it("declares a unique index on each key the financial-tables rule names — catches an idempotency key indexed for speed and unenforced for correctness, which stops nothing", () => {
     expect(declaredUniqueIndexNames()).toEqual(
       expect.arrayContaining([
+        // The decisions family carries its own idempotency keys: a
+        // candidate or a judgement redelivered by an at-least-once
+        // producer is one record, and only a unique index makes that
+        // true for a writer that is not this package's store.
+        "candidate_evaluations_idempotency_key_key",
+        "candidates_idempotency_key_key",
         "journal_entries_idempotency_key_key",
         "journal_entries_reverses_entry_id_key",
         "reservations_idempotency_key_key",
@@ -225,6 +310,27 @@ describe("asset identity", () => {
       expect([assetId, acceptedByDatabase]).toEqual([assetId, acceptedBySchema]);
       if (!acceptedByDatabase) {
         expect(postgresConstraintName(failure)).toBe("asset_scales_canonical_asset_id");
+      }
+    },
+  );
+
+  // The same two definitions held to each other one level up: a canonical
+  // instrument id is two canonical asset ids joined by "/", and
+  // `candidates_instrument_id_canonical` restates the asset-id shape twice
+  // over in SQL. A drift there cannot show up in the `asset_scales` cases
+  // above, because that constraint carries its own copy.
+  it.each(identities)(
+    "accepts an instrument id whose base half is $name exactly when @vigil/contracts accepts that half — catches the candidates constraint's SQL literal drifting from the schema every caller validates against, which is what stands between a ticker pair and a durable decision record when the writer is not this package's store",
+    async ({ assetId }) => {
+      const instrumentId = `${assetId}/${TEST_ASSET}`;
+      const acceptedBySchema = assetIdSchema.safeParse(assetId).success;
+
+      const failure = await errorFrom(() => insertCandidate("cand-instrument-shape", { instrumentId }));
+      const acceptedByDatabase = failure === null;
+
+      expect([instrumentId, acceptedByDatabase]).toEqual([instrumentId, acceptedBySchema]);
+      if (!acceptedByDatabase) {
+        expect(postgresConstraintName(failure)).toBe("candidates_instrument_id_canonical");
       }
     },
   );

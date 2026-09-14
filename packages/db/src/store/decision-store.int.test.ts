@@ -11,7 +11,7 @@ import {
 } from "./decision-store";
 import { postgresErrorCode, PG_RAISE_EXCEPTION } from "./pg-errors";
 import { storeCandidate, storeEvaluation } from "../test-support/decision-fixtures";
-import { openLedgerTestDb } from "../test-support/journal-fixtures";
+import { openLedgerTestDb, TEST_PROVENANCE } from "../test-support/journal-fixtures";
 
 // The defects this file kills, all of them about what the opportunity
 // journal still says once the outcome is known:
@@ -165,6 +165,19 @@ describe("recordCandidate", () => {
     }
     expect(await loadCandidates(db)).toEqual([]);
   });
+
+  it("refuses a candidate that does not name the policy and strategy versions that produced it, and writes nothing — catches a decision record whose outcome can never be attributed to the behaviour that produced it, which is the whole basis on which one strategy version is later compared to another", async () => {
+    const unattributable = await recordCandidate(
+      db,
+      storeCandidate("cand-unattributable", { provenance: { ...TEST_PROVENANCE, strategyVersion: "   " } }),
+    );
+
+    expect(unattributable.outcome).toBe("refused");
+    if (unattributable.outcome === "refused") {
+      expect(unattributable.code).toBe("MISSING_PROVENANCE");
+    }
+    expect(await loadCandidates(db)).toEqual([]);
+  });
 });
 
 describe("recordCandidateEvaluation", () => {
@@ -212,6 +225,47 @@ describe("recordCandidateEvaluation", () => {
     const stored = await loadCandidates(db);
     expect(stored[0]?.latestEvaluation?.outcome).toBe("BLOCKED");
     expect(stored[0]?.latestEvaluation?.executablePrice).toBeNull();
+  });
+
+  it("records once when the same judgement is delivered twice under a fresh evaluation id, and reports the judgement already stored — catches an at-least-once evaluator writing one judgement twice, after which a candidate judged once counts as two outcomes in every later comparison, and a duplicate check keyed on the evaluation id, which a regenerated id defeats", async () => {
+    expect((await recordCandidate(db, storeCandidate("cand-judged"))).outcome).toBe("recorded");
+
+    const first = await recordCandidateEvaluation(db, storeEvaluation("eval-once", "cand-judged"));
+    const redelivered = await recordCandidateEvaluation(
+      db,
+      storeEvaluation("eval-once-retry", "cand-judged", { idempotencyKey: "idem-eval-once" }),
+    );
+
+    expect(first.outcome).toBe("recorded");
+    expect(redelivered.outcome).toBe("duplicate");
+    if (redelivered.outcome === "duplicate") {
+      expect(redelivered.evaluationId).toBe("eval-once");
+    }
+    expect(await storedEvaluationCount()).toBe(1);
+  });
+
+  it("refuses an evaluation id that is already stored under a different idempotency key, rather than answering duplicate — catches the swallowed-judgement bug where a re-run evaluator is told its new outcome was already persisted when nothing was written, leaving the superseded judgement standing as the candidate's latest", async () => {
+    expect((await recordCandidate(db, storeCandidate("cand-rejudged"))).outcome).toBe("recorded");
+    expect((await recordCandidateEvaluation(db, storeEvaluation("eval-collide", "cand-rejudged"))).outcome).toBe(
+      "recorded",
+    );
+
+    const collision = await recordCandidateEvaluation(
+      db,
+      storeEvaluation("eval-collide", "cand-rejudged", {
+        idempotencyKey: "idem-eval-collide-second",
+        outcome: "MISSED",
+        evaluatedAt: "2026-01-02T04:10:01.000Z",
+      }),
+    );
+
+    expect(collision.outcome).toBe("refused");
+    if (collision.outcome === "refused") {
+      expect(collision.code).toBe("DUPLICATE_RECORD");
+    }
+    expect(await storedEvaluationCount()).toBe(1);
+    const stored = await loadCandidates(db);
+    expect(stored[0]?.latestEvaluation?.outcome).toBe("WAIT");
   });
 });
 
