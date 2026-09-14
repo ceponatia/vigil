@@ -45,10 +45,17 @@ elsewhere, and nothing that can move money also calls a model provider.
 - `health/` — heartbeats and the staleness checks that drive fail-closed
   behavior.
 
-These are described, not created — `src/` stays empty until BOOT-06, when
-`src/main.ts` arrives along with the first real module.
+Every directory above but `health/` is described, not created — `market/`,
+`strategy/`, `allocator/`, `execution/`, `outbox/`, and `reconcile/` arrive
+with BOOT-06.
 
 ## Status
 
-Empty scaffold. `src/main.ts` and the modules above are first filled under
-planning ID BOOT-06.
+`src/main.ts` and `health/` exist (planning ID BOOT-07): config parsing,
+a database connection, structured pino logging, and a heartbeat loop that
+writes this instance's operating mode and last-quote age on an interval —
+what `apps/control`'s Runtime health section reads. `loadTradingConfig`
+refuses to start under SHADOW or LIVE with a diagnostic rather than
+starting a runtime with no market/strategy/execution pipeline behind
+either mode yet; PAPER and PAUSED are the only modes this build enters.
+Every other module above remains planned.
