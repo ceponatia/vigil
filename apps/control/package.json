@@ -3,9 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev -p 3300",
+    "dev": "next dev -p ${CONTROL_PORT:-3300}",
     "build": "next build",
-    "start": "next start -p 3300",
+    "start": "next start -p ${CONTROL_PORT:-3300}",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

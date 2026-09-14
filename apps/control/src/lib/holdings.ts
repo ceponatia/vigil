@@ -42,7 +42,10 @@ export function groupHoldings(balances: readonly StoredBalance[]): readonly Asse
       continue;
     }
     const state = balance.holdingsState;
-    const entry = byAsset.get(balance.assetId) ?? { assetScale: balance.assetScale, states: new Map() };
+    const entry = byAsset.get(balance.assetId) ?? {
+      assetScale: balance.assetScale,
+      states: new Map<HoldingsStateValue, bigint>(),
+    };
     const net = balance.debitBase - balance.creditBase;
     entry.states.set(state, (entry.states.get(state) ?? 0n) + net);
     byAsset.set(balance.assetId, entry);

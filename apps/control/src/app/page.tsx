@@ -20,9 +20,13 @@ export default async function OverviewPage() {
 
   const result = await loadDashboardData(config.config);
   if (result.outcome === "error") {
+    // `result.detail` is always a fixed, safe sentence (never a raw driver
+    // message — `src/lib/data.ts` logs that server-side only, since it can
+    // carry the connection string's host, port, or role).
     return (
       <main>
         <h1>Runtime data unavailable</h1>
+        <p>Error code: {result.code}</p>
         <p>{result.detail}</p>
       </main>
     );

@@ -70,6 +70,75 @@ describe("deriveRuntimeHealth", () => {
     expect(result.instances[0]?.heartbeatAgeMs).toBeNull();
   });
 
+  it("reads a future-dated heartbeat as STALE rather than OK forever, and says why", () => {
+    // packages/contracts/src/timestamps.ts: a negative age is a corruption
+    // signal, not "very fresh" — a clock skew or a corrupt row must not
+    // read as healthy indefinitely.
+    const result = deriveRuntimeHealth({
+      heartbeats: [heartbeat({ observedAt: "2024-06-01T12:00:05.000Z" })], // 5s after NOW
+      now: NOW,
+      heartbeatStaleAfterMs: HEARTBEAT_STALE_AFTER_MS,
+      quoteStaleAfterMs: QUOTE_STALE_AFTER_MS,
+      dashboardMode: "PAPER",
+    });
+    expect(result.instances[0]?.heartbeat).toBe("STALE");
+    expect(result.instances[0]?.heartbeatAgeMs).toBe(-5000);
+    expect(result.instances[0]?.detail).toContain("future-dated");
+  });
+
+  it("reads a future-dated quote as STALE rather than OK forever, and says why", () => {
+    const result = deriveRuntimeHealth({
+      heartbeats: [heartbeat({ lastQuoteAcquiredAt: "2024-06-01T12:00:05.000Z" })], // 5s after NOW
+      now: NOW,
+      heartbeatStaleAfterMs: HEARTBEAT_STALE_AFTER_MS,
+      quoteStaleAfterMs: QUOTE_STALE_AFTER_MS,
+      dashboardMode: "PAPER",
+    });
+    expect(result.instances[0]?.heartbeat).toBe("OK");
+    expect(result.instances[0]?.quote).toBe("STALE");
+    expect(result.instances[0]?.detail).toContain("future-dated");
+  });
+
+  it("pins the heartbeat staleness threshold: exactly at it is OK, one ms past is STALE", () => {
+    const atThreshold = deriveRuntimeHealth({
+      heartbeats: [heartbeat({ observedAt: "2024-06-01T11:59:45.000Z" })], // exactly 15000ms old
+      now: NOW,
+      heartbeatStaleAfterMs: HEARTBEAT_STALE_AFTER_MS,
+      quoteStaleAfterMs: QUOTE_STALE_AFTER_MS,
+      dashboardMode: "PAPER",
+    });
+    expect(atThreshold.instances[0]?.heartbeat).toBe("OK");
+
+    const pastThreshold = deriveRuntimeHealth({
+      heartbeats: [heartbeat({ observedAt: "2024-06-01T11:59:44.999Z" })], // 15001ms old
+      now: NOW,
+      heartbeatStaleAfterMs: HEARTBEAT_STALE_AFTER_MS,
+      quoteStaleAfterMs: QUOTE_STALE_AFTER_MS,
+      dashboardMode: "PAPER",
+    });
+    expect(pastThreshold.instances[0]?.heartbeat).toBe("STALE");
+  });
+
+  it("pins the quote staleness threshold: exactly at it is OK, one ms past is STALE", () => {
+    const atThreshold = deriveRuntimeHealth({
+      heartbeats: [heartbeat({ lastQuoteAcquiredAt: "2024-06-01T11:59:00.000Z" })], // exactly 60000ms old
+      now: NOW,
+      heartbeatStaleAfterMs: HEARTBEAT_STALE_AFTER_MS,
+      quoteStaleAfterMs: QUOTE_STALE_AFTER_MS,
+      dashboardMode: "PAPER",
+    });
+    expect(atThreshold.instances[0]?.quote).toBe("OK");
+
+    const pastThreshold = deriveRuntimeHealth({
+      heartbeats: [heartbeat({ lastQuoteAcquiredAt: "2024-06-01T11:58:59.999Z" })], // 60001ms old
+      now: NOW,
+      heartbeatStaleAfterMs: HEARTBEAT_STALE_AFTER_MS,
+      quoteStaleAfterMs: QUOTE_STALE_AFTER_MS,
+      dashboardMode: "PAPER",
+    });
+    expect(pastThreshold.instances[0]?.quote).toBe("STALE");
+  });
+
   it("reports empty instances for no heartbeats, never a fabricated row", () => {
     const result = deriveRuntimeHealth({
       heartbeats: [],

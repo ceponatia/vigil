@@ -32,11 +32,21 @@ describe("formatBaseUnits", () => {
     expect(formatBaseUnits(-42n, 0)).toBe("-42");
   });
 
-  it("handles an amount wider than IEEE-754 can represent exactly", () => {
-    expect(formatBaseUnits(100_000_000_000_000_000n, 18)).toBe("0.1");
+  it("renders an integer past Number.MAX_SAFE_INTEGER exactly, never off by one", () => {
+    // 9_007_199_254_740_993n is 2^53 + 1 — the smallest integer a
+    // `Number()`-based formatter cannot represent exactly, so it would
+    // round this to …992 or …994 instead.
+    expect(formatBaseUnits(9_007_199_254_740_993n, 0)).toBe("9007199254740993");
   });
 
   it("round-trips an eighteen-decimal amount without a wei off-by-one", () => {
     expect(formatBaseUnits(1_500_000_000_000_000_000n, 18)).toBe("1.5");
+  });
+
+  it("renders a 30-digit amount at scale 18 with every digit intact", () => {
+    // Computed by hand from the digits, not via a Number(): the whole part
+    // is the leading 12 digits, the fraction is the trailing 18 with its
+    // one trailing zero trimmed.
+    expect(formatBaseUnits(123_456_789_012_345_678_901_234_567_890n, 18)).toBe("123456789012.34567890123456789");
   });
 });

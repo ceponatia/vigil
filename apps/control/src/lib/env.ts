@@ -1,4 +1,4 @@
-import { operatingModeSchema } from "@vigil/contracts";
+import { OPERATING_MODES, operatingModeSchema } from "@vigil/contracts";
 import type { OperatingMode } from "@vigil/contracts";
 import { z } from "zod";
 
@@ -43,7 +43,7 @@ export function loadControlConfig(env: NodeJS.ProcessEnv = process.env): ConfigR
     return {
       outcome: "error",
       code: "INVALID_VIGIL_MODE",
-      detail: `VIGIL_MODE "${rawMode}" is not one of PAPER, SHADOW, LIVE, PAUSED`,
+      detail: `VIGIL_MODE "${rawMode}" is not one of ${OPERATING_MODES.join(", ")}`,
     };
   }
 

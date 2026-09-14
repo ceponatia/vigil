@@ -1,3 +1,5 @@
+import { hostname } from "node:os";
+
 import { createDbClient } from "@vigil/db";
 import pino from "pino";
 
@@ -15,7 +17,10 @@ import { startHeartbeatLoop } from "./health/heartbeat";
 const HEARTBEAT_INTERVAL_MS = 5_000;
 
 function instanceId(): string {
-  return `pid-${process.pid.toString()}`;
+  // `pid` alone collides across containers — every container's first
+  // process is PID 1 — so the hostname (container id or host name) goes
+  // first to keep two instances distinguishable in the dashboard.
+  return `${hostname()}-pid-${process.pid.toString()}`;
 }
 
 async function main(): Promise<void> {

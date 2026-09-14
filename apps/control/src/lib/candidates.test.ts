@@ -12,7 +12,10 @@ function candidate(overrides: Partial<StoredCandidate> = {}): StoredCandidate {
     idempotencyKey: "idem-1",
     correlationId: "corr-1",
     strategyId: "strategy-1",
-    instrumentId: "chain:1|contract|0xaaa|mainnet",
+    // A real instrument id: two canonical asset ids joined by "/"
+    // (`packages/db/src/store/decision-store.ts` "Canonical instrument id
+    // text: baseAssetId/quoteAssetId").
+    instrumentId: "chain:1|contract|0xaaa|mainnet/chain:1|native|ETH|mainnet",
     action: "BUY",
     actionDetail: "BUY",
     horizon: "swing",

@@ -5,11 +5,13 @@ import type { VigilDatabase } from "@vigil/db";
 
 import type { ControlConfig } from "./env";
 import { getDb } from "./db";
+import { latestEntries } from "./audit";
 import { deriveCandidateValidity } from "./candidates";
 import { summarizeCosts } from "./costs";
 import { formatBaseUnits } from "./format";
 import { deriveRuntimeHealth, HEARTBEAT_STALE_AFTER_MS, QUOTE_STALE_AFTER_MS } from "./health";
 import { groupHoldings } from "./holdings";
+import { sortByExpiry } from "./reservations";
 
 /**
  * data.ts — the ONLY module in apps/control that imports a `@vigil/db`
@@ -120,7 +122,7 @@ type ActiveReservationRow = {
  */
 async function loadActiveReservationRows(db: VigilDatabase): Promise<readonly ActiveReservationRow[]> {
   const rows = await db.select().from(reservations);
-  return rows
+  const active = rows
     .filter((row) => row.state === "active")
     .map(
       (row): ActiveReservationRow => ({
@@ -133,8 +135,8 @@ async function loadActiveReservationRows(db: VigilDatabase): Promise<readonly Ac
         expiresAt: row.expiresAt.toISOString(),
         correlationId: row.correlationId,
       }),
-    )
-    .toSorted((left, right) => (left.expiresAt < right.expiresAt ? -1 : left.expiresAt > right.expiresAt ? 1 : 0));
+    );
+  return sortByExpiry(active);
 }
 
 export async function loadDashboardData(config: ControlConfig): Promise<DashboardResult> {
@@ -192,19 +194,16 @@ export async function loadDashboardData(config: ControlConfig): Promise<Dashboar
       };
     });
 
-    const auditTrail: readonly AuditEntryView[] = journalEntries
-      .slice(-AUDIT_TRAIL_LIMIT)
-      .toReversed()
-      .map((entry) => ({
-        entryId: entry.entryId,
-        kind: entry.kind,
-        occurredAt: entry.occurredAt,
-        correlationId: entry.correlationId,
-        intentId: entry.intentId,
-        policyVersion: entry.provenance.policyVersion,
-        strategyVersion: entry.provenance.strategyVersion,
-        modelVersion: entry.provenance.modelVersion,
-      }));
+    const auditTrail: readonly AuditEntryView[] = latestEntries(journalEntries, AUDIT_TRAIL_LIMIT).map((entry) => ({
+      entryId: entry.entryId,
+      kind: entry.kind,
+      occurredAt: entry.occurredAt,
+      correlationId: entry.correlationId,
+      intentId: entry.intentId,
+      policyVersion: entry.provenance.policyVersion,
+      strategyVersion: entry.provenance.strategyVersion,
+      modelVersion: entry.provenance.modelVersion,
+    }));
 
     const health = deriveRuntimeHealth({
       heartbeats,
@@ -238,10 +237,16 @@ export async function loadDashboardData(config: ControlConfig): Promise<Dashboar
       },
     };
   } catch (error) {
+    // The raw driver message can carry the connection string's host, port,
+    // or role (docs/architecture.md "Configuration and secrets") — logged
+    // server-side only, never rendered. The page gets a fixed sentence plus
+    // the diagnostic code.
+    const rawDetail = error instanceof Error ? error.message : String(error);
+    console.error({ code: "DB_UNAVAILABLE", detail: rawDetail }, "loadDashboardData: database read failed");
     return {
       outcome: "error",
       code: "DB_UNAVAILABLE",
-      detail: error instanceof Error ? error.message : "an unknown error occurred while reading the database",
+      detail: "a database read failed; see the server log for the underlying error",
     };
   }
 }

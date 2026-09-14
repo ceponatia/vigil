@@ -53,7 +53,7 @@ export default function RootLayout({ children }: { readonly children: ReactNode 
     return (
       <html lang="en">
         <head>
-          <title>vigil control — configuration error</title>
+          <title>{`vigil control — configuration error`}</title>
           <style>{STYLES}</style>
         </head>
         <body>
@@ -77,7 +77,7 @@ export default function RootLayout({ children }: { readonly children: ReactNode 
     return (
       <html lang="en">
         <head>
-          <title>vigil control — {mode} not reachable</title>
+          <title>{`vigil control — ${mode} not reachable`}</title>
           <style>{STYLES}</style>
         </head>
         <body>
@@ -101,7 +101,7 @@ export default function RootLayout({ children }: { readonly children: ReactNode 
   return (
     <html lang="en">
       <head>
-        <title>vigil control — {mode}</title>
+        <title>{`vigil control — ${mode}`}</title>
         <style>{STYLES}</style>
       </head>
       <body>

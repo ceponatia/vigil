@@ -1,7 +1,7 @@
 import { isoUtcTimestampSchema } from "@vigil/contracts";
 import type { IsoUtcTimestamp } from "@vigil/contracts";
 import { recordHeartbeat } from "@vigil/db";
-import type { StoreHeartbeat, VigilDatabase } from "@vigil/db";
+import type { RecordHeartbeatResult, StoreHeartbeat, VigilDatabase } from "@vigil/db";
 
 /**
  * heartbeat.ts — this runtime's liveness signal (docs/architecture.md
@@ -17,7 +17,10 @@ import type { StoreHeartbeat, VigilDatabase } from "@vigil/db";
  */
 
 export type BuildHeartbeatParams = {
-  readonly now: IsoUtcTimestamp;
+  /** When the emitting runtime observed its own liveness. */
+  readonly observedAt: IsoUtcTimestamp;
+  /** When this heartbeat is being written — a separate clock read, per the schema's intent that the two may differ. */
+  readonly recordedAt: IsoUtcTimestamp;
   readonly mode: string;
   readonly instanceId: string;
   readonly lastQuoteAcquiredAt: string | null;
@@ -30,8 +33,8 @@ export function buildHeartbeat(params: BuildHeartbeatParams): StoreHeartbeat {
     process: "trading",
     instanceId: params.instanceId,
     operatingMode: params.mode,
-    observedAt: params.now,
-    recordedAt: params.now,
+    observedAt: params.observedAt,
+    recordedAt: params.recordedAt,
     lastQuoteAcquiredAt: params.lastQuoteAcquiredAt,
     detail: params.detail ?? null,
   };
@@ -54,6 +57,13 @@ export type StartHeartbeatLoopParams = {
   readonly instanceId: string;
   readonly now: () => string;
   readonly lastQuoteAcquiredAt?: () => string | null;
+  /**
+   * Defaults to `@vigil/db`'s `recordHeartbeat`. Overridable so a test can
+   * hand this a fake and assert the loop's fail-closed behavior (a refused
+   * result, or a rejected promise) without a real database — the loop
+   * itself never depends on the override existing.
+   */
+  readonly record?: (db: VigilDatabase, heartbeat: StoreHeartbeat) => Promise<RecordHeartbeatResult>;
 };
 
 export type HeartbeatLoop = {
@@ -70,22 +80,42 @@ export type HeartbeatLoop = {
  * or provider failure").
  */
 export function startHeartbeatLoop(params: StartHeartbeatLoopParams): HeartbeatLoop {
+  const record = params.record ?? recordHeartbeat;
+
   const tick = (): void => {
-    const rawNow = params.now();
-    const parsedNow = isoUtcTimestampSchema.safeParse(rawNow);
-    if (!parsedNow.success) {
-      params.logger.warn({ rawNow }, "heartbeat tick skipped: clock did not produce a valid ISO-8601 timestamp");
+    const rawObservedAt = params.now();
+    const parsedObservedAt = isoUtcTimestampSchema.safeParse(rawObservedAt);
+    if (!parsedObservedAt.success) {
+      params.logger.warn(
+        { rawObservedAt },
+        "heartbeat tick skipped: clock did not produce a valid ISO-8601 timestamp for observedAt",
+      );
+      return;
+    }
+
+    // A second, later clock read for recordedAt — taken immediately before
+    // the write, not reused from observedAt above, so the two timestamps
+    // can differ the way the schema intends (`packages/db`'s heartbeat
+    // store keeps both).
+    const rawRecordedAt = params.now();
+    const parsedRecordedAt = isoUtcTimestampSchema.safeParse(rawRecordedAt);
+    if (!parsedRecordedAt.success) {
+      params.logger.warn(
+        { rawRecordedAt },
+        "heartbeat tick skipped: clock did not produce a valid ISO-8601 timestamp for recordedAt",
+      );
       return;
     }
 
     const heartbeat = buildHeartbeat({
-      now: parsedNow.data,
+      observedAt: parsedObservedAt.data,
+      recordedAt: parsedRecordedAt.data,
       mode: params.mode,
       instanceId: params.instanceId,
       lastQuoteAcquiredAt: params.lastQuoteAcquiredAt?.() ?? null,
     });
 
-    recordHeartbeat(params.db, heartbeat)
+    record(params.db, heartbeat)
       .then((result) => {
         if (result.outcome === "refused") {
           params.logger.warn({ code: result.code, detail: result.detail }, "heartbeat refused");

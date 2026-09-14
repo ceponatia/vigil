@@ -59,31 +59,54 @@ export type DeriveRuntimeHealthParams = {
   readonly dashboardMode: OperatingMode;
 };
 
-function heartbeatStatus(observedAt: string, now: IsoUtcTimestamp, staleAfterMs: number): { status: HeartbeatStatus; ageMs: number | null } {
+type AgeReading<TStatus extends string> = {
+  readonly status: TStatus;
+  readonly ageMs: number | null;
+  /** Non-null only when something about the reading itself needs calling out — e.g. future-dated. */
+  readonly note: string | null;
+};
+
+function heartbeatStatus(observedAt: string, now: IsoUtcTimestamp, staleAfterMs: number): AgeReading<HeartbeatStatus> {
   const parsed = isoUtcTimestampSchema.safeParse(observedAt);
   if (!parsed.success) {
     // A heartbeat row exists but its own timestamp is corrupt: treated the
     // same as never having received one, never as fresh.
-    return { status: "NEVER", ageMs: null };
+    return { status: "NEVER", ageMs: null, note: null };
   }
   const age = ageMs(parsed.data, now);
-  return { status: age > staleAfterMs ? "STALE" : "OK", ageMs: age };
+  if (age < 0) {
+    // `packages/contracts/src/timestamps.ts`: a negative age means observedAt
+    // is after "now" — a corruption signal, never "very fresh". Read as
+    // STALE (the vocabulary stays two states) rather than falling through to
+    // the ordinary threshold compare, which would read OK forever.
+    return { status: "STALE", ageMs: age, note: `heartbeat is future-dated by ${String(-age)}ms` };
+  }
+  return { status: age > staleAfterMs ? "STALE" : "OK", ageMs: age, note: null };
 }
 
 function quoteStatus(
   lastQuoteAcquiredAt: string | null,
   now: IsoUtcTimestamp,
   staleAfterMs: number,
-): { status: QuoteStatus; ageMs: number | null } {
+): AgeReading<QuoteStatus> {
   if (lastQuoteAcquiredAt === null) {
-    return { status: "NONE", ageMs: null };
+    return { status: "NONE", ageMs: null, note: null };
   }
   const parsed = isoUtcTimestampSchema.safeParse(lastQuoteAcquiredAt);
   if (!parsed.success) {
-    return { status: "NONE", ageMs: null };
+    return { status: "NONE", ageMs: null, note: null };
   }
   const age = ageMs(parsed.data, now);
-  return { status: age > staleAfterMs ? "STALE" : "OK", ageMs: age };
+  if (age < 0) {
+    return { status: "STALE", ageMs: age, note: `quote is future-dated by ${String(-age)}ms` };
+  }
+  return { status: age > staleAfterMs ? "STALE" : "OK", ageMs: age, note: null };
+}
+
+/** Folds the heartbeat row's own `detail` together with any future-dated note, so neither replaces the other. */
+function combineDetail(storedDetail: string | null, ...notes: ReadonlyArray<string | null>): string | null {
+  const parts = [storedDetail, ...notes].filter((part): part is string => part !== null && part !== "");
+  return parts.length > 0 ? parts.join("; ") : null;
 }
 
 /**
@@ -104,7 +127,7 @@ export function deriveRuntimeHealth(params: DeriveRuntimeHealthParams): RuntimeH
       heartbeatAgeMs: hb.ageMs,
       quote: quote.status,
       quoteAgeMs: quote.ageMs,
-      detail: heartbeat.detail,
+      detail: combineDetail(heartbeat.detail, hb.note, quote.note),
     };
   });
 
