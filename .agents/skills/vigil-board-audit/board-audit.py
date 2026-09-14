@@ -69,8 +69,10 @@ PLANNING_ID = re.compile(r"\b(BOOT|NEXT|BACK)-(\d{2})\b")
 # A title carries a planning ID only as its leading `PREFIX-NN:` prefix. One mentioned
 # mid-title ("…, BOOT-07 shipped read-only local") describes another issue.
 TITLE_PLANNING_ID = re.compile(r"^\s*(BOOT|NEXT|BACK)-(\d{2})\s*:")
-# "#10 (BOOT-07)": the parenthetical annotates #10; it is not a second reference.
-ISSUE_REF_ANNOTATION = re.compile(r"(#\d+)\s*\([^()]*\)")
+# "#10 (BOOT-07)": the parenthetical annotates #10; it is not a second reference. It
+# is removed before the clause boundary is looked for, so a delimiter inside the
+# annotation ("#10 (BOOT-07 — prerequisite).") cannot split it and leak the aside.
+ISSUE_REF_ANNOTATION = re.compile(r"(#\d+)\s*\([^()\n]*\)")
 ISSUE_REF = re.compile(r"#(\d+)\b")
 PARENT_REF = re.compile(r"(?:part of|sub-issue of|parent(?: issue)?:?)\s*#(\d+)", re.IGNORECASE)
 BLOCKED_BY = re.compile(r"blocked by\s*:?\s*", re.IGNORECASE)
@@ -284,9 +286,9 @@ def blocker_refs(dependencies: str) -> list[str]:
     only #10), so an aside is never read as a second blocker."""
     refs: list[str] = []
     for match in BLOCKED_BY.finditer(dependencies):
-        rest = dependencies[match.end():]
+        rest = ISSUE_REF_ANNOTATION.sub(r"\1", dependencies[match.end():])
         end = CLAUSE_END.search(rest)
-        clause = ISSUE_REF_ANNOTATION.sub(r"\1", rest[: end.start()] if end else rest)
+        clause = rest[: end.start()] if end else rest
         for pid in PLANNING_ID.finditer(clause):
             refs.append(f"{pid.group(1)}-{pid.group(2)}")
         for ref in ISSUE_REF.finditer(clause):
@@ -454,6 +456,13 @@ def audit(batch: dict[int, dict], options: dict[str, list[str]], parent_arg: int
         if not issue["on_board"]:
             add("not-on-board", "finding", fixable=True, fix=f"{BOARD_SET} {n}",
                 detail="no item on the configured project; board-set.sh adds it")
+
+        mid_title = PLANNING_ID.search(issue["title"]) if planning_id(issue["title"]) is None else None
+        if mid_title:
+            mentioned_pid = f"{mid_title.group(1)}-{mid_title.group(2)}"
+            add(f"planning-id-mid-title:{mentioned_pid}", "info",
+                detail=f"the title mentions {mentioned_pid} but does not lead with it, so nothing is derived from it; "
+                       f"if this issue owns {mentioned_pid}, retitle it '{mentioned_pid}: …' (the filing convention)")
 
         for field in CLASSIFICATION:
             current = issue["fields"].get(field)

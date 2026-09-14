@@ -28,8 +28,9 @@ vocabulary of each area. Extend it there when a new package or area appears.
   Dependencies section, up to the first sentence end, ` — ` aside, semicolon,
   or line break. Planning IDs resolve through the batch's titles (their
   leading `PREFIX-NN:` prefix); `#N` resolves directly. A parenthetical right
-  after an issue number annotates it: "Blocked by #10 (BOOT-07)" names only
-  #10. "Blocked by: BOOT-04. BOOT-06 is optional context" names only BOOT-04.
+  after an issue number annotates it and is dropped before the clause end is
+  looked for: "Blocked by #10 (BOOT-07 — prerequisite)." names only #10.
+  "Blocked by: BOOT-04. BOOT-06 is optional context" names only BOOT-04.
 - **Parent named in the body.** `Part of #N`, `Sub-issue of #N`,
   `Parent: #N`, `parent issue #N` — in the Dependencies section only. A
   Context sentence quoting a PR's own "Part of #N" line describes that PR,
@@ -46,6 +47,7 @@ auditor does with it.
 | `not-on-board` | finding | yes | `board-set.sh N` adds the item |
 | `missing-field:<Field>` | finding | when a suggestion exists | `board-set.sh N Field Value` |
 | `area-unset-on-parent`, `size-unset-on-parent`, `owning-role-unset-on-parent` | info | — | leave; a parent spans areas, sizes, and roles |
+| `planning-id-mid-title:<ID>` | info | — | the title mentions a planning ID without leading with it, so nothing is derived; retitle `<ID>: …` only if the issue owns that work package |
 | `missing-field:Evidence` | finding | no | report; set it with `board-set.sh n Evidence "<pointer>"` once the justification is known |
 | `field-vs-derivation:<Field>` | info | — | report; reclassify only on instruction |
 | `label-outside-taxonomy:<label>` | finding | no | report; never remove a label |

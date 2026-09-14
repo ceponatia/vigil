@@ -36,6 +36,12 @@ Commands, fixture/replay, capability evidence, or safe manual checks.
 What authority, credentials, live funds, or paid services are explicitly not enabled.
 ```
 
+- **The title** of an issue that owns a handoff work package leads with its
+  planning ID as `PREFIX-NN: …` (`BOOT-05: One numerical candidate and staged
+  position plan`). The board audit derives Horizon and Phase from that prefix
+  alone, and `file-issue.sh` refuses a title that mentions a planning ID
+  anywhere else — a title such as `Implement research gateway for NEXT-01`
+  reads as descriptive of another issue's package, not as owning it.
 - **Outcome** names who benefits — "the owner," "an operator," or "a
   developer." There is no other kind of end user in this product; never write
   one in.

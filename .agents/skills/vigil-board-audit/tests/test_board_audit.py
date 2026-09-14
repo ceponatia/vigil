@@ -93,6 +93,15 @@ class BodyParsingTests(unittest.TestCase):
         deps = "Blocked by #10 (BOOT-07) — the store function lands after PR #24 merges. No other hard blockers."
         self.assertEqual(AUDIT.blocker_refs(deps), ["#10"])
         self.assertEqual(AUDIT.blocker_refs("Blocked by: #4 (BOOT-01), BOOT-02 (research)."), ["BOOT-02", "#4"])
+        # A clause delimiter inside the annotation must not split it and leak the aside.
+        for deps in (
+            "Blocked by #10 (BOOT-07 — dashboard prerequisite).",
+            "Blocked by #10 (BOOT-07; see PR #24). BOOT-04 is context only.",
+            "Blocked by #10 (BOOT-07. The dashboard.) and nothing else.",
+        ):
+            self.assertEqual(AUDIT.blocker_refs(deps), ["#10"], deps)
+        # An annotation never spans lines: an unclosed parenthesis leaves the next line intact.
+        self.assertEqual(AUDIT.blocker_refs("Blocked by: #10 (BOOT-07\nBlocked by: #11 (x)."), ["BOOT-07", "#10", "#11"])
 
     def test_planning_id_is_only_a_leading_title_prefix(self):
         self.assertEqual(AUDIT.planning_id("BOOT-07: Minimal dashboard and runtime health"), "BOOT-07")
@@ -259,8 +268,11 @@ class AuditTests(unittest.TestCase):
         }
         report = AUDIT.audit(batch, OPTIONS)
         self.assertEqual(report["summary"]["findings"], 0)
-        for n in (25, 26, 27):
-            self.assertEqual(codes(report, n), [], n)
+        self.assertEqual(codes(report, 25), [])
+        self.assertEqual(codes(report, 27), [])
+        # The mention is reported as info only — never a derivation, never a fix.
+        self.assertEqual(codes(report, 26), ["planning-id-mid-title:BOOT-07"])
+        self.assertEqual(finding(report, 26, "planning-id-mid-title:BOOT-07")["severity"], "info")
         self.assertIsNone(next(r for r in report["issues"] if r["number"] == 26)["planning_id"])
 
     def test_a_blocker_named_in_the_body_without_a_native_link_is_fixable(self):
