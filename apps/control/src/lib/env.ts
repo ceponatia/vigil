@@ -20,6 +20,17 @@ import { z } from "zod";
 
 const databaseUrlSchema = z.string().trim().min(1, "DATABASE_URL must not be empty");
 
+/**
+ * A `process.env`-shaped source, named without referencing the global
+ * `NodeJS` namespace's `ProcessEnv` type: `apps/control`'s Next-augmented
+ * `tsconfig.json` makes that type's `NODE_ENV` a required property, which a
+ * plain test object literal has no reason to carry, and
+ * `js.configs.recommended`'s `no-undef` does not know that namespace exists
+ * at all. A string index signature is what `env.VIGIL_MODE` etc. actually
+ * need, and `process.env` itself satisfies it.
+ */
+export type EnvSource = Readonly<Record<string, string | undefined>>;
+
 export type ControlConfig = {
   readonly mode: OperatingMode;
   readonly databaseUrl: string;
@@ -36,7 +47,7 @@ export type ConfigResult =
  * environment while a test can hand this a plain object instead — still the
  * only function in the module that ever touches it.
  */
-export function loadControlConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
+export function loadControlConfig(env: EnvSource = process.env): ConfigResult {
   const rawMode = env.VIGIL_MODE ?? "PAPER";
   const parsedMode = operatingModeSchema.safeParse(rawMode);
   if (!parsedMode.success) {

@@ -16,6 +16,14 @@ import { z } from "zod";
  * the only modes this build can actually enter.
  */
 
+/**
+ * A `process.env`-shaped source, named without referencing the `NodeJS`
+ * global namespace — `js.configs.recommended`'s `no-undef` does not know
+ * that namespace exists. A string index signature is all `env.DATABASE_URL`
+ * etc. actually need, and `process.env` itself satisfies it.
+ */
+export type EnvSource = Readonly<Record<string, string | undefined>>;
+
 const STARTABLE_MODES = ["PAPER", "PAUSED"] as const;
 export type StartableMode = (typeof STARTABLE_MODES)[number];
 
@@ -48,7 +56,7 @@ function isStartableMode(mode: OperatingMode): mode is StartableMode {
  * environment while a test can hand this a plain object instead — still
  * the only function in the module that ever touches it.
  */
-export function loadTradingConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
+export function loadTradingConfig(env: EnvSource = process.env): ConfigResult {
   const databaseUrl = (env.DATABASE_URL ?? "").trim();
   if (databaseUrl === "") {
     return { outcome: "refused", code: "MISSING_DATABASE_URL", detail: "DATABASE_URL is not set" };

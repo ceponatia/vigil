@@ -52,7 +52,12 @@ async function main(): Promise<void> {
   });
 
   let shuttingDown = false;
-  const shutdown = (signal: NodeJS.Signals): void => {
+  // `string`, not the global `NodeJS` namespace's `Signals` type —
+  // `no-undef` (`js.configs.recommended`) does not know that namespace
+  // exists. A `Signals` literal union is assignable to `string`, and a
+  // narrower type here would fail `strictFunctionTypes` against
+  // `process.on`'s own `SignalsListener` parameter type.
+  const shutdown = (signal: string): void => {
     if (shuttingDown) {
       return;
     }
