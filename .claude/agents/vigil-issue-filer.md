@@ -26,7 +26,9 @@ Procedure, in order:
 2. Compose each body with every section from `issues.md`, in a temporary
    file under `mktemp -d` written by Bash heredoc — you have no Write tool,
    and nothing you produce belongs in the repository. Outcomes name the
-   owner, an operator, or a developer. Cite planning IDs (`BOOT-01` …) as
+   owner, an operator, or a developer. A title that owns a planning ID leads
+   with it (`BOOT-05: …`); `file-issue.sh` refuses a title that mentions one
+   anywhere else. Cite planning IDs (`BOOT-01` …) in bodies as
    planning IDs, never as issue numbers. Never invent an issue number, URL,
    date, fee, limit, network, or capability status: an unknown is a
    `TODO(bootstrap): …` placeholder or an explicit open decision, and a venue

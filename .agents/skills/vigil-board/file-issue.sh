@@ -58,6 +58,14 @@ if [ -n "$NUMBER" ]; then
 else
   [ -n "$TITLE" ] || { echo "--title is required when creating" >&2; usage; }
   [ -n "$BODY" ] || [ -n "$BODY_FILE" ] || { echo "--body or --body-file is required when creating" >&2; usage; }
+  # A title that carries a planning ID leads with it: the board audit reads a
+  # planning ID only from a leading `PREFIX-NN:` prefix, so one mentioned anywhere
+  # else would silently derive nothing (vigil-docs references/issues.md).
+  if [[ "$TITLE" =~ (^|[^A-Za-z0-9])(BOOT|NEXT|BACK)-[0-9]{2}([^A-Za-z0-9]|$) ]] \
+     && ! [[ "$TITLE" =~ ^[[:space:]]*(BOOT|NEXT|BACK)-[0-9]{2}[[:space:]]*: ]]; then
+    echo "a title that carries a planning ID leads with it as 'PREFIX-NN: …'; a planning ID mentioned elsewhere in a title derives nothing on the board: $TITLE" >&2
+    exit 64
+  fi
 fi
 if [ -n "$PARENT" ]; then [[ "$PARENT" =~ ^[0-9]+$ ]] || { echo "--parent must be an issue number" >&2; exit 64; }; fi
 for n in "${BLOCKERS[@]}"; do

@@ -78,4 +78,15 @@ grep -Fq "not configured: set VIGIL_BOARD_PROJECT_ID in $HERE/board-unconfigured
 [ ! -f "$state/calls" ] || { echo "link-pr called gh before checking configuration" >&2; exit 1; }
 echo 'ok  link-pr fails clearly when the board is not configured'
 
+state="$TMP/title-prefix"
+mkdir -p "$state"
+set +e
+output=$(PATH="$TMP/bin:$PATH" VIGIL_BOARD_ENV="$HERE/board.env" TEST_SCENARIO=file-create-fail TEST_STATE_DIR="$state" "$SKILL/file-issue.sh" --title 'Implement research gateway for NEXT-01' --body body --status Todo 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 64 ] || { echo "file-issue accepted a planning ID that is not the title prefix: rc=$rc" >&2; exit 1; }
+grep -Fq 'leads with it' <<<"$output" || { echo "file-issue did not explain the title convention: $output" >&2; exit 1; }
+[ ! -f "$state/calls" ] || { echo "file-issue called gh before refusing the title" >&2; exit 1; }
+echo 'ok  file-issue refuses a planning ID that is not the title prefix'
+
 echo 'all offline board-helper regressions passed'
