@@ -15,8 +15,11 @@ const FRESH_NOW = now("2024-01-01T00:00:01.000Z"); // 1s after validRawQuote's q
 
 function freshCandidate(config: StrategyConfig = DEFAULT_STRATEGY_CONFIG) {
   const result = generateCandidate({ quote: validRawQuote, now: FRESH_NOW, maxQuoteAgeMs: MAX_QUOTE_AGE_MS, config });
-  if (result.outcome !== "candidate") {
-    throw new Error(`expected a candidate, got no-candidate: ${result.reasonCode} ${result.detail}`);
+  if (result.outcome === "no-candidate") {
+    throw new Error(`test setup failed: expected a candidate, got no-candidate: ${result.reasonCode} ${result.detail}`);
+  }
+  if (result.outcome === "no-signal") {
+    throw new Error(`test setup failed: expected a candidate, got no-signal: ${result.code} ${result.detail}`);
   }
   return result.candidate;
 }
@@ -174,15 +177,38 @@ describe("generateCandidate — config is a programmer-error guard, not a diagno
     ["expiryMs is zero", { expiryMs: 0 }],
     ["totalQuantity is zero", { totalQuantity: decimalStringSchema.parse("0") }],
     ["strategyId is empty", { strategyId: "" }],
+    ["totalQuantity has fewer units than trancheCount (would force a zero-quantity tranche)", { totalQuantity: decimalStringSchema.parse("2"), trancheCount: 3 }],
   ];
 
   it.each(invalidConfigs)("throws for an invalid config: %s", (_name, override) => {
     const config: StrategyConfig = { ...DEFAULT_STRATEGY_CONFIG, ...override };
     expect(() => generateCandidate({ quote: validRawQuote, now: FRESH_NOW, maxQuoteAgeMs: MAX_QUOTE_AGE_MS, config })).toThrow();
   });
+});
 
-  it("throws when pullback + zoneWidth + invalidationOffset would drive the invalidation price non-positive for the current ask — misconfiguration, not bad market data", () => {
-    const config: StrategyConfig = { ...DEFAULT_STRATEGY_CONFIG, pullback: decimalStringSchema.parse("500") };
-    expect(() => generateCandidate({ quote: validRawQuote, now: FRESH_NOW, maxQuoteAgeMs: MAX_QUOTE_AGE_MS, config })).toThrow();
+// D1 correction: a low-enough ask against the configured offsets is
+// schema-legal market data, not a config defect — docs/resilience.md §4
+// forbids throwing on it. The rule instead reports "no-signal": it looked
+// and found nothing to propose, which is distinct from both a candidate
+// and a policy-vocabulary "no-candidate" refusal.
+describe("generateCandidate — no-signal: the rule found nothing to propose, never a thrown error", () => {
+  it("returns no-signal/PRICE_LEVEL_BELOW_RULE_RANGE when the ask is too low for the configured offsets, and never throws", () => {
+    const cheapQuote = { ...validRawQuote, askPrice: decimalStringSchema.parse("5.00"), bidPrice: decimalStringSchema.parse("4.90") };
+
+    expect(() => generateCandidate({ quote: cheapQuote, now: FRESH_NOW, maxQuoteAgeMs: MAX_QUOTE_AGE_MS, config: DEFAULT_STRATEGY_CONFIG })).not.toThrow();
+
+    const result = generateCandidate({ quote: cheapQuote, now: FRESH_NOW, maxQuoteAgeMs: MAX_QUOTE_AGE_MS, config: DEFAULT_STRATEGY_CONFIG });
+    expect(result.outcome).toBe("no-signal");
+    if (result.outcome === "no-signal") {
+      expect(result.code).toBe("PRICE_LEVEL_BELOW_RULE_RANGE");
+      expect(result.detail.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("never throws for any schema-legal quote, regardless of how cheap — a grid from far below the rule's range up through an ordinary price", () => {
+    for (const askPrice of ["0.01", "1.00", "5.00", "6.99", "7.00", "7.01", "250.10"]) {
+      const quote = { ...validRawQuote, askPrice: decimalStringSchema.parse(askPrice), bidPrice: decimalStringSchema.parse(askPrice) };
+      expect(() => generateCandidate({ quote, now: FRESH_NOW, maxQuoteAgeMs: MAX_QUOTE_AGE_MS, config: DEFAULT_STRATEGY_CONFIG })).not.toThrow();
+    }
   });
 });

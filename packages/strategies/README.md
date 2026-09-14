@@ -35,7 +35,12 @@ invalidation.
   horizon, staged position plan, benchmark reference), and
   `generateCandidate`, the deterministic numeric rule that proposes one
   from a quote: a bounded pullback band below the current ask, per a
-  documented `StrategyConfig` (`DEFAULT_STRATEGY_CONFIG`). Ids
+  documented `StrategyConfig` (`DEFAULT_STRATEGY_CONFIG`). Three distinct
+  outcomes: a `"candidate"`; a policy-vocabulary `"no-candidate"` refusal
+  (a `REASON_CODES` member such as `STALE_QUOTE`, fail closed on bad
+  market data); or `"no-signal"` (`StrategyNoSignalCode`, e.g.
+  `PRICE_LEVEL_BELOW_RULE_RANGE`) when the ask is schema-legal but too low
+  for the rule's configured offsets — never a thrown error. Ids
   (`candidateId`, `idempotencyKey`, `correlationId`) are derived
   deterministically from the strategy identity, instrument, and the
   quote's own acquisition time, so the same event delivered twice

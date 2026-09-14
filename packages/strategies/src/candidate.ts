@@ -6,7 +6,7 @@ import { evaluateQuoteFreshness, instrumentIdSchema } from "@vigil/market";
 import type { InstrumentId } from "@vigil/market";
 
 import { buildPositionPlan, positionPlanSchema } from "./position-plan";
-import { addDecimal, compareDecimal, subtractDecimal } from "./scaled-decimal";
+import { addDecimal, compareDecimal, scaleOf, subtractDecimal, toScaled } from "./scaled-decimal";
 
 /**
  * candidate.ts — the frozen, schema-validated candidate record (TASK-08:
@@ -46,12 +46,14 @@ export function deriveDeterministicId(tag: string, parts: readonly string[]): st
 export const HORIZONS = ["intraday", "swing", "position"] as const;
 export type Horizon = (typeof HORIZONS)[number];
 
-const marketSnapshotSchema = z.object({
-  quoteAcquiredAt: isoUtcTimestampSchema,
-  ingestedAt: isoUtcTimestampSchema,
-  bidPrice: decimalStringSchema,
-  askPrice: decimalStringSchema,
-});
+const marketSnapshotSchema = z
+  .object({
+    quoteAcquiredAt: isoUtcTimestampSchema,
+    ingestedAt: isoUtcTimestampSchema,
+    bidPrice: decimalStringSchema,
+    askPrice: decimalStringSchema,
+  })
+  .readonly();
 
 /**
  * The candidate record (`docs/architecture.md` "Contracts" — the
@@ -75,10 +77,10 @@ export const candidateSchema = z
     action: z.literal("BUY"),
     actionDetail: z.string().min(1),
     horizon: z.enum(HORIZONS),
-    entryZone: z.object({ min: decimalStringSchema, max: decimalStringSchema }),
+    entryZone: z.object({ min: decimalStringSchema, max: decimalStringSchema }).readonly(),
     allowedExtension: decimalStringSchema,
     invalidationPrice: decimalStringSchema,
-    invalidationConditions: z.array(z.string().min(1)).min(1),
+    invalidationConditions: z.array(z.string().min(1)).min(1).readonly(),
     expiresAt: isoUtcTimestampSchema,
     benchmarkId: z.string().min(1),
     marketSnapshot: marketSnapshotSchema,
@@ -127,20 +129,31 @@ export const candidateSchema = z
       }
     });
   })
+  // `.readonly()` runs after every check above (it wraps the fully-checked
+  // object schema, and its own parse delegates to the inner schema's full
+  // `run()` — checks included — before freezing the result), and it
+  // freezes each level independently: this object, `entryZone`,
+  // `marketSnapshot`, `invalidationConditions`, and (via `positionPlanSchema`
+  // and `trancheSchema`'s own `.readonly()`) the position plan and every
+  // tranche. `.brand()` is a compile-time-only cast (it returns `this` at
+  // runtime — verified against the installed zod's own implementation) so
+  // it changes nothing about this freezing, only the inferred TS type.
+  .readonly()
   .brand<"Candidate">();
 
 export type Candidate = z.infer<typeof candidateSchema>;
 
-/** Deep-freezes exactly the nested shapes `candidateSchema` produces. */
-function freezeCandidate(candidate: Candidate): Candidate {
-  candidate.positionPlan.tranches.forEach((tranche) => Object.freeze(tranche));
-  Object.freeze(candidate.positionPlan.tranches);
-  Object.freeze(candidate.positionPlan);
-  Object.freeze(candidate.entryZone);
-  Object.freeze(candidate.marketSnapshot);
-  Object.freeze(candidate.invalidationConditions);
-  return Object.freeze(candidate);
-}
+/**
+ * The numeric rule's own "nothing to propose here" vocabulary
+ * (`docs/product.md` TASK-12: "WAIT, HOLD, AVOID, and no notification are
+ * valid outputs" — a numeric non-result is one of those, not a failure).
+ * Deliberately NOT a `REASON_CODES` member: that registry is extended only
+ * through `docs/policy.md` and names policy-vocabulary refusals (a fail
+ * -closed gate like `STALE_QUOTE`), never "the rule found no signal at
+ * this price". See `GenerateCandidateResult`'s `"no-signal"` branch.
+ */
+export const STRATEGY_NO_SIGNAL_CODES = ["PRICE_LEVEL_BELOW_RULE_RANGE"] as const;
+export type StrategyNoSignalCode = (typeof STRATEGY_NO_SIGNAL_CODES)[number];
 
 /**
  * Every `DecimalString`/integer input the numeric rule needs, with a
@@ -225,6 +238,19 @@ function assertValidStrategyConfig(config: StrategyConfig): void {
   if (!Number.isInteger(config.expiryMs) || config.expiryMs <= 0) {
     throw new Error(`generateCandidate: config.expiryMs must be a positive integer, got ${String(config.expiryMs)}`);
   }
+  // Integer-division tranche splitting (position-plan.ts) gives the first
+  // `totalUnits % trancheCount` tranches one extra unit and every other
+  // tranche `totalUnits / trancheCount` units — so if `totalUnits <
+  // trancheCount`, at least one tranche gets exactly zero units. A
+  // zero-quantity tranche is not a smaller stage, it is not a stage at
+  // all, so this config can never produce a valid plan and is refused here
+  // rather than at buildPositionPlan's own boundary.
+  const totalQuantityUnits = toScaled(config.totalQuantity, scaleOf(config.totalQuantity));
+  if (totalQuantityUnits < BigInt(config.trancheCount)) {
+    throw new Error(
+      `generateCandidate: config.totalQuantity (${config.totalQuantity}) cannot be split into config.trancheCount (${String(config.trancheCount)}) tranches without at least one zero-quantity tranche`,
+    );
+  }
 }
 
 /** Pure: `Date.parse`/`new Date(ms)` read no clock when both arguments are already-known values (the same reasoning `@vigil/market`'s synthetic-feed.ts documents for its own timestamp arithmetic). */
@@ -246,17 +272,36 @@ export type GenerateCandidateParams = {
   readonly config: StrategyConfig;
 };
 
+/**
+ * Three outcomes, deliberately distinct:
+ * - `"candidate"` — a proposal exists.
+ * - `"no-candidate"` — a policy-vocabulary refusal: the quote itself is
+ *   unusable (fail closed), reported with a `REASON_CODES` member such as
+ *   `STALE_QUOTE`.
+ * - `"no-signal"` — the numeric rule ran against a perfectly good quote
+ *   and found nothing to propose at this price level (`StrategyNoSignalCode`,
+ *   never a `REASON_CODES` member — see `STRATEGY_NO_SIGNAL_CODES`). This is
+ *   a valid TASK-12 output ("WAIT, HOLD, AVOID, and no notification are
+ *   valid outputs"), not a rejection.
+ */
 export type GenerateCandidateResult =
   | { readonly outcome: "candidate"; readonly candidate: Candidate }
-  | { readonly outcome: "no-candidate"; readonly reasonCode: ReasonCode; readonly detail: string };
+  | { readonly outcome: "no-candidate"; readonly reasonCode: ReasonCode; readonly detail: string }
+  | { readonly outcome: "no-signal"; readonly code: StrategyNoSignalCode; readonly detail: string };
 
 /**
  * Generates one `BUY` candidate with a staged position plan from a quote,
- * or refuses with a reason code. Never throws on schema-legal `quote`
- * input — a stale or corrupt quote fails closed through
+ * finds no signal at the current price level, or refuses with a reason
+ * code. Never throws on schema-legal `quote` OR `config` + market-data
+ * combination: a stale or corrupt quote fails closed through
  * `evaluateQuoteFreshness`'s own `STALE_QUOTE` (docs/testing.md
- * "Quote/book is stale or corrupt") — and `config` is validated as a
- * programmer-error guard, not a diagnostic path.
+ * "Quote/book is stale or corrupt"), and a low-enough ask that the
+ * configured offsets would drive the invalidation price non-positive
+ * degrades to `"no-signal"` (docs/resilience.md §4: schema-legal input
+ * never throws — that ask is perfectly schema-legal market data, so this
+ * is not a programmer-error case). Only `config` itself being internally
+ * inconsistent (`assertValidStrategyConfig`) throws, as a deploy-time
+ * programmer-error guard.
  */
 export function generateCandidate(params: GenerateCandidateParams): GenerateCandidateResult {
   assertValidStrategyConfig(params.config);
@@ -273,15 +318,19 @@ export function generateCandidate(params: GenerateCandidateParams): GenerateCand
   const min = subtractDecimal(max, config.zoneWidth);
   const invalidationPrice = subtractDecimal(min, config.invalidationOffset);
 
-  // The ask price is schema-legal market data; a non-positive computed
-  // zone means this StrategyConfig is misconfigured for the current
-  // price level (e.g. pullback + zoneWidth + invalidationOffset exceeds
-  // the ask), not a defect in the quote — a config/programmer-error guard,
-  // same posture as assertValidStrategyConfig above.
+  // The ask price is schema-legal market data — a perfectly ordinary cheap
+  // quote is reachable here, e.g. ask "5.00" against the default config's
+  // offsets. A non-positive computed zone means the rule has nothing to
+  // propose at this price level: never a thrown error (that would violate
+  // docs/resilience.md §4's "schema-legal input never throws" on data,
+  // not config), and never a policy-vocabulary `no-candidate` refusal
+  // either, since nothing here is being rejected — it is `"no-signal"`.
   if (compareDecimal(invalidationPrice, ZERO) <= 0) {
-    throw new Error(
-      `generateCandidate: config produces a non-positive invalidationPrice (${invalidationPrice}) against ask ${quote.askPrice}; pullback/zoneWidth/invalidationOffset are too large for this price level`,
-    );
+    return {
+      outcome: "no-signal",
+      code: "PRICE_LEVEL_BELOW_RULE_RANGE",
+      detail: `ask ${quote.askPrice} is too low for this rule's offsets (pullback ${config.pullback}, zoneWidth ${config.zoneWidth}, invalidationOffset ${config.invalidationOffset}): the computed invalidation price would be non-positive`,
+    };
   }
 
   const positionPlan = buildPositionPlan({ totalQuantity: config.totalQuantity, trancheCount: config.trancheCount, entryZone: { min, max } });
@@ -324,5 +373,5 @@ export function generateCandidate(params: GenerateCandidateParams): GenerateCand
     positionPlan,
   });
 
-  return { outcome: "candidate", candidate: freezeCandidate(candidate) };
+  return { outcome: "candidate", candidate };
 }

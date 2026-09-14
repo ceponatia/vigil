@@ -14,18 +14,22 @@ import { compareDecimal, fromScaled, scaleOf, toScaled } from "./scaled-decimal"
  * proposed, never a rounded approximation that drifts from it.
  */
 
-export const trancheSchema = z.object({
-  index: z.number().int().nonnegative(),
-  quantity: decimalStringSchema,
-  triggerPrice: decimalStringSchema,
-});
+export const trancheSchema = z
+  .object({
+    index: z.number().int().nonnegative(),
+    quantity: decimalStringSchema,
+    triggerPrice: decimalStringSchema,
+  })
+  .readonly();
 
 export type Tranche = z.infer<typeof trancheSchema>;
 
-export const positionPlanSchema = z.object({
-  totalQuantity: decimalStringSchema,
-  tranches: z.array(trancheSchema).min(1),
-});
+export const positionPlanSchema = z
+  .object({
+    totalQuantity: decimalStringSchema,
+    tranches: z.array(trancheSchema).min(1).readonly(),
+  })
+  .readonly();
 
 export type PositionPlan = z.infer<typeof positionPlanSchema>;
 
@@ -37,11 +41,13 @@ export type BuildPositionPlanParams = {
 
 /**
  * Splits `totalQuantity` into `trancheCount` tranches whose quantities
- * sum exactly to `totalQuantity`, each triggered at a distinct price
- * spread through `entryZone` — the first tranche (index 0) at the top of
- * the zone (`max`, the first sign of a pullback), the last at the bottom
+ * sum exactly to `totalQuantity`, each triggered at a price spread
+ * through `entryZone` — the first tranche (index 0) at the top of the
+ * zone (`max`, the first sign of a pullback), the last at the bottom
  * (`min`, the deepest add) — and every trigger price inside the closed
- * interval `[min, max]`.
+ * interval `[min, max]`. Trigger prices are not guaranteed distinct: when
+ * the zone's span is small relative to `trancheCount`, integer-division
+ * spacing can place two or more tranches at the same rendered price.
  *
  * `trancheCount` and `entryZone` are `StrategyConfig`/generator-derived
  * values, never untrusted external input, so an invalid `trancheCount`

@@ -3,6 +3,7 @@ import { decimalStringSchema } from "@vigil/contracts";
 import type { DecimalString } from "@vigil/contracts";
 
 import { buildPositionPlan } from "./position-plan";
+import type { PositionPlan, Tranche } from "./position-plan";
 import { compareDecimal, fromScaled, scaleOf, toScaled } from "./scaled-decimal";
 
 const d = (value: string): DecimalString => decimalStringSchema.parse(value);
@@ -11,6 +12,24 @@ function sumQuantities(tranches: ReadonlyArray<{ readonly quantity: DecimalStrin
   const scale = Math.max(...tranches.map((tranche) => scaleOf(tranche.quantity)), 0);
   const totalUnits = tranches.reduce((sum, tranche) => sum + toScaled(tranche.quantity, scale), 0n);
   return fromScaled(totalUnits, scale);
+}
+
+/**
+ * `plan.tranches[index]` is typed `Tranche | undefined` under this
+ * project's `noUncheckedIndexedAccess` — a real possibility if a test
+ * asks for an index a plan doesn't have. Rather than a `!` non-null
+ * assertion (banned everywhere by `@typescript-eslint/no-non-null-
+ * assertion`, no test exemption, and `pnpm lint` runs `--max-warnings 0`)
+ * or `?? d("0")` (which would silently turn a missing tranche into a
+ * fabricated zero-quantity one and let the assertion below it pass for
+ * the wrong reason), this fails the test immediately with a clear cause.
+ */
+function trancheAt(plan: PositionPlan, index: number): Tranche {
+  const tranche = plan.tranches[index];
+  if (tranche === undefined) {
+    throw new Error(`test setup failed: plan has no tranche at index ${String(index)} (length ${String(plan.tranches.length)})`);
+  }
+  return tranche;
 }
 
 // Kills the "tranches drift from the total" bug class: a plan built with
@@ -47,8 +66,8 @@ describe("buildPositionPlan — quantities always sum exactly to totalQuantity",
 describe("buildPositionPlan — trigger prices always land inside the entry zone", () => {
   it("index 0 triggers at the zone's max, the last index at the zone's min, for a multi-tranche plan", () => {
     const plan = buildPositionPlan({ totalQuantity: d("3.0000"), trancheCount: 3, entryZone: { min: d("245.10"), max: d("248.10") } });
-    expect(compareDecimal(plan.tranches[0]!.triggerPrice, d("248.10"))).toBe(0);
-    expect(compareDecimal(plan.tranches[2]!.triggerPrice, d("245.10"))).toBe(0);
+    expect(compareDecimal(trancheAt(plan, 0).triggerPrice, d("248.10"))).toBe(0);
+    expect(compareDecimal(trancheAt(plan, 2).triggerPrice, d("245.10"))).toBe(0);
   });
 
   it("every trigger price is inside the closed interval [min, max], for a variety of tranche counts", () => {
@@ -65,8 +84,8 @@ describe("buildPositionPlan — trigger prices always land inside the entry zone
   it("a single-tranche plan triggers at the zone's max and carries the whole quantity", () => {
     const plan = buildPositionPlan({ totalQuantity: d("2.5000"), trancheCount: 1, entryZone: { min: d("10"), max: d("12") } });
     expect(plan.tranches).toHaveLength(1);
-    expect(compareDecimal(plan.tranches[0]!.triggerPrice, d("12"))).toBe(0);
-    expect(compareDecimal(plan.tranches[0]!.quantity, d("2.5000"))).toBe(0);
+    expect(compareDecimal(trancheAt(plan, 0).triggerPrice, d("12"))).toBe(0);
+    expect(compareDecimal(trancheAt(plan, 0).quantity, d("2.5000"))).toBe(0);
   });
 });
 

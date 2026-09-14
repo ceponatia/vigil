@@ -54,7 +54,6 @@ export type EvaluateEntryParams = {
 };
 
 type EvaluationInputs = {
-  readonly quoteAcquiredAtForId: IsoUtcTimestamp;
   readonly quoteAcquiredAt: IsoUtcTimestamp | null;
   readonly outcome: CandidateOutcome;
   readonly reasonCode: ReasonCode | null;
@@ -62,19 +61,32 @@ type EvaluationInputs = {
   readonly executablePrice: DecimalString | null;
 };
 
-function buildEvaluation(candidate: Candidate, evaluatedAt: IsoUtcTimestamp, inputs: EvaluationInputs): EntryEvaluation {
-  // evaluationId/idempotencyKey are deterministic, like candidate.ts's own
-  // ids — this package reads no clock and calls no random-id generator, so
-  // there is no other source of an id to derive from. When the quote
-  // itself never validated (BLOCKED/STALE_QUOTE), its acquisition time
-  // cannot be trusted either, so `now` stands in as the id input instead
-  // (documented on `quoteAcquiredAtForId`); the reported `quoteAcquiredAt`
-  // field stays `null` in that case rather than reporting an unvalidated
-  // value as if it were real provenance.
-  const idParts = [candidate.candidateId, inputs.quoteAcquiredAtForId];
+/**
+ * An evaluation event is `(candidate, quote, evaluatedAt)` — not just
+ * `(candidate, quote)` — so `evaluatedAt` is always part of the id
+ * derivation for an executable quote. Without it, the same quote
+ * evaluated on either side of `expiresAt` (ENTRY_ELIGIBLE, then MISSED
+ * once expired) would derive the identical `idempotencyKey`, and the
+ * db's unique constraint would silently drop the second (blocking)
+ * record — a fail-open bug, not a merely-cosmetic id collision.
+ *
+ * The `BLOCKED` path uses distinct tags ("evaluation-blocked" /
+ * "evaluation-blocked-idempotency") over `[candidateId, evaluatedAt]`
+ * rather than reusing the executable-quote tags with `now` substituted
+ * for `quoteAcquiredAt`: a substitution would let a `BLOCKED` evaluation
+ * at instant T collide with a genuine executable-quote evaluation whose
+ * `quoteAcquiredAt` happens to equal that same T. Distinct tags make that
+ * collision structurally impossible rather than merely unlikely.
+ */
+function buildEvaluation(candidate: Candidate, evaluatedAt: IsoUtcTimestamp, quoteAcquiredAtForId: IsoUtcTimestamp | null, inputs: EvaluationInputs): EntryEvaluation {
+  const idParts =
+    quoteAcquiredAtForId === null
+      ? { tag: "evaluation-blocked", idempotencyTag: "evaluation-blocked-idempotency", parts: [candidate.candidateId, evaluatedAt] }
+      : { tag: "evaluation", idempotencyTag: "evaluation-idempotency", parts: [candidate.candidateId, quoteAcquiredAtForId, evaluatedAt] };
+
   const evaluation: EntryEvaluationRecord = Object.freeze({
-    evaluationId: deriveDeterministicId("evaluation", idParts),
-    idempotencyKey: deriveDeterministicId("evaluation-idempotency", idParts),
+    evaluationId: deriveDeterministicId(idParts.tag, idParts.parts),
+    idempotencyKey: deriveDeterministicId(idParts.idempotencyTag, idParts.parts),
     candidateId: candidate.candidateId,
     outcome: inputs.outcome,
     reasonCode: inputs.reasonCode,
@@ -91,7 +103,8 @@ function buildEvaluation(candidate: Candidate, evaluatedAt: IsoUtcTimestamp, inp
  * entry zone. Decision table, evaluated in this exact order (the first
  * matching row wins):
  *
- * 1. quote not executable → `BLOCKED`, `STALE_QUOTE`
+ * 1. quote not executable, or not for this candidate's instrument →
+ *    `BLOCKED`, `STALE_QUOTE`
  * 2. `now` after `expiresAt` → `MISSED`, `RESEARCH_EXPIRED`
  * 3. ask below `invalidationPrice` → `MISSED`, `THESIS_INVALIDATED`
  * 4. ask inside `[min, max]` → `ENTRY_ELIGIBLE` (not itself a BUY — sizing
@@ -107,8 +120,7 @@ export function evaluateEntry(params: EvaluateEntryParams): EntryEvaluation {
   const freshness = evaluateQuoteFreshness({ raw: params.quote, now: params.now, maxAgeMs: params.maxQuoteAgeMs });
 
   if (!freshness.executable) {
-    return buildEvaluation(params.candidate, params.now, {
-      quoteAcquiredAtForId: params.now,
+    return buildEvaluation(params.candidate, params.now, null, {
       quoteAcquiredAt: null,
       outcome: "BLOCKED",
       reasonCode: freshness.reasonCode,
@@ -118,18 +130,33 @@ export function evaluateEntry(params: EvaluateEntryParams): EntryEvaluation {
   }
 
   const quote = freshness.quote;
-  const ask = quote.askPrice;
   const { candidate } = params;
+
+  // A schema-legal quote for a DIFFERENT instrument is not evidence about
+  // this candidate's price at all — classifying it against this zone
+  // would be nonsense regardless of the number. docs/policy.md's registry
+  // defines no separate corruption code for "wrong instrument", so this
+  // follows packages/market/src/freshness.ts's own precedent (STALE_QUOTE
+  // covers both "stale" and "corrupt/unusable"): the quote is simply
+  // unusable for this decision.
+  if (quote.instrumentId !== candidate.instrumentId) {
+    return buildEvaluation(candidate, params.now, null, {
+      quoteAcquiredAt: null,
+      outcome: "BLOCKED",
+      reasonCode: "STALE_QUOTE",
+      detail: `quote is for instrument "${quote.instrumentId}", not this candidate's instrument "${candidate.instrumentId}"`,
+      executablePrice: null,
+    });
+  }
+
+  const ask = quote.askPrice;
   const { entryZone } = candidate;
   const extendedMax = addDecimal(entryZone.max, candidate.allowedExtension);
-  const shared = {
-    quoteAcquiredAtForId: quote.timestamps.quoteAcquiredAt,
-    quoteAcquiredAt: quote.timestamps.quoteAcquiredAt,
-    executablePrice: ask,
-  };
+  const quoteAcquiredAt = quote.timestamps.quoteAcquiredAt;
+  const shared = { quoteAcquiredAt, executablePrice: ask };
 
   if (ageMs(candidate.expiresAt, params.now) > 0) {
-    return buildEvaluation(candidate, params.now, {
+    return buildEvaluation(candidate, params.now, quoteAcquiredAt, {
       ...shared,
       outcome: "MISSED",
       reasonCode: "RESEARCH_EXPIRED",
@@ -138,7 +165,7 @@ export function evaluateEntry(params: EvaluateEntryParams): EntryEvaluation {
   }
 
   if (compareDecimal(ask, candidate.invalidationPrice) < 0) {
-    return buildEvaluation(candidate, params.now, {
+    return buildEvaluation(candidate, params.now, quoteAcquiredAt, {
       ...shared,
       outcome: "MISSED",
       reasonCode: "THESIS_INVALIDATED",
@@ -147,7 +174,7 @@ export function evaluateEntry(params: EvaluateEntryParams): EntryEvaluation {
   }
 
   if (compareDecimal(ask, entryZone.min) >= 0 && compareDecimal(ask, entryZone.max) <= 0) {
-    return buildEvaluation(candidate, params.now, {
+    return buildEvaluation(candidate, params.now, quoteAcquiredAt, {
       ...shared,
       outcome: "ENTRY_ELIGIBLE",
       reasonCode: null,
@@ -156,7 +183,7 @@ export function evaluateEntry(params: EvaluateEntryParams): EntryEvaluation {
   }
 
   if (compareDecimal(ask, entryZone.max) > 0 && compareDecimal(ask, extendedMax) <= 0) {
-    return buildEvaluation(candidate, params.now, {
+    return buildEvaluation(candidate, params.now, quoteAcquiredAt, {
       ...shared,
       outcome: "WAIT",
       reasonCode: "OUTSIDE_ENTRY_ZONE",
@@ -165,7 +192,7 @@ export function evaluateEntry(params: EvaluateEntryParams): EntryEvaluation {
   }
 
   if (compareDecimal(ask, extendedMax) > 0) {
-    return buildEvaluation(candidate, params.now, {
+    return buildEvaluation(candidate, params.now, quoteAcquiredAt, {
       ...shared,
       outcome: "MISSED",
       reasonCode: "OUTSIDE_ENTRY_ZONE",
@@ -174,7 +201,7 @@ export function evaluateEntry(params: EvaluateEntryParams): EntryEvaluation {
   }
 
   // The remaining region is `invalidationPrice <= ask < min`.
-  return buildEvaluation(candidate, params.now, {
+  return buildEvaluation(candidate, params.now, quoteAcquiredAt, {
     ...shared,
     outcome: "WAIT",
     reasonCode: "OUTSIDE_ENTRY_ZONE",

@@ -1,10 +1,11 @@
 export {
   DEFAULT_STRATEGY_CONFIG,
   HORIZONS,
+  STRATEGY_NO_SIGNAL_CODES,
   candidateSchema,
   generateCandidate,
 } from "./candidate";
-export type { Candidate, GenerateCandidateParams, GenerateCandidateResult, Horizon, StrategyConfig } from "./candidate";
+export type { Candidate, GenerateCandidateParams, GenerateCandidateResult, Horizon, StrategyConfig, StrategyNoSignalCode } from "./candidate";
 
 export { buildPositionPlan, positionPlanSchema, trancheSchema } from "./position-plan";
 export type { BuildPositionPlanParams, PositionPlan, Tranche } from "./position-plan";
