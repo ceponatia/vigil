@@ -67,7 +67,9 @@ export function deriveCandidateValidity(candidate: StoredCandidate, now: IsoUtcT
     };
   }
 
-  const expiresInMs = -ageMs(expiresAt.data, now);
+  // `ageMs(now, expiresAt)` is expiresAt − now, so the boundary instant is
+  // +0 rather than the −0 a negated `ageMs(expiresAt, now)` would produce.
+  const expiresInMs = ageMs(now, expiresAt.data);
   if (expiresInMs <= 0) {
     return {
       state: "EXPIRED",
