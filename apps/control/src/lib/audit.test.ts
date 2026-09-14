@@ -3,6 +3,12 @@ import { describe, expect, it } from "vitest";
 
 import { latestEntries } from "./audit";
 
+// The defect this file kills: an audit window that shows the oldest
+// entries instead of the newest — `loadJournalEntries` returns the durable
+// replay order, oldest first, so a missing reverse leaves an operator
+// reading the first 50 things that ever happened — or that returns the
+// whole journal for `limit` 0 through `Array.prototype.slice(-0)`.
+
 function entry(entryId: string): StoreEntry {
   return {
     entryId,

@@ -4,6 +4,14 @@ import { describe, expect, it } from "vitest";
 
 import { deriveRuntimeHealth, HEARTBEAT_STALE_AFTER_MS, QUOTE_STALE_AFTER_MS } from "./health";
 
+// The defect this file kills: a runtime that has stopped — or whose clock
+// or heartbeat row is corrupt — reading as healthy on the dashboard
+// (docs/resilience.md §1 "Fail closed on financial authority": a stale
+// heartbeat or quote must be visibly represented, never silently hidden
+// behind a number that simply stopped moving). The staleness boundaries are
+// pinned exactly, because an off-by-one `>=` there is invisible in every
+// other case.
+
 const NOW = isoUtcTimestampSchema.parse("2024-06-01T12:00:00.000Z");
 
 function heartbeat(overrides: Partial<StoredHeartbeat> = {}): StoredHeartbeat {
@@ -70,6 +78,18 @@ describe("deriveRuntimeHealth", () => {
     expect(result.instances[0]?.heartbeatAgeMs).toBeNull();
   });
 
+  it("reports NONE for a quote timestamp that is corrupt, never OK on an unreadable age", () => {
+    const result = deriveRuntimeHealth({
+      heartbeats: [heartbeat({ lastQuoteAcquiredAt: "not-a-timestamp" })],
+      now: NOW,
+      heartbeatStaleAfterMs: HEARTBEAT_STALE_AFTER_MS,
+      quoteStaleAfterMs: QUOTE_STALE_AFTER_MS,
+      dashboardMode: "PAPER",
+    });
+    expect(result.instances[0]?.quote).toBe("NONE");
+    expect(result.instances[0]?.quoteAgeMs).toBeNull();
+  });
+
   it("reads a future-dated heartbeat as STALE rather than OK forever, and says why", () => {
     // packages/contracts/src/timestamps.ts: a negative age is a corruption
     // signal, not "very fresh" — a clock skew or a corrupt row must not
@@ -97,6 +117,29 @@ describe("deriveRuntimeHealth", () => {
     expect(result.instances[0]?.heartbeat).toBe("OK");
     expect(result.instances[0]?.quote).toBe("STALE");
     expect(result.instances[0]?.detail).toContain("future-dated");
+  });
+
+  it("keeps the heartbeat row's own detail alongside a future-dated note instead of one replacing the other", () => {
+    const result = deriveRuntimeHealth({
+      heartbeats: [heartbeat({ detail: "restarted after a deploy", observedAt: "2024-06-01T12:00:05.000Z" })],
+      now: NOW,
+      heartbeatStaleAfterMs: HEARTBEAT_STALE_AFTER_MS,
+      quoteStaleAfterMs: QUOTE_STALE_AFTER_MS,
+      dashboardMode: "PAPER",
+    });
+    expect(result.instances[0]?.detail).toContain("restarted after a deploy");
+    expect(result.instances[0]?.detail).toContain("future-dated");
+  });
+
+  it("passes a stored detail through unchanged when there is nothing to note about the reading", () => {
+    const result = deriveRuntimeHealth({
+      heartbeats: [heartbeat({ detail: "restarted after a deploy" })],
+      now: NOW,
+      heartbeatStaleAfterMs: HEARTBEAT_STALE_AFTER_MS,
+      quoteStaleAfterMs: QUOTE_STALE_AFTER_MS,
+      dashboardMode: "PAPER",
+    });
+    expect(result.instances[0]?.detail).toBe("restarted after a deploy");
   });
 
   it("pins the heartbeat staleness threshold: exactly at it is OK, one ms past is STALE", () => {
@@ -137,6 +180,21 @@ describe("deriveRuntimeHealth", () => {
       dashboardMode: "PAPER",
     });
     expect(pastThreshold.instances[0]?.quote).toBe("STALE");
+  });
+
+  it("reads every instance on its own row, so one live runtime cannot mask a dead one", () => {
+    const result = deriveRuntimeHealth({
+      heartbeats: [
+        heartbeat({ heartbeatId: "hb-1", instanceId: "instance-1" }),
+        heartbeat({ heartbeatId: "hb-2", instanceId: "instance-2", observedAt: "2024-06-01T11:59:00.000Z" }),
+      ],
+      now: NOW,
+      heartbeatStaleAfterMs: HEARTBEAT_STALE_AFTER_MS,
+      quoteStaleAfterMs: QUOTE_STALE_AFTER_MS,
+      dashboardMode: "PAPER",
+    });
+    expect(result.instances.map((instance) => instance.instanceId)).toStrictEqual(["instance-1", "instance-2"]);
+    expect(result.instances.map((instance) => instance.heartbeat)).toStrictEqual(["OK", "STALE"]);
   });
 
   it("reports empty instances for no heartbeats, never a fabricated row", () => {

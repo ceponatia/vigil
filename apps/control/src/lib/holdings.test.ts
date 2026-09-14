@@ -3,6 +3,12 @@ import { describe, expect, it } from "vitest";
 
 import { groupHoldings } from "./holdings";
 
+// The defect this file kills: a Holdings section built on the wrong net —
+// a sign error posting `credit − debit`, a state total that silently drops
+// one of an asset's holdings states, or a non-`holdings` account family
+// counted as if the portfolio owned it. Every amount stays `bigint`; no
+// case rounds through a float (docs/resilience.md, product rule 5).
+
 const ASSET_A = "chain:1|contract|0xaaa|mainnet";
 const ASSET_B = "chain:1|contract|0xbbb|mainnet";
 

@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { sortByExpiry } from "./reservations";
 
+// The defect this file kills: a Reservations section that buries the
+// reservation closest to expiring — the one an operator needs to see
+// first — or that sorts the caller's array in place and reorders a list
+// something else is still reading.
+
 describe("sortByExpiry", () => {
   it("orders ascending by expiresAt, soonest first", () => {
     const items = [
