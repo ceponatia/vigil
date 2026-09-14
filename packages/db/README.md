@@ -75,6 +75,19 @@ as later slices need to.
   `DELETE` against a posted entry or posting; a correction is a reversing
   entry. `ledger_balances` is a projection of the journal and is updated in
   place.
+- **Candidates are append-only.** The same kind of trigger guards
+  `candidates` and `candidate_tranches`: a candidate is the record of what
+  was believed *before* the outcome was known, so a later judgement is an
+  appended `candidate_evaluations` row and never an edit — which is what
+  keeps a missed entry a MISSED rather than a rewritten BUY.
+- **Decision prices and quantities are decimal text.** A candidate's entry
+  zone, tranche quantity, or observed bid records what was decided rather
+  than money that moved: nothing in this package adds them up, and no
+  `asset_scales` row is needed to interpret them. They are `text` columns
+  constrained to `@vigil/contracts`' decimal-string shape without its sign —
+  no exponent, no leading zeros, no trailing bare `.`, nothing negative — so
+  a float artifact has nowhere to land. Base units and `asset_scale` stay
+  with the journal, where the arithmetic happens.
 - **Vocabularies are Postgres enums**, so a column cannot hold a holdings
   state, account family, entry kind, or reservation state that does not
   exist.
@@ -111,7 +124,18 @@ as later slices need to.
 
 ## Built modules
 
-`journal` (journal entries, postings, and the balance projection) and
-`intents` (reservations) exist, with the baseline migration under
-`drizzle/`. The remaining record families above are created by the slice
-that needs them.
+- `journal` — journal entries, postings, and the balance projection.
+- `intents` — reservations.
+- `decisions` — candidates, their staged position-plan tranches
+  (`candidate_tranches`), and the evaluations that later judge them
+  (`candidate_evaluations`, whose `NOT NULL` foreign key is what makes an
+  outcome without its candidate unrepresentable). An evaluation carries no
+  correlation id or provenance columns of its own: it inherits both through
+  that foreign key, which cannot be null, so there is one place a judgement's
+  provenance is written and no second copy to disagree with it. Theses and
+  research proposals arrive with the slice that produces them.
+- `ops` — heartbeats. Incidents, permission audits, and budgets arrive with
+  the slices that own them.
+
+Their migrations are under `drizzle/`. The remaining record families above
+are created by the slice that needs them.
