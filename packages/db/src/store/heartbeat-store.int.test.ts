@@ -2,7 +2,8 @@ import { OPERATING_MODES } from "@vigil/contracts";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { loadLatestHeartbeats, recordHeartbeat } from "./heartbeat-store";
-import { openDecisionTestDb, storeHeartbeat } from "../test-support/decision-fixtures";
+import { storeHeartbeat } from "../test-support/decision-fixtures";
+import { openLedgerTestDb } from "../test-support/journal-fixtures";
 
 // The defects this file kills, all of them about a dashboard that reports a
 // runtime as healthy when it is not:
@@ -18,7 +19,7 @@ import { openDecisionTestDb, storeHeartbeat } from "../test-support/decision-fix
 // upsert that lands a redelivery on the existing row, and DISTINCT ON — none
 // of which an in-memory double would be answering for.
 
-const { db, close, reset } = openDecisionTestDb("vigil-heartbeat-store-test");
+const { db, close, reset } = openLedgerTestDb("vigil-heartbeat-store-test");
 
 afterAll(close);
 beforeEach(reset);
@@ -70,6 +71,42 @@ describe("recordHeartbeat", () => {
       expect(redelivered.heartbeatId).toBe(first.heartbeatId);
     }
     expect(await loadLatestHeartbeats(db)).toHaveLength(1);
+  });
+
+  it("keeps the newer payload when one observation is re-emitted with a changed mode, quote and detail — catches an upsert that holds the conflict row untouched and still answers `recorded`, which would leave a dashboard showing a mode the runtime has since left while the store reports the write succeeded", async () => {
+    const announced = await recordHeartbeat(db, storeHeartbeat({ detail: "starting up" }));
+    const corrected = await recordHeartbeat(
+      db,
+      storeHeartbeat({
+        operatingMode: "PAUSED",
+        recordedAt: "2026-01-02T03:04:09.000Z",
+        lastQuoteAcquiredAt: null,
+        detail: "paused by the operator",
+      }),
+    );
+
+    expect(announced.outcome).toBe("recorded");
+    expect(corrected.outcome).toBe("recorded");
+    if (announced.outcome === "recorded" && corrected.outcome === "recorded") {
+      expect(corrected.heartbeatId).toBe(announced.heartbeatId);
+    }
+    const latest = await loadLatestHeartbeats(db);
+    expect(latest).toHaveLength(1);
+    expect(latest[0]?.operatingMode).toBe("PAUSED");
+    expect(latest[0]?.recordedAt).toBe("2026-01-02T03:04:09.000Z");
+    expect(latest[0]?.lastQuoteAcquiredAt).toBeNull();
+    expect(latest[0]?.detail).toBe("paused by the operator");
+  });
+
+  it("treats two spellings of one identity as one runtime and stores the trimmed name — catches an untrimmed process or instance defeating the natural key, where a single runtime appears twice on the dashboard and each copy is stale half the time", async () => {
+    expect((await recordHeartbeat(db, storeHeartbeat())).outcome).toBe("recorded");
+    const padded = await recordHeartbeat(db, storeHeartbeat({ process: "trading\n", instanceId: " instance-a " }));
+
+    expect(padded.outcome).toBe("recorded");
+    const latest = await loadLatestHeartbeats(db);
+    expect(latest).toHaveLength(1);
+    expect(latest[0]?.process).toBe("trading");
+    expect(latest[0]?.instanceId).toBe("instance-a");
   });
 });
 

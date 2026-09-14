@@ -129,8 +129,11 @@ as later slices need to.
 - `decisions` — candidates, their staged position-plan tranches
   (`candidate_tranches`), and the evaluations that later judge them
   (`candidate_evaluations`, whose `NOT NULL` foreign key is what makes an
-  outcome without its candidate unrepresentable). Theses and research
-  proposals arrive with the slice that produces them.
+  outcome without its candidate unrepresentable). An evaluation carries no
+  correlation id or provenance columns of its own: it inherits both through
+  that foreign key, which cannot be null, so there is one place a judgement's
+  provenance is written and no second copy to disagree with it. Theses and
+  research proposals arrive with the slice that produces them.
 - `ops` — heartbeats. Incidents, permission audits, and budgets arrive with
   the slices that own them.
 

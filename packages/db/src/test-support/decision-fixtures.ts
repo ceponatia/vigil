@@ -1,15 +1,14 @@
-import { sql } from "drizzle-orm";
-
-import { candidateEvaluations, candidates, candidateTranches } from "../schema/decisions";
-import { heartbeats } from "../schema/ops";
 import type { StoreCandidate, StoreCandidateEvaluation } from "../store/decision-store";
 import type { StoreHeartbeat } from "../store/heartbeat-store";
-import { openLedgerTestDb, TEST_ASSET, TEST_OTHER_ASSET, TEST_PROVENANCE, type LedgerTestDb } from "./journal-fixtures";
+import { TEST_ASSET, TEST_OTHER_ASSET, TEST_PROVENANCE } from "./journal-fixtures";
 
 /**
- * Record builders and the database handle for the `decisions` and `ops`
- * integration suites. Never imported by production code and never exported
- * from `src/index.ts`.
+ * Record builders for the `decisions` and `ops` integration suites. Never
+ * imported by production code and never exported from `src/index.ts`.
+ *
+ * The database handle lives in `journal-fixtures.ts`: `openLedgerTestDb`
+ * owns the one truncate list for this package, and these tables were added
+ * to it rather than reset by a second list of their own.
  *
  * Identities are the synthetic ones `journal-fixtures.ts` already declares,
  * on chain `1337` — the id this codebase reserves for the synthetic test
@@ -89,32 +88,5 @@ export function storeHeartbeat(overrides: Partial<StoreHeartbeat> = {}): StoreHe
     lastQuoteAcquiredAt: "2026-01-02T03:04:04.000Z",
     detail: null,
     ...overrides,
-  };
-}
-
-/**
- * The shared handle, extended with the tables this slice adds.
- *
- * It wraps `openLedgerTestDb` rather than opening a second client of its
- * own: one truncate list that grows with the schema is the whole point of
- * that helper, and a drifting second copy is how a suite ends up asserting
- * against another suite's leftover rows. Children first, so the run works
- * with or without `cascade`.
- *
- * `TRUNCATE` does not fire row-level triggers, which is the only reason a
- * suite can reset a `candidates` table the application itself may never
- * delete from (`drizzle/0008_candidate_append_only_guard.sql`).
- */
-export function openDecisionTestDb(applicationName: string): LedgerTestDb {
-  const ledger = openLedgerTestDb(applicationName);
-  return {
-    db: ledger.db,
-    close: ledger.close,
-    reset: async () => {
-      await ledger.db.execute(
-        sql`truncate table ${candidateEvaluations}, ${candidateTranches}, ${candidates}, ${heartbeats} restart identity cascade`,
-      );
-      await ledger.reset();
-    },
   };
 }

@@ -2,7 +2,7 @@ import { REASON_CODES } from "@vigil/contracts";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { candidateEvaluations, candidates } from "../schema/decisions";
+import { candidateEvaluations, candidates, candidateTranches } from "../schema/decisions";
 import {
   loadCandidates,
   recordCandidate,
@@ -10,7 +10,8 @@ import {
   type StoreCandidateEvaluation,
 } from "./decision-store";
 import { postgresErrorCode, PG_RAISE_EXCEPTION } from "./pg-errors";
-import { openDecisionTestDb, storeCandidate, storeEvaluation } from "../test-support/decision-fixtures";
+import { storeCandidate, storeEvaluation } from "../test-support/decision-fixtures";
+import { openLedgerTestDb } from "../test-support/journal-fixtures";
 
 // The defects this file kills, all of them about what the opportunity
 // journal still says once the outcome is known:
@@ -29,7 +30,7 @@ import { openDecisionTestDb, storeCandidate, storeEvaluation } from "../test-sup
 // constraints, and the append-only trigger. An in-memory double would delete
 // these claims rather than move them.
 
-const { db, close, reset } = openDecisionTestDb("vigil-decision-store-test");
+const { db, close, reset } = openLedgerTestDb("vigil-decision-store-test");
 
 afterAll(close);
 beforeEach(reset);
@@ -130,21 +131,39 @@ describe("recordCandidate", () => {
     expect(await loadCandidates(db)).toEqual([]);
   });
 
-  it("rejects an UPDATE and a DELETE against a stored candidate and leaves it as written — catches a later slice rewriting the entry zone once the price has moved, which is how a missed entry becomes a BUY the application never made", async () => {
+  it("rejects an UPDATE and a DELETE against a stored candidate and against its tranches, leaving both as written — catches a later slice rewriting the entry zone or resizing a tranche once the price has moved, which is how a missed entry becomes a BUY the application never made; both of migration 0008's triggers are asserted, because a plan that can be rewritten is a rewritten plan even when its candidate is sealed", async () => {
     expect((await recordCandidate(db, storeCandidate("cand-sealed"))).outcome).toBe("recorded");
 
-    const updateFailure = await errorFrom(() =>
+    const candidateUpdate = await errorFrom(() =>
       db.execute(sql`update ${candidates} set entry_zone_max = '999.00' where candidate_id = 'cand-sealed'`),
     );
-    const deleteFailure = await errorFrom(() =>
+    const candidateDelete = await errorFrom(() =>
       db.execute(sql`delete from ${candidates} where candidate_id = 'cand-sealed'`),
     );
+    const trancheUpdate = await errorFrom(() =>
+      db.execute(sql`update ${candidateTranches} set quantity = '999' where candidate_id = 'cand-sealed'`),
+    );
+    const trancheDelete = await errorFrom(() =>
+      db.execute(sql`delete from ${candidateTranches} where candidate_id = 'cand-sealed'`),
+    );
 
-    expect(postgresErrorCode(updateFailure)).toBe(PG_RAISE_EXCEPTION);
-    expect(postgresErrorCode(deleteFailure)).toBe(PG_RAISE_EXCEPTION);
+    for (const failure of [candidateUpdate, candidateDelete, trancheUpdate, trancheDelete]) {
+      expect(postgresErrorCode(failure)).toBe(PG_RAISE_EXCEPTION);
+    }
     const stored = await loadCandidates(db);
     expect(stored).toHaveLength(1);
     expect(stored[0]?.entryZoneMax).toBe("104.00");
+    expect(stored[0]?.tranches.map((tranche) => tranche.quantity)).toEqual(["1.5", "2.5"]);
+  });
+
+  it("refuses a candidate that leaves an identity field blank and writes nothing — catches a blank correlation id satisfying NOT NULL and taking the one row every other unnamed candidate then collides with, after which no intent, attempt or outcome can be traced back to the decision that produced it", async () => {
+    const blankCorrelation = await recordCandidate(db, storeCandidate("cand-unnamed", { correlationId: "   " }));
+
+    expect(blankCorrelation.outcome).toBe("refused");
+    if (blankCorrelation.outcome === "refused") {
+      expect(blankCorrelation.code).toBe("EMPTY_IDENTITY");
+    }
+    expect(await loadCandidates(db)).toEqual([]);
   });
 });
 
@@ -231,7 +250,7 @@ describe("loadCandidates", () => {
     expect(stored.find((candidate) => candidate.candidateId === "cand-newer")?.latestEvaluation).toBeNull();
   });
 
-  it("round-trips every stored field as the producer supplied it — catches a timestamp read back at a different precision, a decimal reformatted on the way through, or an invalidation condition dropped, any of which makes a replay disagree with the decision it replays", async () => {
+  it("round-trips every stored field as the same value the producer supplied — catches a timestamp read back as a different instant, a decimal reformatted on the way through, or an invalidation condition dropped, any of which makes a replay disagree with the decision it replays. Spelling is not preserved and is not claimed: a timestamp comes back from `Date#toISOString`, so `…:05Z` returns as `…:05.000Z` — the same instant, written out one way", async () => {
     const candidate = storeCandidate("cand-roundtrip", {
       invalidationConditions: ["closes below the prior swing low", "funding turns negative for two sessions"],
     });

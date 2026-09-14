@@ -82,6 +82,15 @@ export const DECISION_STORE_DIAGNOSTIC_CODES = [
    * a candidate that was never persisted.
    */
   "DUPLICATE_RECORD",
+  /**
+   * A record does not name itself, its delivery, or what produced it. A
+   * blank id is not a missing column the database can catch — `''` satisfies
+   * `NOT NULL` and is a perfectly good primary key — so a candidate keyed on
+   * the empty string would take the one row that every other unnamed
+   * candidate then collides with. The same code name the heartbeat store
+   * uses for the same refusal.
+   */
+  "EMPTY_IDENTITY",
 ] as const;
 
 export type DecisionStoreDiagnosticCode = (typeof DECISION_STORE_DIAGNOSTIC_CODES)[number];
@@ -90,12 +99,14 @@ export type DecisionStoreDiagnosticCode = (typeof DECISION_STORE_DIAGNOSTIC_CODE
  * Derived from the Postgres enums rather than restated beside them: a
  * registry that is hand-copied next to the column it describes is a registry
  * that drifts from it, and the drift shows up as a write the database
- * refuses for a value the application believes in.
+ * refuses for a value the application believes in. `Readonly` gives the
+ * derived tuple the same shape an `as const` registry has, so a consumer
+ * cannot push a fifth outcome into the array every other consumer reads.
  */
-export const CANDIDATE_OUTCOMES = candidateOutcomeEnum.enumValues;
+export const CANDIDATE_OUTCOMES: Readonly<typeof candidateOutcomeEnum.enumValues> = candidateOutcomeEnum.enumValues;
 export type CandidateOutcome = (typeof CANDIDATE_OUTCOMES)[number];
 
-export const CANDIDATE_HORIZONS = candidateHorizonEnum.enumValues;
+export const CANDIDATE_HORIZONS: Readonly<typeof candidateHorizonEnum.enumValues> = candidateHorizonEnum.enumValues;
 export type CandidateHorizon = (typeof CANDIDATE_HORIZONS)[number];
 
 export type StoreTranche = {
@@ -227,6 +238,20 @@ function namesOf(fields: ReadonlyArray<readonly [string, boolean]>): string {
     .join(", ");
 }
 
+/**
+ * The identity fields left blank, named. Blank is trimmed-empty, not just
+ * `""`: a whitespace id reads as absent to every human looking at the
+ * record and as present to every constraint.
+ *
+ * The value is refused, never trimmed into shape. These are keys the
+ * producer will look the record back up by, and a store that silently
+ * returned a different id than it was handed would be a worse bug than the
+ * one it fixed.
+ */
+function blankFields(fields: ReadonlyArray<readonly [string, string]>): string {
+  return namesOf(fields.map(([name, value]): readonly [string, boolean] => [name, value.trim() !== ""]));
+}
+
 type CandidateInstants = {
   readonly expiresAt: Date;
   readonly quoteAcquiredAt: Date;
@@ -243,6 +268,21 @@ type CandidatePreflight = { readonly outcome: "ok"; readonly instants: Candidate
  * all.
  */
 function preflightCandidate(candidate: StoreCandidate): CandidatePreflight {
+  const blank = blankFields([
+    ["candidateId", candidate.candidateId],
+    ["idempotencyKey", candidate.idempotencyKey],
+    ["correlationId", candidate.correlationId],
+    ["strategyId", candidate.strategyId],
+    ["benchmarkId", candidate.benchmarkId],
+    ["action", candidate.action],
+  ]);
+  if (blank !== "") {
+    return refuse(
+      "EMPTY_IDENTITY",
+      `a candidate names itself, its delivery, its strategy, its benchmark and its action; ${blank} is blank`,
+    );
+  }
+
   const expiresAt = parseIsoInstant(candidate.expiresAt);
   const quoteAcquiredAt = parseIsoInstant(candidate.marketSnapshot.quoteAcquiredAt);
   const quoteIngestedAt = parseIsoInstant(candidate.marketSnapshot.ingestedAt);
@@ -430,6 +470,14 @@ export async function recordCandidateEvaluation(
   db: VigilDatabase,
   evaluation: StoreCandidateEvaluation,
 ): Promise<RecordEvaluationResult> {
+  const blank = blankFields([
+    ["evaluationId", evaluation.evaluationId],
+    ["idempotencyKey", evaluation.idempotencyKey],
+  ]);
+  if (blank !== "") {
+    return refuse("EMPTY_IDENTITY", `an evaluation names itself and its delivery; ${blank} is blank`);
+  }
+
   const evaluatedAt = parseIsoInstant(evaluation.evaluatedAt);
   const recordedAt = parseIsoInstant(evaluation.recordedAt);
   const quoteAcquiredAt =

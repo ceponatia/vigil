@@ -58,15 +58,25 @@ export type RecordHeartbeatResult =
  * Record one heartbeat.
  *
  * A redelivery — the same process, instance, and observed instant — is the
- * same observation, so it comes back as `recorded` carrying the id of the
- * row that already holds it, and no second row is written. There is no
- * `duplicate` outcome to report: nothing downstream spends or authorizes
- * anything on the strength of a heartbeat, so "this liveness is already
- * recorded" and "this liveness is now recorded" are the same answer to the
- * caller, and the unique natural key is what keeps it to one row.
+ * same observation seen again, so it lands on the row that already holds it
+ * and updates that row's payload: the last write for one observation wins.
+ * It comes back as `recorded` carrying the existing id, and no second row is
+ * written. There is no `duplicate` outcome to report: nothing downstream
+ * spends or authorizes anything on the strength of a heartbeat, so "this
+ * liveness is already recorded" and "this liveness is now recorded" are the
+ * same answer to the caller, and the unique natural key is what keeps it to
+ * one row.
  */
 export async function recordHeartbeat(db: VigilDatabase, heartbeat: StoreHeartbeat): Promise<RecordHeartbeatResult> {
-  if (heartbeat.process.trim() === "" || heartbeat.instanceId.trim() === "") {
+  // Trimmed once, here, and stored trimmed. The natural key is what makes
+  // "one runtime, one liveness row" true, and an untrimmed value defeats it:
+  // `"trading\n"` and `"trading"` are the same runtime to every reader and
+  // two different runtimes to a unique index, so a dashboard would show one
+  // process twice and each of them stale half the time.
+  const processName = heartbeat.process.trim();
+  const instanceId = heartbeat.instanceId.trim();
+
+  if (processName === "" || instanceId === "") {
     return {
       outcome: "refused",
       code: "EMPTY_IDENTITY",
@@ -78,7 +88,7 @@ export async function recordHeartbeat(db: VigilDatabase, heartbeat: StoreHeartbe
     return {
       outcome: "refused",
       code: "INVALID_OPERATING_MODE",
-      detail: `${heartbeat.process}/${heartbeat.instanceId} reports operating mode ${heartbeat.operatingMode}, which is not in the OPERATING_MODES registry (docs/policy.md)`,
+      detail: `${processName}/${instanceId} reports operating mode ${heartbeat.operatingMode}, which is not in the OPERATING_MODES registry (docs/policy.md)`,
     };
   }
 
@@ -95,20 +105,27 @@ export async function recordHeartbeat(db: VigilDatabase, heartbeat: StoreHeartbe
     return {
       outcome: "refused",
       code: "INVALID_TIMESTAMP",
-      detail: `${heartbeat.process}/${heartbeat.instanceId} carries a timestamp that is not an ISO-8601 UTC instant on a real calendar day`,
+      detail: `${processName}/${instanceId} carries a timestamp that is not an ISO-8601 UTC instant on a real calendar day`,
     };
   }
 
-  // `DO UPDATE` setting the conflict key back to the value it already holds,
-  // rather than `DO NOTHING`: the two write exactly the same row, but
-  // `DO NOTHING` returns nothing, which would leave this function with no id
-  // to report and a second query whose empty case cannot honestly be
-  // handled. This way the row that exists is always the row that comes back.
+  // `DO UPDATE` writing the payload, not `DO NOTHING` and not a no-op write
+  // of the conflict key back to itself. A runtime that re-emits for the same
+  // observed instant is correcting what it said about that instant — it has
+  // been paused, or it has seen a newer quote — and an upsert that kept the
+  // first payload would answer `recorded` while discarding the correction,
+  // leaving a dashboard confidently showing a mode the runtime has since
+  // left. Last write for one observation wins.
+  //
+  // `observedAt` stays out of the `set`: it is the conflict key, so the row
+  // already holds exactly this value. `DO UPDATE` also returns its row,
+  // which `DO NOTHING` does not — which is what lets this function report
+  // the id of the row that exists rather than guess at it.
   const written = await db
     .insert(heartbeats)
     .values({
-      process: heartbeat.process,
-      instanceId: heartbeat.instanceId,
+      process: processName,
+      instanceId,
       operatingMode: heartbeat.operatingMode,
       observedAt,
       recordedAt,
@@ -117,7 +134,12 @@ export async function recordHeartbeat(db: VigilDatabase, heartbeat: StoreHeartbe
     })
     .onConflictDoUpdate({
       target: [heartbeats.process, heartbeats.instanceId, heartbeats.observedAt],
-      set: { observedAt },
+      set: {
+        operatingMode: heartbeat.operatingMode,
+        recordedAt,
+        lastQuoteAcquiredAt,
+        detail: heartbeat.detail,
+      },
     })
     .returning({ heartbeatId: heartbeats.heartbeatId });
 

@@ -2,7 +2,9 @@ import { assetIdSchema } from "@vigil/contracts";
 import { sql } from "drizzle-orm";
 
 import { createDbClient, type VigilDatabase } from "../client";
+import { candidateEvaluations, candidates, candidateTranches } from "../schema/decisions";
 import { reservations } from "../schema/intents";
+import { heartbeats } from "../schema/ops";
 import {
   assetScales,
   journalEntries,
@@ -96,13 +98,20 @@ export type LedgerTestDb = {
   /** Close the pool; every suite that opens one registers this in `afterAll`. */
   readonly close: () => Promise<void>;
   /**
-   * Empty every ledger table before a case. `TRUNCATE` does not fire the
-   * row-level append-only triggers, which is the only reason a suite can
-   * reset a journal the application itself may never delete from
-   * (`drizzle/0001_journal_append_only_guard.sql`).
+   * Empty every table this package writes before a case — the ledger tables
+   * and the `decisions` and `ops` tables alike. One list rather than one per
+   * suite: a second, parallel truncate somewhere else is how a suite that
+   * never heard of candidates ends up asserting against another suite's
+   * leftover rows.
    *
-   * `asset_scales` goes with them: it is referenced by the three tables
-   * above, so one `TRUNCATE` has to name them all, and a suite that left it
+   * `TRUNCATE` does not fire the row-level append-only triggers, which is
+   * the only reason a suite can reset a journal, or a candidate, that the
+   * application itself may never delete from
+   * (`drizzle/0001_journal_append_only_guard.sql`,
+   * `drizzle/0008_candidate_append_only_guard.sql`).
+   *
+   * `asset_scales` goes with the ledger tables: it is referenced by three of
+   * them, so one `TRUNCATE` has to name them all, and a suite that left it
    * behind would assert against another suite's registered assets.
    *
    * Ordered children-first so the run works with or without `cascade`, and
@@ -127,7 +136,7 @@ export function openLedgerTestDb(applicationName: string): LedgerTestDb {
     close: client.close,
     reset: async () => {
       await client.db.execute(
-        sql`truncate table ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances}, ${assetScales} restart identity cascade`,
+        sql`truncate table ${candidateEvaluations}, ${candidateTranches}, ${candidates}, ${heartbeats}, ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances}, ${assetScales} restart identity cascade`,
       );
     },
   };

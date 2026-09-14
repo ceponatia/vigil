@@ -266,7 +266,14 @@ export const candidateEvaluations = pgTable(
     detail: text("detail").notNull(),
     /** Null when the outcome was reached without a usable executable price. */
     executablePrice: text("executable_price"),
-    /** Null with `executable_price`: there was no quote to age. */
+    /**
+     * When the quote behind this judgement was acquired, or null when there
+     * was no quote to age. Deliberately not paired with `executable_price`
+     * in either direction, and nothing enforces a pairing: a fresh quote
+     * against an empty book has an acquisition time and no executable price,
+     * and which combination is meaningful is the evaluating strategy's
+     * judgement to record, not this table's to police.
+     */
     quoteAcquiredAt: timestamp("quote_acquired_at", { withTimezone: true, precision: 3, mode: "date" }),
     evaluatedAt: timestamp("evaluated_at", { withTimezone: true, precision: 3, mode: "date" }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true, precision: 3, mode: "date" }).notNull(),
