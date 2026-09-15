@@ -7,6 +7,7 @@ import { authorizeProposal } from "./authorize";
 import { clientOrderIdFor, dispatchAttempt, type ExecutionRuntime, type Instrument } from "./dispatch";
 import { loadUnresolvedDispatches } from "./recover";
 import { cancelAttempt, pollAttempt, reconcileAttempt } from "./settle";
+import { decimalAt } from "./venue-economics";
 import {
   MONEY_SCALE,
   NOW,
@@ -314,6 +315,15 @@ describe("partial exchange fill followed by cancellation", () => {
       // Only the part of the hold the fill did not consume comes back.
       expect(canceled.releasedBase).toBe(stored.input.maxSpendBase - canceled.spentBase);
       expect(canceled.releasedBase).toBeGreaterThan(0n);
+
+      // The seam issue #53 was filed about, pinned end to end: the dispatched
+      // envelope carries the STORED residual, in the stored asset at the
+      // stored scale, unconverted. Every other assertion in this file and in
+      // `packages/adapter-paper` passes with a unit conversion reinstated in
+      // `adapterIntentFor` — the residual flag above is `true` under either
+      // reading of this scene — so this line is the only thing standing
+      // between that defect and a green suite.
+      expect(order.envelope.permittedResidual).toBe(decimalAt(stored.input.permittedResidualBase, stored.input.scale));
     }
 
     const entries = await loadJournalEntries(db);

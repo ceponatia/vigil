@@ -24,7 +24,7 @@ import {
   type ThesisTarget,
 } from "./revalidate";
 import type { VenueExecutionConfig } from "./venue";
-import { decimalAt, scaledProduct } from "./venue-economics";
+import { decimalAt } from "./venue-economics";
 
 /**
  * dispatch.ts — consuming an authorization exactly once, in the order
@@ -400,7 +400,7 @@ export async function dispatchAttempt(runtime: ExecutionRuntime, request: Dispat
   // has passed.
   const clientOrderId = clientOrderIdFor(intent.idempotencyKey, attempt);
   const proposed = proposeOrder({
-    intent: adapterIntentFor({ intent, side, clientOrderId, venue }),
+    intent: adapterIntentFor({ intent, side, clientOrderId }),
     at: now,
     attempt,
   });
@@ -753,7 +753,6 @@ type AdapterIntentInput = {
   readonly intent: StoreApprovedIntent;
   readonly side: OrderSide;
   readonly clientOrderId: string;
-  readonly venue: VenueExecutionConfig;
 };
 
 /**
@@ -761,20 +760,21 @@ type AdapterIntentInput = {
  * durable authorization rather than from anything held in memory since
  * approval.
  *
- * One field is translated rather than passed through, and the difference is
- * not cosmetic. `approved_intents.permitted_residual_base` is denominated in
- * the **input** asset — the schema constrains it against `max_spend_base` —
- * while the adapter compares its `permittedResidual` against an unfilled
- * **base-asset quantity** (`settlementOf`'s `residualExceedsPermitted`). For
- * a buy those are different assets, so passing the stored amount through
- * under a matching field name would compare a quote amount to a base
- * quantity. It is converted at the intent's own approved ratio instead —
- * `max_spend_base` bought `quantity_base`, so the residual's quantity share
- * is that same ratio — which is derived from the authorization rather than
- * from a live price, so the same intent always converts to the same
- * residual. It floors, which makes the permitted residual smaller and
- * `residualExceedsPermitted` more likely to fire: an operator asked about a
- * leftover that turns out to be dust is the recoverable direction.
+ * **Every amount is passed through in the asset and at the scale it was
+ * stored in.** Nothing is converted here, and that is worth stating because
+ * an earlier revision did convert one field: `permitted_residual_base` was
+ * translated to an output-asset quantity at the intent's own approved ratio,
+ * to compensate for `@vigil/adapter-paper` comparing its `permittedResidual`
+ * against an unfilled base-asset quantity. The two packages now agree that
+ * the residual denominates the **input** asset — the decision is recorded on
+ * `permittedResidualBase` in `packages/db/src/schema/intents.ts` — and the
+ * adapter's `settlementOf` measures it as `maxSpend` less the input actually
+ * consumed. A conversion at this seam would now be the bug.
+ *
+ * The asset each field carries, since the names alone do not say it: `input`
+ * is what the action spends and `output` what it acquires, so `maxSpend` and
+ * `permittedResidual` are input-asset amounts while `quantity` and
+ * `minAcceptableReceipt` are output-asset quantities.
  */
 function adapterIntentFor(input: AdapterIntentInput): unknown {
   const { intent, side, clientOrderId } = input;
@@ -796,7 +796,7 @@ function adapterIntentFor(input: AdapterIntentInput): unknown {
     quantity: decimalAt(intent.output.quantityBase, intent.output.scale),
     maxSpend: decimalAt(intent.input.maxSpendBase, intent.input.scale),
     minAcceptableReceipt: decimalAt(intent.output.minAcceptableReceiptBase, intent.output.scale),
-    permittedResidual: residualQuantityFor(input),
+    permittedResidual: decimalAt(intent.input.permittedResidualBase, intent.input.scale),
     validUntil: intent.validUntil,
     requiredFreshnessMs: intent.requiredFreshnessMs,
     adapterCapabilityVersion: intent.adapterCapabilityVersion,
@@ -807,23 +807,4 @@ function adapterIntentFor(input: AdapterIntentInput): unknown {
     marketSnapshotVersion: intent.provenance.marketSnapshotVersion,
     feeSnapshotVersion: intent.provenance.feeSnapshotVersion,
   };
-}
-
-/**
- * The stored input-asset residual, expressed as the base-asset quantity the
- * adapter compares against. A sell already holds its residual in the base
- * asset, so it passes through unchanged.
- */
-function residualQuantityFor(input: AdapterIntentInput): string {
-  const { intent, side, venue } = input;
-  if (side === "SELL") {
-    return decimalAt(intent.input.permittedResidualBase, intent.input.scale);
-  }
-  const quantityUnits = scaledProduct(
-    intent.input.permittedResidualBase,
-    intent.output.quantityBase,
-    intent.input.maxSpendBase,
-    "DOWN",
-  );
-  return decimalAt(quantityUnits, venue.quantityScale);
 }

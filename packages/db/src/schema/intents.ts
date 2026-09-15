@@ -366,7 +366,50 @@ export const approvedIntents = pgTable(
       scale: 0,
       mode: "bigint",
     }).notNull(),
-    /** Input-asset base units that may be left unspent without treating the action as incomplete. */
+    /**
+     * Input-asset base units that may be left unspent without treating the
+     * action as incomplete — at `input_asset_scale`, the same asset and the
+     * same scale as `max_spend_base`.
+     *
+     * ## The denomination is a decision, and this column is where it is recorded
+     *
+     * `permitted_residual_base` and `@vigil/adapter-paper`'s
+     * `OrderEnvelope.permittedResidual` are the same quantity, and both
+     * denominate the **INPUT** asset — what the authorization spends, never
+     * what it acquires. For a buy those are different assets, so this is a
+     * statement with teeth rather than a formality, and it is stated here
+     * because this column is the durable authority the adapter's field is a
+     * projection of. `packages/adapter-paper/src/intent.ts` and
+     * `apps/trading/src/execution/dispatch.ts` both cite this paragraph; the
+     * value passes from here to the adapter unconverted.
+     *
+     * **A residual is a tolerance on capital, and this settles it on its
+     * own.** The authorization's magnitude is `max_spend_base`, the
+     * reservation is taken against it, and the release an outcome produces is
+     * `max_spend_base - <input actually consumed>`
+     * (`apps/trading/src/execution/settle.ts`). This column bounds exactly
+     * that figure, so it is denominated in exactly that asset — and the check
+     * constraint below then compares two amounts of one asset, with no price
+     * standing between them. Nothing below is load-bearing; the argument
+     * above does not need help.
+     *
+     * Two supporting observations, stated as the weaker claims they are:
+     *
+     * - The output reading would largely duplicate
+     *   `min_acceptable_receipt_base`, which already bounds the output side —
+     *   as a sizing gate before authorization and a worst-case gate before
+     *   submission. An output-denominated residual would ask about the same
+     *   magnitude again, at a later point in the lifecycle. Read as input
+     *   units this column asks something else entirely: did meaningful
+     *   approved capital come back unspent?
+     * - Dust is judged in the numeraire. "Is this leftover worth chasing?"
+     *   has one stable answer per numeraire, and a per-asset, per-price one
+     *   otherwise.
+     *
+     * For a SELL the input asset IS the traded base asset, so the residual is
+     * a quantity of the thing being sold and the same sentence still holds —
+     * "input asset", not "quote asset", is what makes the rule side-agnostic.
+     */
     permittedResidualBase: numeric("permitted_residual_base", {
       precision: BASE_UNIT_PRECISION,
       scale: 0,
@@ -496,6 +539,12 @@ export const approvedIntents = pgTable(
       "approved_intents_identity_present",
       sql`length(btrim(intent_id)) > 0 and length(btrim(idempotency_key)) > 0 and length(btrim(correlation_id)) > 0 and length(btrim(economic_action_id)) > 0`,
     ),
+    // `permitted_residual_base <= max_spend_base` is a SAME-ASSET comparison,
+    // and the constraint is evidence of the denomination rather than an
+    // accident of naming: both figures are input-asset base units at
+    // `input_asset_scale` (see `permittedResidualBase` above). An
+    // authorization may not tolerate leaving more unspent than the whole
+    // amount it was allowed to spend.
     check(
       "approved_intents_amounts_authorize_something",
       sql`quantity_base > 0 and max_spend_base > 0 and min_acceptable_receipt_base >= 0 and permitted_residual_base >= 0 and permitted_residual_base <= max_spend_base`,

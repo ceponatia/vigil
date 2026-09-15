@@ -61,14 +61,24 @@ execution or it does not exist.
   and there is no way to peek. Polling and cancelling are both refused
   until reconciliation has run.
 - **Nothing is released on an unsettled order.** `settlementOf` reports
-  `releasableRemainder: null` — not zero, not the remainder — for every
-  non-terminal state. A partial fill that is still working, an `UNKNOWN`
-  order, and an unconfirmed cancellation all release exactly nothing.
+  `releasableRemainder: null` and `unspentInput: null` — not zero, not the
+  remainder — for every non-terminal state. A partial fill that is still
+  working, an `UNKNOWN` order, and an unconfirmed cancellation all release
+  exactly nothing.
 - **Filled exposure survives a cancellation.** After a partial fill is
   cancelled, the filled quantity, its notional, and the fee the venue
   charged all persist; only the confirmed unfilled remainder becomes
-  releasable, and the settlement flags it when that remainder is larger
-  than the intent's `permittedResidual`.
+  releasable.
+- **The residual is measured in the INPUT asset**, the one the action spends,
+  never the output quantity it acquires. `settlementOf` reports
+  `unspentInput` — `maxSpend` less what actually left — and
+  `residualExceedsPermitted` compares that against the intent's
+  `permittedResidual`, which denominates the same asset. The decision and its
+  reasoning live on `permittedResidualBase` in
+  `packages/db/src/schema/intents.ts`, the durable column this field
+  projects; nothing converts between the two. Only a partial fill can raise
+  the flag: an order that never filled leaves no position to decide about,
+  and one that filled completely finished the action.
 - **Reconciliation precedes resubmission.** Submitting again under a client
   order id the venue already holds is refused — `TRANSACTION_UNRESOLVED`
   while that order is still working, `IDEMPOTENCY_KEY_ALREADY_USED` once it

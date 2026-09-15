@@ -71,6 +71,10 @@ export const approvedOrderIntentSchema = z.object({
   quantity: decimalStringSchema,
   maxSpend: decimalStringSchema,
   minAcceptableReceipt: decimalStringSchema,
+  /**
+   * INPUT-asset — see `OrderEnvelope.permittedResidual` below, and the
+   * decision it cites.
+   */
   permittedResidual: decimalStringSchema,
   validUntil: isoUtcTimestampSchema,
   requiredFreshnessMs: z.number().int().nonnegative(),
@@ -119,8 +123,26 @@ export type OrderProvenance = {
  * capped price and fee would breach it is refused before the venue sees it.
  */
 export type OrderEnvelope = {
+  /** A ceiling on the INPUT asset: what a buy may spend, what a sell may deliver. */
   readonly maxSpend: DecimalString;
+  /** A floor on the OUTPUT asset: what the trade must yield to be worth doing. */
   readonly minAcceptableReceipt: DecimalString;
+  /**
+   * How much of the approved spend may be left unconsumed without treating
+   * the action as incomplete — **INPUT-asset units, the same asset and the
+   * same magnitude as `maxSpend`**, never the output quantity.
+   *
+   * The decision and its reasoning are recorded once, on the durable column
+   * this field is a projection of: `permittedResidualBase` in
+   * `packages/db/src/schema/intents.ts`, whose
+   * `approved_intents_amounts_authorize_something` check bounds
+   * `permitted_residual_base <= max_spend_base` in that same asset. For a buy
+   * the input and output assets are different, so reading this as an output
+   * quantity would compare a quote amount against a base quantity;
+   * `settlementOf` therefore measures the residual as
+   * `maxSpend - <input actually consumed>` and `apps/trading` hands the
+   * stored value straight through, converting nothing.
+   */
   readonly permittedResidual: DecimalString;
   readonly validUntil: IsoUtcTimestamp;
   readonly requiredFreshnessMs: number;
