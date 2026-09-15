@@ -5,9 +5,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { PAPER_ADAPTER_CAPABILITY } from "@vigil/adapter-paper";
-import type { AdapterCapability } from "@vigil/adapter-paper";
 
-import { refuseNonPaperAdapter } from "./dispatch";
+import { refuseNonPaperAdapter, type DeclaredAdapterCapability } from "./dispatch";
 
 /**
  * The defect this file kills: an execution domain that grows a second way to
@@ -135,18 +134,28 @@ describe("refuseNonPaperAdapter", () => {
   });
 
   it("refuses an adapter that claims any live capability, whichever one it claims", () => {
-    const claims = [
+    // Built against `DeclaredAdapterCapability` rather than the paper
+    // adapter's own type, and that is the point of the wider parameter: an
+    // `AdapterCapability` types these three as the literal `false`, so a
+    // capability claiming one could not be constructed here without casting
+    // the guarantee away — and three of the four checks would be branches the
+    // compiler had already proved unreachable.
+    const paper: DeclaredAdapterCapability = {
+      adapterId: PAPER_ADAPTER_CAPABILITY.adapterId,
+      mode: PAPER_ADAPTER_CAPABILITY.mode,
+      reachesLiveEndpoint: PAPER_ADAPTER_CAPABILITY.reachesLiveEndpoint,
+      holdsVenueCredential: PAPER_ADAPTER_CAPABILITY.holdsVenueCredential,
+      canSignTransactions: PAPER_ADAPTER_CAPABILITY.canSignTransactions,
+    };
+    const claims: ReadonlyArray<Partial<DeclaredAdapterCapability>> = [
       { reachesLiveEndpoint: true },
       { holdsVenueCredential: true },
       { canSignTransactions: true },
       { mode: "LIVE" },
-    ] as const;
+    ];
 
     for (const claim of claims) {
-      // A capability is data an adapter supplies about itself, so the runtime
-      // check is what stands between a relabelled adapter and a dispatch.
-      const capability = { ...PAPER_ADAPTER_CAPABILITY, ...claim } as unknown as AdapterCapability;
-      const refusal = refuseNonPaperAdapter(capability);
+      const refusal = refuseNonPaperAdapter({ ...paper, ...claim });
       expect(refusal).not.toBeNull();
       expect(refusal?.reason).toEqual({ source: "execution", code: "ADAPTER_NOT_PAPER" });
     }

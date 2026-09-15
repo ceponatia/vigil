@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { AssetId, IsoUtcTimestamp, ReasonCode } from "@vigil/contracts";
 import { proposeOrder, reserveOrder, validateOrder } from "@vigil/adapter-paper";
-import type { AdapterCapability, OrderSide, PaperExchange, PaperOrder } from "@vigil/adapter-paper";
+import type { OrderSide, PaperExchange, PaperOrder } from "@vigil/adapter-paper";
 import {
   abandonDispatch,
   loadApprovedIntent,
@@ -184,16 +184,39 @@ export type DispatchResult = DispatchedAttempt | BlockedDispatch | RefusedDispat
 const refused = (refusal: ExecutionRefusal): RefusedDispatch => ({ outcome: "refused", refusal });
 
 /**
+ * What this guard reads off an adapter's declaration.
+ *
+ * Deliberately **wider** than `@vigil/adapter-paper`'s `AdapterCapability`,
+ * which types these three as the literal `false`. A parameter of that type
+ * would narrow `capability.reachesLiveEndpoint` to `never` inside the `if`,
+ * so three of the four checks below would be branches the compiler has
+ * already proved unreachable — a gate that reads like a runtime check and can
+ * only ever fire on `mode`.
+ *
+ * A capability is **data an adapter supplies about itself**, and the whole
+ * point of checking it is that a future `adapter-<venue>` will declare `true`
+ * and must be refused here rather than dispatched to. `boolean` is what that
+ * declaration actually is; `AdapterCapability` remains assignable to this, so
+ * nothing at the call site changes.
+ */
+export type DeclaredAdapterCapability = {
+  readonly adapterId: string;
+  readonly mode: string;
+  readonly reachesLiveEndpoint: boolean;
+  readonly holdsVenueCredential: boolean;
+  readonly canSignTransactions: boolean;
+};
+
+/**
  * Whether this adapter is the paper one, checked at runtime rather than
  * trusted from the type.
  *
- * The declared capability is data an adapter supplies about itself, and this
- * build dispatches to nothing that reaches an endpoint, holds a credential,
- * or can sign. `docs/policy.md` puts LIVE behind a capability gate no code
- * here can open, so the honest form of that gate here is a refusal to
- * dispatch at all.
+ * This build dispatches to nothing that reaches an endpoint, holds a
+ * credential, or can sign. `docs/policy.md` puts LIVE behind a capability
+ * gate no code here can open, so the honest form of that gate here is a
+ * refusal to dispatch at all.
  */
-export function refuseNonPaperAdapter(capability: AdapterCapability): ExecutionRefusal | null {
+export function refuseNonPaperAdapter(capability: DeclaredAdapterCapability): ExecutionRefusal | null {
   const violations: string[] = [];
   if (capability.mode !== "PAPER") {
     violations.push(`declares mode ${capability.mode}`);

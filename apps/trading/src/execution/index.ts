@@ -52,6 +52,7 @@ export {
 } from "./dispatch";
 export type {
   BlockedDispatch,
+  DeclaredAdapterCapability,
   DispatchIdentities,
   DispatchRequest,
   DispatchResult,

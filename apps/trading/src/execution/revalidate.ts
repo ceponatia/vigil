@@ -271,10 +271,15 @@ export function revalidateBeforeDispatch(request: RevalidationRequest): Revalida
     return blocked("quoteFreshness", fromPolicyRefusal(freshness.refusal), now, { pricing });
   }
 
-  // Judged at the price this dispatch would actually pay, not at the ask.
-  // `executionPrice` already contains the spread and the slippage cap, so a
-  // fill that lands above the approved zone is chasing even when the quoted
-  // ask does not — and the allocator is the last gate before capital moves.
+  // Judged at the price this dispatch would actually pay, NOT at the ask.
+  //
+  // The entry zone is the band the proposal was approved to pay within, and
+  // what is actually paid is `executionPrice` — the ask plus the spread and
+  // the slippage cap already inside it. Gating on the ask would let slippage
+  // carry a real fill outside the approved band while the gate reported
+  // success, which is chasing: paying more than the plan allowed. The
+  // allocator is the last gate before capital moves, so it judges the number
+  // that leaves the account (owner ruling, confirmed on #35).
   const zone = checkEntryZone({ executablePrice: pricing.executionPrice, entryZone: intent.entryZone });
   if (!zone.eligible) {
     return blocked("entryZone", fromPolicyRefusal(zone.refusal), now, { pricing });

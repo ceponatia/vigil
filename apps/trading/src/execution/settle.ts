@@ -1,16 +1,11 @@
+import { assetIdSchema } from "@vigil/contracts";
 import type { AssetId, IsoUtcTimestamp } from "@vigil/contracts";
 import { settlementOf } from "@vigil/adapter-paper";
 import type { OrderSettlement, PaperOrder } from "@vigil/adapter-paper";
 import { loadApprovedIntent, postJournalEntry, recordAttemptOutcome } from "@vigil/db";
-import type {
-  ExecutionAttemptStateValue,
-  StoreApprovedIntent,
-  StoreEntry,
-  StoreLine,
-  VigilDatabase,
-} from "@vigil/db";
-import { buildEntry } from "@vigil/ledger";
-import type { EntryKind, JournalEntry } from "@vigil/ledger";
+import type { ExecutionAttemptStateValue, StoreApprovedIntent, StoreEntry, VigilDatabase } from "@vigil/db";
+import { buildEntry, counterAccount, holdingsAccount } from "@vigil/ledger";
+import type { EntryKind, HoldingsState, JournalEntry, JournalLine } from "@vigil/ledger";
 
 import { attemptStateFor, type ExecutionRuntime, type Instrument, sideFor } from "./dispatch";
 import { executionRefusal, fromAdapterRefusal, type ExecutionRefusal } from "./diagnostics";
@@ -370,18 +365,37 @@ async function journalSettlement(db: VigilDatabase, input: JournalInput): Promis
     return { outcome: "posted", entryIds: [], releasedBase: null };
   }
 
-  const inputAsset = intent.input.assetId as AssetId;
-  const outputAsset = intent.output.assetId as AssetId;
-  const drafts: Array<{ readonly kind: EntryKind; readonly entryId: string; readonly lines: readonly StoreLine[] }> = [];
+  // The asset ids come back off a database row as plain strings. They were
+  // validated when the authorization was written, but a value crossing back
+  // out of storage is crossing a trust boundary again (`docs/resilience.md`
+  // §5: identity is re-validated after parsing), and parsing here is also
+  // what lets every posting below hold a real `AssetId` rather than a string
+  // asserted into one.
+  const spent = assetIdSchema.safeParse(intent.input.assetId);
+  const acquired = assetIdSchema.safeParse(intent.output.assetId);
+  if (!spent.success || !acquired.success) {
+    return {
+      outcome: "refused",
+      refusal: executionRefusal(
+        "PERSISTENCE_REFUSED",
+        `intent ${intent.intentId} names an asset that is not a canonical asset id; nothing is posted against it`,
+      ),
+    };
+  }
+  const inputAsset = spent.data;
+  const outputAsset = acquired.data;
+
+  const drafts: Array<{ readonly kind: EntryKind; readonly entryId: string; readonly lines: readonly JournalLine[] }> =
+    [];
 
   drafts.push({
     kind: "trade",
     entryId: ids.tradeEntryId,
     lines: [
-      line(inputAsset, intent.input.scale, "reserved", "credit", amounts.grossNotionalBase),
-      exchangeLine(inputAsset, intent.input.scale, "debit", amounts.grossNotionalBase),
-      line(outputAsset, intent.output.scale, "available", "debit", amounts.filledQuantityBase),
-      exchangeLine(outputAsset, intent.output.scale, "credit", amounts.filledQuantityBase),
+      held(inputAsset, intent.input.scale, "reserved", "credit", amounts.grossNotionalBase),
+      counter("exchange", inputAsset, intent.input.scale, "debit", amounts.grossNotionalBase),
+      held(outputAsset, intent.output.scale, "available", "debit", amounts.filledQuantityBase),
+      counter("exchange", outputAsset, intent.output.scale, "credit", amounts.filledQuantityBase),
     ],
   });
 
@@ -390,13 +404,8 @@ async function journalSettlement(db: VigilDatabase, input: JournalInput): Promis
       kind: "fee",
       entryId: ids.feeEntryId,
       lines: [
-        line(inputAsset, intent.input.scale, "reserved", "credit", amounts.separatelyChargedBase),
-        {
-          account: { family: "fees", assetId: inputAsset, holdingsState: null },
-          scale: intent.input.scale,
-          amountBase: amounts.separatelyChargedBase,
-          direction: "debit",
-        },
+        held(inputAsset, intent.input.scale, "reserved", "credit", amounts.separatelyChargedBase),
+        counter("fees", inputAsset, intent.input.scale, "debit", amounts.separatelyChargedBase),
       ],
     });
   }
@@ -411,15 +420,21 @@ async function journalSettlement(db: VigilDatabase, input: JournalInput): Promis
       kind: "reservation-release",
       entryId: ids.releaseEntryId,
       lines: [
-        line(inputAsset, intent.input.scale, "available", "debit", releasedBase),
-        line(inputAsset, intent.input.scale, "reserved", "credit", releasedBase),
+        held(inputAsset, intent.input.scale, "available", "debit", releasedBase),
+        held(inputAsset, intent.input.scale, "reserved", "credit", releasedBase),
       ],
     });
   }
 
   const entryIds: string[] = [];
   for (const draft of drafts) {
-    const entry: StoreEntry = {
+    // `@vigil/ledger` owns what a valid posting is — balance per asset, the
+    // families each kind may touch, and the fixed direction of a reservation
+    // move. Building through it first means a malformed entry is a reason
+    // code here rather than a constraint violation surfacing from inside a
+    // transaction, and that only a *validated* entry is ever handed to the
+    // store.
+    const validated = buildEntry({
       entryId: draft.entryId,
       kind: draft.kind,
       occurredAt: now,
@@ -436,13 +451,7 @@ async function journalSettlement(db: VigilDatabase, input: JournalInput): Promis
         marketSnapshotVersion: intent.provenance.marketSnapshotVersion,
       },
       lines: draft.lines,
-    };
-
-    // `@vigil/ledger` owns what a valid posting is — balance per asset, the
-    // families each kind may touch, and the fixed direction of a reservation
-    // move. Checking here means a malformed entry is a reason code rather
-    // than a constraint violation surfacing from inside a transaction.
-    const validated = buildEntry(toLedgerEntry(entry, now));
+    });
     if (validated.outcome === "refused") {
       return {
         outcome: "refused",
@@ -453,7 +462,7 @@ async function journalSettlement(db: VigilDatabase, input: JournalInput): Promis
       };
     }
 
-    const posted = await postJournalEntry(db, entry);
+    const posted = await postJournalEntry(db, toStoreEntry(validated.entry));
     if (posted.outcome === "refused") {
       return {
         outcome: "refused",
@@ -469,57 +478,55 @@ async function journalSettlement(db: VigilDatabase, input: JournalInput): Promis
   return { outcome: "posted", entryIds, releasedBase };
 }
 
-function line(
+function held(
   assetId: AssetId,
   scale: number,
-  holdingsState: "available" | "reserved",
+  holdingsState: HoldingsState,
   direction: "debit" | "credit",
   amountBase: bigint,
-): StoreLine {
-  return {
-    account: { family: "holdings", assetId, holdingsState },
-    scale,
-    amountBase,
-    direction,
-  };
+): JournalLine {
+  return { account: holdingsAccount(assetId, holdingsState), scale, amountBase, direction };
 }
 
-function exchangeLine(assetId: AssetId, scale: number, direction: "debit" | "credit", amountBase: bigint): StoreLine {
-  return {
-    account: { family: "exchange", assetId, holdingsState: null },
-    scale,
-    amountBase,
-    direction,
-  };
+function counter(
+  family: "exchange" | "fees",
+  assetId: AssetId,
+  scale: number,
+  direction: "debit" | "credit",
+  amountBase: bigint,
+): JournalLine {
+  return { account: counterAccount(family, assetId), scale, amountBase, direction };
 }
 
 /**
- * The same entry in `@vigil/ledger`'s shape, so its validation can run before
- * anything is written. The two types are structurally the same record with
- * different timestamp types — `StoreEntry` carries ISO strings for the
- * database, `JournalEntry` the branded instants — and neither package may
- * import the other to say so.
+ * A validated ledger entry in the store's shape.
+ *
+ * The two types are the same record with different timestamp and identity
+ * types — `JournalEntry` carries the branded instants and asset ids,
+ * `StoreEntry` the plain strings the database columns hold — and neither
+ * package may import the other to say so. Going in this direction only ever
+ * widens, so nothing is asserted away.
  */
-function toLedgerEntry(entry: StoreEntry, now: IsoUtcTimestamp): JournalEntry {
+function toStoreEntry(entry: JournalEntry): StoreEntry {
   return {
     entryId: entry.entryId,
     kind: entry.kind,
-    occurredAt: now,
-    recordedAt: now,
+    occurredAt: entry.occurredAt,
+    recordedAt: entry.recordedAt,
     correlationId: entry.correlationId,
     idempotencyKey: entry.idempotencyKey,
     intentId: entry.intentId,
     reversesEntryId: entry.reversesEntryId,
     provenance: entry.provenance,
-    lines: entry.lines.map((storeLine) => ({
+    lines: entry.lines.map((line) => ({
       account: {
-        family: storeLine.account.family,
-        assetId: storeLine.account.assetId as AssetId,
-        holdingsState: storeLine.account.holdingsState,
+        family: line.account.family,
+        assetId: line.account.assetId,
+        holdingsState: line.account.holdingsState,
       },
-      scale: storeLine.scale,
-      amountBase: storeLine.amountBase,
-      direction: storeLine.direction,
+      scale: line.scale,
+      amountBase: line.amountBase,
+      direction: line.direction,
     })),
   };
 }
