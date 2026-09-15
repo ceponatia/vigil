@@ -25,8 +25,8 @@ Two narrow local checks remain allowed:
 | --- | --- | --- |
 | Pure unit suites | `*.test.ts`, co-located with the code in `apps/*` and `packages/*` | Root Vitest project's `unit tests` job, `pnpm test` |
 | Postgres-backed suites | `*.int.test.ts`, co-located with the code that needs a real database | `integration` job, `pnpm test:int` |
-| Deterministic full replays | `tests/replay/` | `unit tests` unless a replay needs Postgres, then it is a `*.int.test.ts` and moves under `integration` |
-| Fault-injection scenarios | `tests/fault-injection/` | Same split as replays: `unit tests` by default, `integration` only when a scenario needs Postgres |
+| Deterministic full replays | `tests/replay/`, or beside the owning `apps/*` code when the replay must drive an `adapter-*` package (`docs/testing.md`) | `unit tests` unless a replay needs Postgres, then it is a `*.int.test.ts` and moves under `integration` |
+| Fault-injection scenarios | `tests/fault-injection/`, or beside the owning `apps/*` code when the scenario must drive an `adapter-*` package (`docs/testing.md`) | Same split as replays: `unit tests` by default, `integration` only when a scenario needs Postgres |
 | Synthetic fixtures | `tests/fixtures/` | Not a test layer; shared input data for the layers above |
 
 Fixtures under `tests/fixtures/` never contain personal holdings, real
