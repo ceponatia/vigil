@@ -1,7 +1,7 @@
 import type { AssetId, DecimalString, IsoUtcTimestamp } from "@vigil/contracts";
 import { ACTION_ORDER_SIDES } from "@vigil/adapter-paper";
 import type { OrderSide, TradeAction } from "@vigil/adapter-paper";
-import { recordApprovedIntent } from "@vigil/db";
+import { recordApprovedIntent, recordPositionPlan } from "@vigil/db";
 import type {
   CostChargeBasisValue,
   CostComponentKindValue,
@@ -58,6 +58,28 @@ import {
  *   comparison against a realized fill can then subtract the separately
  *   charged ones from a gross that already contains the embedded ones,
  *   without counting either twice.
+ *
+ * ## Why this writes a position plan before it writes the authorization
+ *
+ * The record above is the **result** of the approval. The **terms** it was
+ * derived from — the entry zone this proposal may be filled within and the
+ * exit price its gross edge is measured against — are not on it, and the
+ * pre-dispatch gate needs both every time it runs. Held only in this
+ * process's memory they would die with the process, and an `apps/trading`
+ * that restarted between approval and dispatch could not revalidate an
+ * intent it did not approve in the same run.
+ *
+ * So the terms go to `position_plans`, under the id the intent already
+ * names, before the intent is written. The ordering is what makes the pair
+ * safe in either direction of a crash: a plan with no authorization is inert
+ * — nothing dispatches against a plan — while an authorization with no plan
+ * is one the gate refuses outright (`UNKNOWN_POSITION_PLAN`), which this
+ * ordering makes unreachable rather than merely unlikely.
+ *
+ * A plan is recorded once. A second proposal naming the same plan under
+ * *different* terms is refused rather than written, and the authorization
+ * with it: an intent approved against one entry zone and revalidated at
+ * dispatch against another is approved by nothing.
  *
  * ## Entry actions only
  *
@@ -344,6 +366,46 @@ export async function authorizeProposal(
       costComponents: economics.costComponents,
     },
   };
+
+  // The terms before the result (see the module header). `now` is both the
+  // formation and the recording instant: these terms are set by this
+  // approval, from this quote, and dating either one differently would put a
+  // moment into the timestamp family that nothing actually happened at.
+  const planned = await recordPositionPlan(db, {
+    positionPlanId: proposal.positionPlanId,
+    correlationId: proposal.correlationId,
+    instrumentId: expectedInstrumentId,
+    entryZoneMin: proposal.entryZone.min,
+    entryZoneMax: proposal.entryZone.max,
+    thesisExitPrice: proposal.thesis.expectedExitPriceQuote,
+    // Evidence, never an input. It is what makes the exit price readable
+    // later — a 260.00 target against a 250.05 mid is a different claim than
+    // against a 259.00 one — and the dispatch gate never reads it, because
+    // gross edge there is measured from the FRESH midpoint.
+    formationReferenceMid: decimalAt(pricing.units.referenceMid, venue.moneyScale),
+    formedAt: now,
+    recordedAt: now,
+    provenance: {
+      policyVersion: proposal.provenance.policyVersion,
+      strategyVersion: proposal.provenance.strategyVersion,
+      modelVersion: proposal.provenance.modelVersion,
+      portfolioSnapshotVersion: proposal.provenance.portfolioSnapshotVersion,
+      marketSnapshotVersion: proposal.provenance.marketSnapshotVersion,
+    },
+  });
+  if (planned.outcome === "refused") {
+    return refused(
+      planned.code === "PLAN_TERMS_CONFLICT"
+        ? executionRefusal(
+            "POSITION_PLAN_TERMS_CONFLICT",
+            `the terms for ${proposal.intentId} could not be recorded under plan ${proposal.positionPlanId}: ${planned.detail}`,
+          )
+        : executionRefusal(
+            "PERSISTENCE_REFUSED",
+            `the position plan for ${proposal.intentId} could not be written (${planned.code}): ${planned.detail}`,
+          ),
+    );
+  }
 
   const written = await recordApprovedIntent(db, record);
   if (written.outcome === "refused") {

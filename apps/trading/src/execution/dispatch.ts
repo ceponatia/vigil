@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 
-import type { AssetId, IsoUtcTimestamp, ReasonCode } from "@vigil/contracts";
+import type { IsoUtcTimestamp, ReasonCode } from "@vigil/contracts";
 import { proposeOrder, reserveOrder, validateOrder } from "@vigil/adapter-paper";
 import type { OrderSide, PaperExchange, PaperOrder } from "@vigil/adapter-paper";
 import {
   loadApprovedIntent,
+  loadPositionPlan,
   markDispatched,
   recordCandidateEvaluation,
   openExecutionAttempt,
@@ -12,16 +13,16 @@ import {
   reserveAvailable,
 } from "@vigil/db";
 import type { ExecutionAttemptStateValue, StoreApprovedIntent, VigilDatabase } from "@vigil/db";
-import type { EntryZone, PolicyConfig } from "@vigil/policy";
+import type { PolicyConfig } from "@vigil/policy";
 
 import { executionRefusal, fromAdapterRefusal, recordableReasonCode, type ExecutionRefusal } from "./diagnostics";
+import { instrumentIdOf, planTermsFor, type Instrument, type PositionPlanTerms } from "./position-plan";
 import {
   revalidateBeforeDispatch,
   type DispatchBlocked,
   type DispatchClearance,
   type PortfolioState,
   type RevalidationStage,
-  type ThesisTarget,
 } from "./revalidate";
 import type { VenueExecutionConfig } from "./venue";
 import { decimalAt } from "./venue-economics";
@@ -34,6 +35,7 @@ import { decimalAt } from "./venue-economics";
  *
  * ```text
  *   loadApprovedIntent        the authorization, read back from durable history
+ *   loadPositionPlan          the terms it was approved against, likewise
  *   proposeOrder              PROPOSED                       (pure, nothing durable)
  *   revalidateBeforeDispatch  the fresh quote / net-edge gate <- blocks here, leaving
  *                                                               NOTHING durable behind
@@ -90,16 +92,29 @@ import { decimalAt } from "./venue-economics";
  * a settled attempt that actually spent something. The authorization and its
  * capital would be stranded by the gate working correctly.
  *
- * ## What the caller has to supply, and why
+ * ## Where the gate's own inputs come from
  *
- * The entry zone and the thesis exit price arrive on the request rather than
- * off the intent, because `approved_intents` stores neither: it keeps the
- * *result* of the approval (`expected_gross_base`, the cost breakdown, the
- * hurdle) and not the inputs the result was derived from. Both belong to the
- * position plan the intent already names through `position_plan_id`, which
- * has no record family yet. Until it does, a restarted process cannot
- * revalidate an intent it did not approve in the same run — a real gap,
- * recorded here rather than papered over with a value invented at dispatch.
+ * Nowhere in memory. `approved_intents` keeps the *result* of the approval
+ * (`expected_gross_base`, the cost breakdown, the hurdle) and not the inputs
+ * that result was derived from, so the entry zone and the thesis exit price
+ * are read back from `position_plans` — the record the intent has always
+ * named through `position_plan_id` — by `loadPositionPlan` below, at the
+ * start of every dispatch. A caller supplies neither, and there is no field
+ * on `DispatchRequest` for one, which is what makes "a process that
+ * restarted between approval and dispatch can still revalidate" a property
+ * of the type rather than a convention.
+ *
+ * What is read back is the **thesis exit price**, not a per-unit edge. The
+ * distinction is the whole point: a stored per-unit edge is the figure that
+ * was true at approval, and it would clear its hurdle forever however far
+ * the market had since moved. The exit price is fixed by the thesis and the
+ * midpoint is not, so `revalidate.ts` measures one against a fresh reading
+ * of the other, and an intent whose edge has been eaten fails exactly as it
+ * should.
+ *
+ * An intent whose plan is missing, prices another instrument, or carries a
+ * price this build cannot read is refused before anything is held or
+ * written. Inventing terms at the gate would clear a band nobody approved.
  */
 
 /** The wiring one effective writer holds for this financial authority domain. */
@@ -135,23 +150,11 @@ export type DispatchIdentities = {
   readonly blockedEvaluationId: string;
 };
 
-export type Instrument = {
-  readonly baseAssetId: AssetId;
-  readonly quoteAssetId: AssetId;
-};
-
-/** The plan's own terms, which the intent record does not carry. See the module header. */
-export type PositionPlanTerms = {
-  readonly entryZone: EntryZone;
-  readonly thesis: ThesisTarget;
-};
-
 export type DispatchRequest = {
   readonly intentId: string;
   /** Versioned attempt on that intent; starts at 1. */
   readonly attempt: number;
   readonly instrument: Instrument;
-  readonly plan: PositionPlanTerms;
   /** The freshest executable quote, untrusted and parsed at the revalidation boundary. */
   readonly quote: unknown;
   readonly now: IsoUtcTimestamp;
@@ -377,7 +380,7 @@ export async function dispatchAttempt(runtime: ExecutionRuntime, request: Dispat
     return refused(
       executionRefusal(
         "QUOTE_INSTRUMENT_MISMATCH",
-        `intent ${intentId} spends ${intent.input.assetId} for ${intent.output.assetId}, which is neither direction of ${instrument.baseAssetId}/${instrument.quoteAssetId}`,
+        `intent ${intentId} spends ${intent.input.assetId} for ${intent.output.assetId}, which is neither direction of ${instrumentIdOf(instrument)}`,
       ),
     );
   }
@@ -394,6 +397,30 @@ export async function dispatchAttempt(runtime: ExecutionRuntime, request: Dispat
       ),
     );
   }
+
+  // The gate's own inputs, read back from durable history rather than taken
+  // from the caller. This is the whole of what a restarted process needs and
+  // could not otherwise have: `approved_intents` carries the result of the
+  // approval and not the entry zone or the exit target it was derived from.
+  //
+  // Before any capital is held and before the order is even proposed, so an
+  // authorization whose plan is missing or unusable refuses without leaving a
+  // hold, an attempt, or an outbox row behind — exactly as a refused gate
+  // does, and for the same reason: nothing has been handed to a venue.
+  const storedPlan = await loadPositionPlan(db, intent.positionPlanId);
+  if (storedPlan === null) {
+    return refused(
+      executionRefusal(
+        "UNKNOWN_POSITION_PLAN",
+        `intent ${intentId} names position plan ${intent.positionPlanId}, which is not in durable history; nothing states the entry zone it was approved within or the exit price its edge is measured against`,
+      ),
+    );
+  }
+  const planned = planTermsFor(storedPlan, instrument, intentId);
+  if (planned.outcome === "refused") {
+    return refused(planned.refusal);
+  }
+  const plan: PositionPlanTerms = planned.terms;
 
   // `proposeOrder` is pure — it parses the authorization and opens a
   // `PROPOSED` order in memory. Nothing durable happens until the gate below
@@ -433,10 +460,10 @@ export async function dispatchAttempt(runtime: ExecutionRuntime, request: Dispat
       baseAssetId: instrument.baseAssetId,
       quoteAssetId: instrument.quoteAssetId,
       quantityUnits: intent.output.quantityBase,
-      entryZone: request.plan.entryZone,
+      entryZone: plan.entryZone,
       requiredFreshnessMs: intent.requiredFreshnessMs,
     },
-    thesis: request.plan.thesis,
+    thesis: plan.thesis,
     quote: request.quote,
     now,
     venue,

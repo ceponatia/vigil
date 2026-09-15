@@ -63,6 +63,7 @@ export {
   candidateOutcomeEnum,
   candidates,
   candidateTranches,
+  positionPlans,
 } from "./schema/decisions";
 
 export { heartbeats } from "./schema/ops";
@@ -159,8 +160,10 @@ export type {
 
 export {
   loadCandidates,
+  loadPositionPlan,
   recordCandidate,
   recordCandidateEvaluation,
+  recordPositionPlan,
   CANDIDATE_HORIZONS,
   CANDIDATE_OUTCOMES,
   DECISION_STORE_DIAGNOSTIC_CODES,
@@ -171,9 +174,12 @@ export type {
   DecisionStoreDiagnosticCode,
   RecordCandidateResult,
   RecordEvaluationResult,
+  RecordPositionPlanResult,
   StoreCandidate,
   StoreCandidateEvaluation,
   StoredCandidate,
+  StoredPositionPlan,
+  StorePositionPlan,
   StoreTranche,
 } from "./store/decision-store";
 

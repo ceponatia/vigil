@@ -7,8 +7,9 @@
  * paying costs on a trade whose edge has already evaporated.
  *
  * ```text
- *   authorize.ts   evaluateProposal + recordApprovedIntent
- *   dispatch.ts    reserve -> attempt + outbox -> REVALIDATE -> submit
+ *   authorize.ts   evaluateProposal + recordPositionPlan + recordApprovedIntent
+ *   dispatch.ts    load plan -> REVALIDATE -> reserve -> attempt + outbox -> submit
+ *   position-plan.ts    the durable terms the gate measures against
  *   revalidate.ts  the fresh-quote / net-edge gate every dispatch runs
  *   settle.ts      poll, cancel, reconcile; the confirmed economics and the journal
  *   recover.ts     what a restart owes an unresolved dispatch
@@ -58,10 +59,11 @@ export type {
   DispatchResult,
   DispatchedAttempt,
   ExecutionRuntime,
-  Instrument,
-  PositionPlanTerms,
   RefusedDispatch,
 } from "./dispatch";
+
+export { instrumentIdOf, planTermsFor } from "./position-plan";
+export type { Instrument, PositionPlanTerms, PositionPlanTermsResult } from "./position-plan";
 
 export { isLiveAttemptState, loadUnresolvedDispatches } from "./recover";
 export type { UnresolvedDispatch } from "./recover";

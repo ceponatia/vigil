@@ -15,10 +15,19 @@ import {
 /**
  * The `decisions` record family: what this application decided, recorded
  * **before** the outcome is known (`docs/architecture.md` "Record families";
- * `docs/evaluation.md` "Opportunity journal"). Candidates, their staged
- * position plans, and the evaluations that later judge them land here; the
- * theses and research proposals that sit above a candidate arrive with the
- * research slice that produces them.
+ * `docs/evaluation.md` "Opportunity journal"). Candidates, the staged plans
+ * they are worked through, and the evaluations that later judge them land
+ * here; the theses and research proposals that sit above a candidate arrive
+ * with the research slice that produces them.
+ *
+ * A staged plan is two records rather than one, because two different
+ * readers need two different halves of it. `candidate_tranches` holds the
+ * **staging** — how much is bought at which trigger, hanging off the
+ * candidate that proposed it. `position_plans` holds the **terms** — the
+ * entry band and the thesis exit price, under the id an approved intent
+ * names — because the pre-dispatch gate in `apps/trading` re-measures the
+ * economics against them at every dispatch and cannot reach the candidate's
+ * staging to do it. Neither table restates the other.
  *
  * Three schema decisions carry the invariants this family exists for, and
  * each is a database constraint rather than an application convention:
@@ -227,6 +236,142 @@ export const candidateTranches = pgTable(
       "candidate_tranches_amounts_decimal",
       sql.raw(`${decimalShape("quantity")} and ${nullableDecimalShape("trigger_price")}`),
     ),
+  ],
+);
+
+/**
+ * The durable terms of a staged position plan: the thesis the plan is
+ * executing toward, and the price band its steps may be entered in.
+ *
+ * `approved_intents.position_plan_id` names this record ("the staged plan
+ * this intent executes a step of"). It exists because the pre-dispatch
+ * economic revalidation in `apps/trading` needs two figures the
+ * authorization itself does not carry — the entry zone the approval was
+ * granted within, and the exit price gross edge is measured against — and
+ * a process that restarts between approval and dispatch has no memory to
+ * read them out of. `approved_intents` stores the *result* of the approval
+ * (the gross, the cost breakdown, the hurdle); these are the terms that
+ * result was derived from, and they outlive the process that derived it.
+ *
+ * ## Terms, not staging
+ *
+ * This table deliberately does **not** mirror `@vigil/strategies`'
+ * `PositionPlan`, which is a total quantity split into indexed tranches at
+ * trigger prices. That staging is already durable as `candidate_tranches`,
+ * hanging off the candidate whose thesis produced it, and a second durable
+ * home for the same split would be two records that can disagree about how
+ * much is bought at what price — with nothing to say which one the
+ * execution path should believe. What the execution path cannot get
+ * anywhere else is the *terms*, so the terms are what lives here.
+ *
+ * ## Immutable, and why that matters more here than elsewhere
+ *
+ * The `position_plan_append_only_guard` migration rejects every `UPDATE`
+ * and `DELETE`, for the reason `candidates` is guarded: these prices are
+ * what an authorization was granted against. A plan whose entry zone or
+ * exit price could be edited after approval would let the gate that decides
+ * whether to spend be re-aimed after the fact — the authorization rewritten
+ * through a column rather than through a new intent.
+ *
+ * A plan is recorded once, under the id the intent names, and a second
+ * approval naming the same plan carries the same terms or is refused; the
+ * store's `recordPositionPlan` draws that line, because no single-row
+ * constraint can compare a write against the row already there.
+ *
+ * `formation_reference_mid` is **evidence, never an input**. It says what
+ * the midpoint was when these terms were set, which is the only thing that
+ * makes `thesis_exit_price` interpretable later — a 260.00 target is a
+ * different claim against a 250.05 mid than against a 259.00 one. Nothing
+ * in the pre-dispatch gate reads it, and nothing may: gross edge at
+ * dispatch is measured from the FRESH midpoint, and measuring it from this
+ * one would freeze the per-unit edge at approval, where it would clear its
+ * hurdle forever however far the market had since moved. That is precisely
+ * the decay this application refuses to trade through.
+ *
+ * There is no `candidate_id` here. The candidate a plan came from is
+ * already on the intent that executes it, and the correlation id below is
+ * what `docs/resilience.md` §10 threads a plan, its intents, its attempts
+ * and its postings together with.
+ */
+export const positionPlans = pgTable(
+  "position_plans",
+  {
+    /** The id `approved_intents.position_plan_id` names. */
+    positionPlanId: text("position_plan_id").primaryKey(),
+    /** Ties the plan to the intents, holds, attempts and postings that execute it. */
+    correlationId: text("correlation_id").notNull(),
+    /**
+     * `baseAssetId/quoteAssetId`, both canonical. Every price below is in
+     * the quote asset, and without the pair naming which one that is they
+     * are numbers in no currency — a plan read back by a restarted process
+     * could then supply another instrument's entry zone to this one's gate.
+     */
+    instrumentId: text("instrument_id").notNull(),
+    /** The band a step of this plan may be entered in; the allocator never extends it. */
+    entryZoneMin: text("entry_zone_min").notNull(),
+    entryZoneMax: text("entry_zone_max").notNull(),
+    /**
+     * The price the thesis expects this position to be worth. Fixed by the
+     * thesis rather than by the market, which is what makes it safe to
+     * store: the freshest midpoint is measured against it at every dispatch,
+     * so a mid that rises toward it shrinks the gross edge exactly as it
+     * should.
+     */
+    thesisExitPrice: text("thesis_exit_price").notNull(),
+    /** The midpoint these terms were set against. Evidence — see the header. */
+    formationReferenceMid: text("formation_reference_mid").notNull(),
+    /** When the terms were set; the analysis-completion stage of the timestamp family. */
+    formedAt: timestamp("formed_at", { withTimezone: true, precision: 3, mode: "date" }).notNull(),
+    /** When this application wrote them down. */
+    recordedAt: timestamp("recorded_at", { withTimezone: true, precision: 3, mode: "date" }).notNull(),
+    /**
+     * What produced these terms. Shaped exactly like `candidates`' own
+     * provenance, including which two are nullable: a plan formed without a
+     * portfolio or market snapshot version is a plan nothing snapshotted,
+     * and a blank string there would claim one that never existed.
+     */
+    policyVersion: text("policy_version").notNull(),
+    strategyVersion: text("strategy_version").notNull(),
+    /** Null when no LLM was involved — every deterministic path today. */
+    modelVersion: text("model_version"),
+    portfolioSnapshotVersion: text("portfolio_snapshot_version"),
+    marketSnapshotVersion: text("market_snapshot_version"),
+  },
+  (table) => [
+    // Deliberately not unique: one correlation id ties a plan to the
+    // intents that execute its steps.
+    index("position_plans_correlation_id_idx").on(table.correlationId),
+    check("position_plans_instrument_id_canonical", sql.raw(`instrument_id ~ '${CANONICAL_INSTRUMENT_ID}'`)),
+    check(
+      "position_plans_prices_decimal",
+      sql.raw(
+        [
+          decimalShape("entry_zone_min"),
+          decimalShape("entry_zone_max"),
+          decimalShape("thesis_exit_price"),
+          decimalShape("formation_reference_mid"),
+        ].join(" and "),
+      ),
+    ),
+    // A blank id satisfies NOT NULL and makes a perfectly good primary key,
+    // which is how every unnamed plan ends up sharing one row.
+    check(
+      "position_plans_identity_present",
+      sql`length(btrim(position_plan_id)) > 0 and length(btrim(correlation_id)) > 0`,
+    ),
+    check(
+      "position_plans_provenance_present",
+      sql`length(btrim(policy_version)) > 0 and length(btrim(strategy_version)) > 0`,
+    ),
+    // Terms cannot be written down before they were set.
+    check("position_plans_recorded_after_formation", sql`recorded_at >= formed_at`),
+    // `entry_zone_min <= entry_zone_max` is deliberately NOT restated here.
+    // These columns hold decimal TEXT, where `<=` compares lexicographically
+    // and would call 9.00 greater than 10.00 — a constraint that is wrong
+    // more often than the input it would catch. The ordering rule belongs to
+    // `@vigil/policy`'s `entryZoneSchema`, which refines it at both the
+    // approval and the pre-dispatch gate, so an inverted zone refuses every
+    // dispatch rather than passing one.
   ],
 );
 
