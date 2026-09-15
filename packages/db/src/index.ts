@@ -32,8 +32,30 @@ export type {
   PostingDirectionValue,
 } from "./schema/journal";
 
-export { reservations, reservationStateEnum } from "./schema/intents";
-export type { ReservationStateValue } from "./schema/intents";
+export {
+  approvedIntents,
+  costChargeBasisEnum,
+  costComponentKindEnum,
+  dispatchStateEnum,
+  executionAttempts,
+  executionAttemptStateEnum,
+  intentCostComponents,
+  intentDispatchOutbox,
+  netEdgeBasisEnum,
+  reservations,
+  reservationStateEnum,
+  LIVE_EXECUTION_ATTEMPT_STATES,
+  TERMINAL_EXECUTION_ATTEMPT_STATES,
+} from "./schema/intents";
+export type {
+  ApprovedIntentRow,
+  CostChargeBasisValue,
+  CostComponentKindValue,
+  DispatchStateValue,
+  ExecutionAttemptStateValue,
+  NetEdgeBasisValue,
+  ReservationStateValue,
+} from "./schema/intents";
 
 export {
   candidateEvaluations,
@@ -65,6 +87,50 @@ export type {
 
 export { loadActiveReservations, reserveAvailable } from "./store/reservation-store";
 export type { ReserveRequest, ReserveResult } from "./store/reservation-store";
+
+export {
+  loadApprovedIntent,
+  loadApprovedIntentsByCorrelation,
+  recordApprovedIntent,
+  COST_CHARGE_BASES,
+  COST_COMPONENT_KINDS,
+  INTENT_STORE_DIAGNOSTIC_CODES,
+  NET_EDGE_BASES,
+} from "./store/intent-store";
+export type {
+  IntentCostComponent,
+  IntentEconomics,
+  IntentInputSide,
+  IntentOutputSide,
+  IntentProvenance,
+  IntentRefusal,
+  IntentStoreDiagnosticCode,
+  RecordApprovedIntentResult,
+  StoreApprovedIntent,
+} from "./store/intent-store";
+
+export {
+  abandonDispatch,
+  loadDispatch,
+  loadExecutionAttempts,
+  loadPendingDispatches,
+  markDispatched,
+  openExecutionAttempt,
+  recordAttemptOutcome,
+  EXECUTION_ATTEMPT_STATES,
+} from "./store/execution-store";
+export type {
+  AbandonDispatchRequest,
+  AttemptOutcome,
+  DispatchClaim,
+  DispatchResult,
+  MarkDispatchedRequest,
+  OpenAttemptRequest,
+  OpenAttemptResult,
+  RecordAttemptOutcomeResult,
+  StoredDispatch,
+  StoredExecutionAttempt,
+} from "./store/execution-store";
 
 export {
   loadCandidates,

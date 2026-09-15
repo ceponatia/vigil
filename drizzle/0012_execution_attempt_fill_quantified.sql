@@ -1,0 +1,1 @@
+ALTER TABLE "execution_attempts" ADD CONSTRAINT "execution_attempts_fill_quantified" CHECK (state not in ('FILLED', 'PARTIALLY_FILLED') or (spent_base > 0 and received_base > 0));
