@@ -15,8 +15,8 @@ import {
 import type { StoreCandidate, StoreCandidateEvaluation, StoredBalance, VigilDatabase } from "@vigil/db";
 import { quoteSnapshotSchema } from "@vigil/market";
 import type { QuoteSnapshot } from "@vigil/market";
-import { addDecimal, evaluateEntry, generateCandidate, subtractDecimal } from "@vigil/strategies";
-import type { Candidate, EntryEvaluationRecord, StrategyConfig } from "@vigil/strategies";
+import { addDecimal, evaluateEntry, subtractDecimal } from "@vigil/strategies";
+import type { Candidate, EntryEvaluationRecord } from "@vigil/strategies";
 
 import { authorizeProposal } from "./authorize";
 import type { TradeProposal } from "./authorize";
@@ -40,8 +40,15 @@ import {
   syntheticInstrument,
   venueConfig,
 } from "./test-support/execution-fixtures";
-import { SYNTHETIC_MARKET_EXPECTED_QUOTES } from "../../../../tests/fixtures/synthetic-market";
-import type { SyntheticMarketFixtureQuote } from "../../../../tests/fixtures/synthetic-market";
+import {
+  ENTRY_NOW,
+  ENTRY_QUOTE,
+  FORMATION_NOW,
+  FORMATION_QUOTE,
+  formReplayCandidate,
+  replayQuote,
+} from "./test-support/replay-scenario";
+import type { SyntheticMarketFixtureQuote } from "./test-support/replay-scenario";
 
 /**
  * vertical-replay.int.test.ts — BOOT-08's one deterministic PAPER replay:
@@ -133,8 +140,10 @@ import type { SyntheticMarketFixtureQuote } from "../../../../tests/fixtures/syn
  * is not selected for `tests/fixtures/*` or `packages/strategies/*`, which
  * are the two paths a change invalidating that premise would touch, so a
  * guard living in here would never run on the change it exists to catch.
- * The strategy config and the two quote indexes are stated in both files;
- * change them together.
+ *
+ * Both files take the quotes, the injected instants, the strategy config and
+ * the candidate formation from `test-support/replay-scenario.ts`, so the
+ * guard cannot drift into checking values this replay no longer uses.
  *
  * ## Terminal record
  *
@@ -193,47 +202,6 @@ const VALID_UNTIL = instant("2024-01-01T01:00:00.000Z");
 const CAPITAL_FUNDED_AT = instant("2024-01-01T00:00:00.000Z");
 
 /**
- * The recorded BOOT-03 quotes this replay runs on. Index 5 is a local high
- * and index 8 a later pullback; `assertRecordedPremise` pins both, because
- * if the fixture is ever re-recorded the pullback these offsets describe
- * changes and the whole scenario has to be re-derived rather than silently
- * testing something else.
- */
-const FORMATION_QUOTE = recordedQuoteAt(5);
-const ENTRY_QUOTE = recordedQuoteAt(8);
-
-/** One second after each quote was acquired — inside every freshness window here. */
-const FORMATION_NOW = instant("2024-01-01T00:05:01.000Z");
-const ENTRY_NOW = instant("2024-01-01T00:08:01.000Z");
-
-/**
- * The strategy's parameters for this replay.
- *
- * `DEFAULT_STRATEGY_CONFIG`'s 2.00 pullback and 3.00 zone width cannot
- * reach an entry on this fixture at all: the recorded asks span 249.61 to
- * 250.96, so a zone set 2.00 below any of them is never revisited within
- * the recording. These offsets are sized to the fixture's actual movement
- * instead — a deploy-time value, exactly as `StrategyConfig` describes —
- * and the relationship the whole replay rests on is a property of the
- * numbers rather than of any assertion: `pullback` (0.50) is larger than
- * `allowedExtension` (0.25), so the ask that FORMS a candidate is always
- * beyond the extension and is never itself an entry.
- */
-const REPLAY_STRATEGY_CONFIG: StrategyConfig = {
-  strategyId: "bounded-pullback-v1",
-  strategyVersion: "1.0.0",
-  actionDetail: "SMALL_STARTER",
-  horizon: "swing",
-  pullback: money("0.50"),
-  zoneWidth: money("1.50"),
-  invalidationOffset: money("2.00"),
-  allowedExtension: money("0.25"),
-  trancheCount: 3,
-  totalQuantity: money("3.0000"),
-  expiryMs: 24 * 60 * 60 * 1000,
-};
-
-/**
  * Reconciled four minutes before the formation quote — inside
  * `maxReconciliationAgeMs` at both instants this replay evaluates at.
  *
@@ -267,16 +235,6 @@ const REPLAY_PORTFOLIO = portfolio({
   exposureCaps: [exposureCap({ capQuote: money("100000.00") })],
 });
 
-function recordedQuoteAt(index: number): SyntheticMarketFixtureQuote {
-  const quote = SYNTHETIC_MARKET_EXPECTED_QUOTES[index];
-  if (quote === undefined) {
-    throw new Error(
-      `the recorded BOOT-03 fixture has no quote at index ${String(index)}; this replay's scenario must be re-derived`,
-    );
-  }
-  return quote;
-}
-
 /**
  * The five recorded values this file's own assertions are derived from: the
  * two asks that fix every execution price below, the quantity the trade is
@@ -296,44 +254,21 @@ function assertScenarioInputs(): void {
   expect(ENTRY_QUOTE.timestamps.quoteAcquiredAt).toBe("2024-01-01T00:08:00.000Z");
 }
 
-/**
- * A recorded quote re-keyed onto this case's own synthetic instrument.
- *
- * Every price, quantity and instant is the fixture's verbatim — including
- * the 250ms ingestion lag, which `evaluateQuoteFreshness` checks against
- * both `quoteAcquiredAt` and `now`. Only the instrument id differs, because
- * the shared integration database gives each case its own asset pair.
- */
-function rawQuoteFor(instrument: Instrument, recorded: SyntheticMarketFixtureQuote): unknown {
-  return {
-    instrumentId: `${instrument.baseAssetId}/${instrument.quoteAssetId}`,
-    bidPrice: recorded.bidPrice,
-    askPrice: recorded.askPrice,
-    bidQuantity: recorded.bidQuantity,
-    askQuantity: recorded.askQuantity,
-    timestamps: {
-      quoteAcquiredAt: recorded.timestamps.quoteAcquiredAt,
-      ingestedAt: recorded.timestamps.ingestedAt,
-    },
-  };
-}
-
 function parsedQuoteFor(instrument: Instrument, recorded: SyntheticMarketFixtureQuote): QuoteSnapshot {
-  return quoteSnapshotSchema.parse(rawQuoteFor(instrument, recorded));
+  return quoteSnapshotSchema.parse(replayQuote(instrument, recorded));
 }
 
-/** The candidate this replay's strategy produces from a recorded quote, or a failure naming why not. */
+/**
+ * The candidate, formed through the shared scenario so this file and the
+ * premise guard cannot form it differently. A recording that no longer
+ * produces one fails here rather than several assertions later.
+ */
 function candidateFrom(
   instrument: Instrument,
   recorded: SyntheticMarketFixtureQuote,
   now: IsoUtcTimestamp,
 ): Candidate {
-  const generated = generateCandidate({
-    quote: rawQuoteFor(instrument, recorded),
-    now,
-    maxQuoteAgeMs: POLICY.maxQuoteAgeMs,
-    config: REPLAY_STRATEGY_CONFIG,
-  });
+  const generated = formReplayCandidate(instrument, recorded, now);
   if (generated.outcome !== "candidate") {
     throw new Error(
       `the recorded quote produced no candidate (${generated.outcome}); this replay's premise no longer holds`,
@@ -528,7 +463,7 @@ describe("the vertical PAPER replay (composed by this test; apps/trading wires n
     // ---- 2. the current-entry check admits the later quote ----------------
     const entry = evaluateEntry({
       candidate,
-      quote: rawQuoteFor(instrument, ENTRY_QUOTE),
+      quote: replayQuote(instrument, ENTRY_QUOTE),
       now: ENTRY_NOW,
       maxQuoteAgeMs: POLICY.maxQuoteAgeMs,
     });
@@ -599,7 +534,7 @@ describe("the vertical PAPER replay (composed by this test; apps/trading wires n
       intentId: authorized.intentId,
       attempt: 1,
       instrument,
-      quote: rawQuoteFor(instrument, ENTRY_QUOTE),
+      quote: replayQuote(instrument, ENTRY_QUOTE),
       now: ENTRY_NOW,
       portfolio: REPLAY_PORTFOLIO,
       ids: dispatchIds(label),
@@ -718,7 +653,7 @@ describe("the vertical PAPER replay (composed by this test; apps/trading wires n
     // rewritten into a BUY at the higher price.
     const chase = evaluateEntry({
       candidate,
-      quote: rawQuoteFor(instrument, FORMATION_QUOTE),
+      quote: replayQuote(instrument, FORMATION_QUOTE),
       now: FORMATION_NOW,
       maxQuoteAgeMs: POLICY.maxQuoteAgeMs,
     });
