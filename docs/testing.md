@@ -6,9 +6,17 @@
 | ----------------------- | ----------------------------------------------- | ------------------------------ |
 | Unit                    | `*.test.ts`, co-located with source, root Vitest project `unit` | None — pure functions only     |
 | Integration             | `*.int.test.ts`, root Vitest project `integration` | Postgres                       |
-| Replay                  | `tests/replay/`                                 | Deterministic full-lifecycle replays against recorded or synthetic fixtures |
-| Fault injection         | `tests/fault-injection/`                        | The scenario matrix below, exercised against fake adapters/providers |
+| Replay                  | `tests/replay/`, or beside the owning `apps/*` code as `*.int.test.ts` when the replay must drive an `adapter-*` package | Deterministic full-lifecycle replays against recorded or synthetic fixtures |
+| Fault injection         | `tests/fault-injection/`, or beside the owning `apps/*` code as `*.int.test.ts` when the scenario must drive an `adapter-*` package | The scenario matrix below, exercised against fake adapters/providers |
 | Fixtures                | `tests/fixtures/`                               | Synthetic only — no personal holdings, no real addresses, no keys |
+
+Layer names a *kind* of scenario; the layer graph in `docs/architecture.md`
+"Layer graph and import rules" decides *where* it can actually run. Only
+`apps/trading` may import an `adapter-*` package, so a replay or
+fault-injection scenario that must drive one lives beside the `apps/trading`
+code that owns it, as an `*.int.test.ts` selected by the same root Vitest
+`integration` project as everything under `tests/` — never by relaxing that
+import boundary to let `tests/**` reach an adapter.
 
 ## CI mapping
 
