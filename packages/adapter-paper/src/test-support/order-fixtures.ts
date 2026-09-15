@@ -88,7 +88,14 @@ export function rawIntent(overrides: Record<string, unknown> = {}): Record<strin
     quantity: "2.0000",
     maxSpend: "510.00",
     minAcceptableReceipt: "0",
-    permittedResidual: "0.0100",
+    // INPUT-asset, like `maxSpend` beside it and unlike `quantity` above
+    // (`OrderEnvelope.permittedResidual`). A dollar of the approved spend may
+    // come back without the buy counting as unfinished. Deliberately a
+    // money-scale value: at this fixture's ask of 250.10 a dollar of quote is
+    // worth about 0.0040 of base, so a settlement's unspent capital and its
+    // unfilled quantity straddle this number differently — a test that swaps
+    // the two readings cannot pass by coincidence.
+    permittedResidual: "1.00",
     validUntil: "2024-01-01T00:10:00.000Z",
     requiredFreshnessMs: 60_000,
     adapterCapabilityVersion: PAPER_ADAPTER_CAPABILITY_VERSION,
@@ -119,6 +126,14 @@ export const SELL_INTENT: Record<string, unknown> = {
   inputAssetId: TEST_BASE_ASSET_ID,
   outputAssetId: TEST_QUOTE_ASSET_ID,
   minAcceptableReceipt: "490.00",
+  // `maxSpend` and `permittedResidual` bound the INPUT asset, which for a
+  // sell is the base asset being delivered — so they are quantities here, not
+  // money, and the buy's "510.00" would be nonsense. `apps/trading` refuses
+  // the sell side outright today (`authorize.ts`, `EXIT_PATH_NOT_BUILT`), so
+  // this is the fixture stating the contract rather than pinning a shipped
+  // path.
+  maxSpend: "2.0000",
+  permittedResidual: "0.0100",
 };
 
 /**

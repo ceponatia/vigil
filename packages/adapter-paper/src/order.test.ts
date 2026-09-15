@@ -149,6 +149,11 @@ describe("the caller's own three steps are guarded like every other transition",
       feeSnapshotVersion: "fee-0001",
     });
     expect(order.envelope.maxSpend).toBe("510.00");
+    // Carried through in the asset it was approved in. `maxSpend` and
+    // `permittedResidual` are both INPUT-asset amounts, so this order's
+    // residual is one unit of the quote asset and not 1.00 of the base asset
+    // it is buying.
+    expect(order.envelope.permittedResidual).toBe("1.00");
     expect(order.capabilityVersion).toBe(PAPER_ADAPTER_CAPABILITY_VERSION);
     expect(order.clientOrderId).toBe("idem-0001");
     expect(order.venueOrderId).toBeNull();
@@ -163,6 +168,9 @@ describe("settlementOf releases nothing until the venue has settled the order", 
     // null, not "2.0000": nothing is released on the strength of an order
     // the venue has not answered for.
     expect(settlement.releasableRemainder).toBeNull();
+    // Null for the same reason and in the same states: the 510.00 this order
+    // holds is not "unspent" while the order could still spend it.
+    expect(settlement.unspentInput).toBeNull();
     expect(settlement.filledQuantity).toBe("0.0000");
     expect(settlement.unfilledQuantity).toBe("2.0000");
     expect(settlement.residualExceedsPermitted).toBe(false);

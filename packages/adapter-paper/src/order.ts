@@ -10,7 +10,7 @@ import { ACTION_ORDER_SIDES, approvedOrderIntentSchema } from "./intent";
 import type { OrderEnvelope, OrderProvenance, OrderSide } from "./intent";
 import { isLegalOrderTransition, isTerminalOrderState } from "./order-state";
 import type { OrderState } from "./order-state";
-import { MAX_SUPPORTED_DECIMAL_SCALE, compareDecimals, fractionalDigits, unitsOf } from "./venue-math";
+import { MAX_SUPPORTED_DECIMAL_SCALE, compareDecimals, fractionalDigits, renderUnits, unitsOf } from "./venue-math";
 
 /**
  * order.ts — the order record a caller holds, and the three things a
@@ -317,14 +317,20 @@ export function reserveOrder(order: PaperOrder, at: IsoUtcTimestamp): OrderTrans
  * the fill actually cost.
  *
  * Two halves, kept apart because they answer different questions. The release
- * half says what capital comes back; `economics` says what the trade was worth
- * after every cost (`execution-economics.ts`).
+ * half says what comes back; `economics` says what the trade was worth after
+ * every cost (`execution-economics.ts`).
+ *
+ * The release half carries BOTH assets, separately and labelled, because for
+ * a buy they are not the same asset and a single "remainder" would have to
+ * pick one silently: `releasableRemainder` is the OUTPUT quantity that will
+ * never be acquired now, and `unspentInput` is the INPUT capital the approved
+ * spend did not consume. The residual check reads the second one.
  *
  * The arithmetic `docs/resilience.md` §3 demands lives in the release half:
  * filled exposure and the fees paid for it PERSIST through a cancellation, and
  * only the confirmed unfilled remainder is released. The mechanism that
- * enforces "confirmed" is `releasableRemainder` being `null` — not zero, not
- * the remainder — for every state whose outcome the venue has not settled. An
+ * enforces "confirmed" is both figures being `null` — not zero, not the
+ * remainder — for every state whose outcome the venue has not settled. An
  * `UNKNOWN` order, a `CANCEL_PENDING` order, and a live `PARTIALLY_FILLED`
  * order all release nothing, because in each case the quantity that is still
  * working could yet fill.
@@ -335,19 +341,107 @@ export type OrderSettlement = {
   readonly settled: boolean;
   readonly filledQuantity: DecimalString;
   readonly unfilledQuantity: DecimalString;
-  /** `null` until the venue has confirmed there is nothing left working. */
+  /**
+   * The OUTPUT-asset quantity that will never be acquired now, and `null`
+   * until the venue has confirmed there is nothing left working. A quantity,
+   * not an amount of capital — `unspentInput` below is the capital figure.
+   */
   readonly releasableRemainder: DecimalString | null;
   /**
-   * Whether a PARTIALLY filled order left a confirmed remainder larger than
-   * the residual the intent permitted — the case where the caller has to
+   * The INPUT-asset amount this authorization approved for spending and the
+   * fill did not consume: `maxSpend` less what actually left — the venue's
+   * own `netCapitalConsumed` for a buy, the delivered quantity for a sell.
+   * `null` for exactly the states `releasableRemainder` is null for, because
+   * an order that could still fill has consumed no final amount.
+   *
+   * This is the figure `residualExceedsPermitted` compares, and it is the
+   * same figure the ledger releases: `apps/trading/src/execution/settle.ts`
+   * posts `max_spend_base - <input actually consumed>` back from `reserved`
+   * to `available`, in the input asset, at the same scale. Stated on the
+   * settlement so that comparison is inspectable rather than implied.
+   *
+   * Measured against the approved CEILING, not against a re-derived estimate
+   * of what a complete fill would have cost. The two coincide in this
+   * application — `apps/trading`'s `envelopeFor` sets `maxSpend` to exactly
+   * the full-fill spend at the venue's own capped price — and where a caller
+   * approves a more conservative ceiling than that, this figure reports the
+   * larger amount because that larger amount is what the ledger actually
+   * hands back. A residual flag that asks about capital genuinely sitting in
+   * a journal entry is the recoverable direction; one computed from a
+   * hypothetical fill would disagree with the books.
+   *
+   * Clamped at zero. A confirmed overspend leaves nothing unspent, and it is
+   * already reported far more loudly than a residual flag could —
+   * `settle.ts` raises `OVERSPEND_CONFIRMED` against the same ceiling.
+   */
+  readonly unspentInput: DecimalString | null;
+  /**
+   * Whether a PARTIALLY filled order left more of the approved spend
+   * unconsumed than the intent permitted — the case where the caller has to
    * decide what to do with a position it did not finish building, rather than
-   * write the leftover off as dust. An order that never filled at all leaves
-   * no residual: the whole quantity simply returns unspent.
+   * write the leftover off as dust.
+   *
+   * **Both sides of this comparison are INPUT-asset amounts**, which is the
+   * whole point of the field: `unspentInput` against
+   * `envelope.permittedResidual`, directly, with no conversion here and none
+   * at the caller. `OrderEnvelope.permittedResidual` cites the decision that
+   * fixes the denomination.
+   *
+   * Two orders are deliberately excluded:
+   *
+   * - one that never filled at all — the whole quantity simply returns
+   *   unspent and there is no partial position to decide about; and
+   * - one that filled COMPLETELY — the action finished, so whatever the
+   *   envelope's ceiling left over is the approval's own conservatism rather
+   *   than an incomplete action. Under the previous output-quantity reading
+   *   this fell out arithmetically (a complete fill leaves zero unfilled);
+   *   measured against `maxSpend` it has to be said explicitly.
    */
   readonly residualExceedsPermitted: boolean;
   /** The full cost breakdown, including which components the price already contained. */
   readonly economics: ExecutionEconomics;
 };
+
+/**
+ * The INPUT-asset amount the authorization approved and the fill did not
+ * consume, as a decimal at whatever scale holds both operands exactly.
+ *
+ * `maxSpend` bounds the input asset on both sides of the book, so the
+ * subtrahend is the input asset actually consumed, which is side-dependent
+ * and nothing else about this is:
+ *
+ * - **BUY** — `netCapitalConsumed`, the quote asset that left, gross notional
+ *   plus the separately charged costs. Never re-derived from gross plus every
+ *   cost: the spread and the slippage are already inside the gross, and
+ *   adding them again is exactly the double count `execution-economics.ts`
+ *   exists to prevent.
+ * - **SELL** — the filled quantity, because the asset a sell consumes IS the
+ *   base asset it delivers.
+ *
+ * Both branches match `apps/trading/src/execution/settle.ts`'s `spentBase`
+ * term by term, so the adapter's residual question and the ledger's release
+ * are the same arithmetic on the same asset.
+ *
+ * The scale is the wider of the two operands' own scales, so neither
+ * conversion can lose a unit and neither can fail — `maxSpend` is bounded at
+ * `MAX_SUPPORTED_DECIMAL_SCALE` by `proposeOrder` and the consumed amount is
+ * rendered at one of the venue's own scales.
+ */
+function unspentInputOf(order: PaperOrder, economics: ExecutionEconomics): DecimalString {
+  const consumed = order.side === "BUY" ? (economics.netCapitalConsumed ?? ZERO) : economics.filledQuantity;
+  const scale = Math.max(fractionalDigits(order.envelope.maxSpend), fractionalDigits(consumed));
+  const approvedUnits = unitsOf(order.envelope.maxSpend, scale);
+  const consumedUnits = unitsOf(consumed, scale);
+  if (approvedUnits === null || consumedUnits === null) {
+    // Unreachable: `scale` is the wider of the two values' own scales, so it
+    // holds each of them exactly by construction.
+    throw new Error(
+      `unspentInputOf: "${order.envelope.maxSpend}" and "${consumed}" do not both fit scale ${String(scale)}`,
+    );
+  }
+  const unspentUnits = approvedUnits - consumedUnits;
+  return renderUnits(unspentUnits > 0n ? unspentUnits : 0n, scale);
+}
 
 function requireUnits(value: DecimalString, scale: number): bigint {
   const units = unitsOf(value, scale);
@@ -385,6 +479,11 @@ export function settlementOf(order: PaperOrder): OrderSettlement {
 
   const settled = isTerminalOrderState(order.state);
   const releasableRemainder = settled ? economics.unfilledQuantity : null;
+  const unspentInput = settled ? unspentInputOf(order, economics) : null;
+  // A fill that is neither nothing nor everything. `filledUnits` is exact
+  // integer arithmetic; the unfilled side is read off the economics because
+  // the requested quantity is normalized to the venue's scale there.
+  const partiallyFilled = filledUnits > 0n && compareDecimals(economics.unfilledQuantity, ZERO) > 0;
 
   return {
     state: order.state,
@@ -392,10 +491,11 @@ export function settlementOf(order: PaperOrder): OrderSettlement {
     filledQuantity: economics.filledQuantity,
     unfilledQuantity: economics.unfilledQuantity,
     releasableRemainder,
+    unspentInput,
     residualExceedsPermitted:
-      releasableRemainder !== null &&
-      filledUnits > 0n &&
-      compareDecimals(releasableRemainder, order.envelope.permittedResidual) > 0,
+      unspentInput !== null &&
+      partiallyFilled &&
+      compareDecimals(unspentInput, order.envelope.permittedResidual) > 0,
     economics,
   };
 }

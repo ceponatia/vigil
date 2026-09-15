@@ -249,6 +249,12 @@ describe("fills: exact arithmetic, nothing reported before it is due, identical 
     expect(venueFee(settlement)).toBe("1.26");
     expect(settlement.economics.netCashFlow).toBe("-501.46");
     expect(settlement.releasableRemainder).toBe("0.0000");
+    // 510.00 was approved and 501.46 spent, so 8.54 of the INPUT asset comes
+    // back — the approval's own conservatism, not an unfinished action. Far
+    // above the permitted residual of 1.00, and still not flagged: a
+    // COMPLETE fill is never a residual.
+    expect(settlement.unspentInput).toBe("8.54");
+    expect(settlement.residualExceedsPermitted).toBe(false);
   });
 
   it("credits a sell, net of its fee, instead of debiting it", () => {
@@ -538,6 +544,11 @@ describe("cancellation: filled exposure persists, only the confirmed remainder i
     const settlement = settlementOf(canceled);
     expect(settlement.filledQuantity).toBe("0.0000");
     expect(settlement.releasableRemainder).toBe("2.0000");
+    // The whole approved spend comes back, far above the permitted residual
+    // of 1.00, and it is still not a residual: an order that never filled
+    // leaves no partial position to decide about.
+    expect(settlement.unspentInput).toBe("510.00");
+    expect(settlement.residualExceedsPermitted).toBe(false);
   });
 
   it("keeps a partial fill and its fee after a cancellation, releasing only the unfilled remainder", () => {
@@ -572,8 +583,11 @@ describe("cancellation: filled exposure persists, only the confirmed remainder i
     expect(venueFee(settlement)).toBe("0.32");
     expect(settlement.economics.netCashFlow).toBe("-125.37");
     expect(settlement.releasableRemainder).toBe("1.5000");
-    // 1.5000 is far more than the intent's permitted residual of 0.0100, so
-    // the caller is told rather than left to assume it was dust.
+    // The two halves of the release, in their two different assets: 1.5000 of
+    // the OUTPUT asset will never be acquired, and 384.63 of the INPUT asset
+    // (510.00 approved, 125.37 spent) never left. The residual check reads
+    // the second one, against the permitted 1.00.
+    expect(settlement.unspentInput).toBe("384.63");
     expect(settlement.residualExceedsPermitted).toBe(true);
 
     // The scheduled second execution is gone: a canceled order does not
@@ -581,6 +595,48 @@ describe("cancellation: filled exposure persists, only the confirmed remainder i
     const report = exchange.readVenueState({ now: afterAcceptance(60_000) });
     expect(report.executions).toHaveLength(1);
     expect(report.closedOrders.map((view) => view.state)).toEqual(["CANCELED"]);
+  });
+
+  it("measures the permitted residual in the input asset, where the output quantity would say the opposite", () => {
+    // The fixture exists to separate the two readings of `permittedResidual`,
+    // because a fill where they agree proves nothing about which one is
+    // implemented (issue #53).
+    //
+    //   approved   2.0000 base for at most 510.00 quote, residual 1.00 quote
+    //   filled     1.9990 base, costing 499.95 + 1.25 fee = 501.20 quote
+    //   left over  0.0010 base  <- the OUTPUT reading: 0.0010 > 1.00 is FALSE
+    //              8.80 quote   <- the INPUT reading:  8.80  > 1.00 is TRUE
+    //
+    // A factor of 8,800 between the two numbers, with the permitted residual
+    // sitting between them, so the assertions below can only pass under the
+    // input-asset reading. Before this alignment the adapter took the
+    // output reading and `apps/trading` converted the stored input amount at
+    // the intent's approved ratio to feed it; both are gone.
+    const exchange = exchangeWith({
+      submission: { kind: "ACKNOWLEDGE" },
+      executions: { kind: "STEPS", steps: [{ quantity: d("1.9990"), afterMs: 0 }] },
+      cancellation: { kind: "CONFIRM" },
+    });
+
+    const acknowledged = submitted(submitDefault(exchange), "ACKNOWLEDGED");
+    const partial = polled(exchange.pollOrder({ order: acknowledged, now: afterAcceptance(0) }));
+    expect(partial.state).toBe("PARTIALLY_FILLED");
+
+    const canceled = cancelled(exchange.cancelOrder({ order: partial, now: afterAcceptance(1_000) }), "CANCELED");
+    const settlement = settlementOf(canceled);
+
+    expect(settlement.filledQuantity).toBe("1.9990");
+    expect(settlement.economics.grossNotional).toBe("499.95");
+    expect(venueFee(settlement)).toBe("1.25");
+    expect(settlement.economics.netCapitalConsumed).toBe("501.20");
+
+    // The two assets, side by side.
+    expect(settlement.releasableRemainder).toBe("0.0010");
+    // `maxSpend` less what actually left, to the unit — the same subtraction
+    // `apps/trading`'s `settle.ts` posts as a reservation release.
+    expect(settlement.unspentInput).toBe("8.80");
+    expect(canceled.envelope.permittedResidual).toBe("1.00");
+    expect(settlement.residualExceedsPermitted).toBe(true);
   });
 
   it("treats a lost cancellation confirmation as unresolved, and reconciliation settles it", () => {
