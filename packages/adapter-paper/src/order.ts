@@ -4,11 +4,13 @@ import type { AssetId, DecimalString, IsoUtcTimestamp } from "@vigil/contracts";
 import { PAPER_ADAPTER_CAPABILITY_VERSION } from "./capability";
 import { adapterRefusal } from "./diagnostics";
 import type { PaperRefusal } from "./diagnostics";
+import { computeExecutionEconomics } from "./execution-economics";
+import type { ExecutionEconomics, VenuePricing } from "./execution-economics";
 import { ACTION_ORDER_SIDES, approvedOrderIntentSchema } from "./intent";
 import type { OrderEnvelope, OrderProvenance, OrderSide } from "./intent";
 import { isLegalOrderTransition, isTerminalOrderState } from "./order-state";
 import type { OrderState } from "./order-state";
-import { compareDecimals, fractionalDigits, renderUnits, unitsOf } from "./venue-math";
+import { MAX_SUPPORTED_DECIMAL_SCALE, compareDecimals, fractionalDigits, unitsOf } from "./venue-math";
 
 /**
  * order.ts — the order record a caller holds, and the three things a
@@ -76,6 +78,15 @@ export type PaperOrder = {
   readonly history: readonly OrderTransitionRecord[];
   readonly provenance: OrderProvenance;
   readonly envelope: OrderEnvelope;
+  /**
+   * What the venue fixed about this order's economics when it was submitted:
+   * the top of book it priced from, the price every execution fills at, the
+   * fee rate and the fixture's fixed cost. `null` until submission. Stamped
+   * onto the order so the cost breakdown can be recomputed from the order
+   * alone — no exchange instance and no quote needed, which is what lets
+   * `packages/db` persist an order and `packages/policy` read its economics.
+   */
+  readonly pricing: VenuePricing | null;
   readonly capabilityVersion: string;
   readonly proposedAt: IsoUtcTimestamp;
   readonly submittedAt: IsoUtcTimestamp | null;
@@ -148,6 +159,30 @@ export function proposeOrder(params: ProposeOrderParams): ProposeOrderResult {
     };
   }
 
+  // Before ANY arithmetic on a caller-supplied amount. `decimalStringSchema`
+  // bounds neither precision nor scale (`packages/contracts/src/money.ts`), so
+  // a schema-legal amount carrying more fractional digits than this package's
+  // arithmetic accepts would throw out of a function this docstring promises
+  // never throws. It is refused with a reason code instead
+  // (`docs/resilience.md` §4).
+  const overPrecise = (
+    [
+      ["quantity", intent.quantity],
+      ["maxSpend", intent.maxSpend],
+      ["minAcceptableReceipt", intent.minAcceptableReceipt],
+      ["permittedResidual", intent.permittedResidual],
+    ] as const
+  ).find(([, value]) => fractionalDigits(value) > MAX_SUPPORTED_DECIMAL_SCALE);
+  if (overPrecise !== undefined) {
+    return {
+      accepted: false,
+      refusal: adapterRefusal(
+        "VENUE_PRECISION_EXCEEDED",
+        `${overPrecise[0]} carries ${String(fractionalDigits(overPrecise[1]))} fractional digits; this adapter's arithmetic holds at most ${String(MAX_SUPPORTED_DECIMAL_SCALE)}`,
+      ),
+    };
+  }
+
   if (compareDecimals(intent.quantity, ZERO) <= 0) {
     return {
       accepted: false,
@@ -187,6 +222,7 @@ export function proposeOrder(params: ProposeOrderParams): ProposeOrderResult {
         marketSnapshotVersion: intent.marketSnapshotVersion,
         feeSnapshotVersion: intent.feeSnapshotVersion,
       },
+      pricing: null,
       envelope: {
         maxSpend: intent.maxSpend,
         minAcceptableReceipt: intent.minAcceptableReceipt,
@@ -262,16 +298,21 @@ export function reserveOrder(order: PaperOrder, at: IsoUtcTimestamp): OrderTrans
 }
 
 /**
- * What the caller owes the ledger once this order's state is known.
+ * What the caller owes the ledger once this order's state is known, and what
+ * the fill actually cost.
  *
- * The arithmetic `docs/resilience.md` §3 demands is explicit here: filled
- * exposure and the fees paid for it PERSIST through a cancellation, and
+ * Two halves, kept apart because they answer different questions. The release
+ * half says what capital comes back; `economics` says what the trade was worth
+ * after every cost (`execution-economics.ts`).
+ *
+ * The arithmetic `docs/resilience.md` §3 demands lives in the release half:
+ * filled exposure and the fees paid for it PERSIST through a cancellation, and
  * only the confirmed unfilled remainder is released. The mechanism that
- * enforces "confirmed" is `releasableRemainder` being `null` — not zero,
- * not the remainder — for every state whose outcome the venue has not
- * settled. An `UNKNOWN` order, a `CANCEL_PENDING` order, and a live
- * `PARTIALLY_FILLED` order all release nothing, because in each case the
- * quantity that is still working could yet fill.
+ * enforces "confirmed" is `releasableRemainder` being `null` — not zero, not
+ * the remainder — for every state whose outcome the venue has not settled. An
+ * `UNKNOWN` order, a `CANCEL_PENDING` order, and a live `PARTIALLY_FILLED`
+ * order all release nothing, because in each case the quantity that is still
+ * working could yet fill.
  */
 export type OrderSettlement = {
   readonly state: OrderState;
@@ -279,68 +320,67 @@ export type OrderSettlement = {
   readonly settled: boolean;
   readonly filledQuantity: DecimalString;
   readonly unfilledQuantity: DecimalString;
-  readonly grossNotional: DecimalString;
-  readonly feesPaid: DecimalString;
-  /** Negative for a buy (cash out, fees included), positive for a sell (cash in, fees deducted). */
-  readonly netCashFlow: DecimalString;
   /** `null` until the venue has confirmed there is nothing left working. */
   readonly releasableRemainder: DecimalString | null;
   /**
    * Whether a PARTIALLY filled order left a confirmed remainder larger than
    * the residual the intent permitted — the case where the caller has to
-   * decide what to do with a position it did not finish building, rather
-   * than write the leftover off as dust. An order that never filled at all
-   * leaves no residual: the whole quantity simply returns unspent.
+   * decide what to do with a position it did not finish building, rather than
+   * write the leftover off as dust. An order that never filled at all leaves
+   * no residual: the whole quantity simply returns unspent.
    */
   readonly residualExceedsPermitted: boolean;
+  /** The full cost breakdown, including which components the price already contained. */
+  readonly economics: ExecutionEconomics;
 };
 
 function requireUnits(value: DecimalString, scale: number): bigint {
   const units = unitsOf(value, scale);
   if (units === null) {
-    throw new Error(`settlementOf: "${value}" does not fit the scale (${String(scale)}) derived from the order itself`);
+    throw new Error(`settlementOf: "${value}" does not fit the scale (${String(scale)}) the venue itself rendered it at`);
   }
   return units;
 }
 
 export function settlementOf(order: PaperOrder): OrderSettlement {
-  const quantityScale = order.executions.reduce(
-    (widest, execution) => Math.max(widest, fractionalDigits(execution.quantity)),
-    fractionalDigits(order.quantity),
-  );
-  const moneyScale = order.executions.reduce(
-    (widest, execution) => Math.max(widest, fractionalDigits(execution.notional), fractionalDigits(execution.fee)),
-    0,
-  );
+  const pricing = order.pricing;
+  // The scales come from the venue's own stamp rather than from measuring the
+  // strings: the executions were rendered at exactly these scales, so summing
+  // at them is exact, and an order with no pricing has no executions to sum.
+  const quantityScale = pricing === null ? fractionalDigits(order.quantity) : pricing.quantityScale;
+  const moneyScale = pricing === null ? 0 : pricing.moneyScale;
 
   let filledUnits = 0n;
-  let notionalUnits = 0n;
+  let grossNotionalUnits = 0n;
   let feeUnits = 0n;
   for (const execution of order.executions) {
     filledUnits += requireUnits(execution.quantity, quantityScale);
-    notionalUnits += requireUnits(execution.notional, moneyScale);
+    grossNotionalUnits += requireUnits(execution.notional, moneyScale);
     feeUnits += requireUnits(execution.fee, moneyScale);
   }
 
-  const unfilledUnits = requireUnits(order.quantity, quantityScale) - filledUnits;
-  const settled = isTerminalOrderState(order.state);
-  const netUnits = order.side === "BUY" ? -(notionalUnits + feeUnits) : notionalUnits - feeUnits;
+  const economics = computeExecutionEconomics({
+    pricing,
+    side: order.side,
+    requestedQuantity: order.quantity,
+    filledUnits,
+    grossNotionalUnits,
+    feeUnits,
+  });
 
-  const unfilledQuantity = renderUnits(unfilledUnits, quantityScale);
-  const releasableRemainder = settled ? unfilledQuantity : null;
+  const settled = isTerminalOrderState(order.state);
+  const releasableRemainder = settled ? economics.unfilledQuantity : null;
 
   return {
     state: order.state,
     settled,
-    filledQuantity: renderUnits(filledUnits, quantityScale),
-    unfilledQuantity,
-    grossNotional: renderUnits(notionalUnits, moneyScale),
-    feesPaid: renderUnits(feeUnits, moneyScale),
-    netCashFlow: renderUnits(netUnits, moneyScale),
+    filledQuantity: economics.filledQuantity,
+    unfilledQuantity: economics.unfilledQuantity,
     releasableRemainder,
     residualExceedsPermitted:
       releasableRemainder !== null &&
       filledUnits > 0n &&
       compareDecimals(releasableRemainder, order.envelope.permittedResidual) > 0,
+    economics,
   };
 }

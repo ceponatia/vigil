@@ -37,6 +37,7 @@ export {
   isLiveOrderState,
   isTerminalOrderState,
   orderStateSchema,
+  orderTransitionPath,
 } from "./order-state";
 export type { OrderState } from "./order-state";
 
@@ -48,6 +49,9 @@ export {
   orderSideSchema,
 } from "./intent";
 export type { ApprovedOrderIntent, OrderEnvelope, OrderProvenance, OrderSide, TradeAction } from "./intent";
+
+export { COST_CHARGINGS, COST_COMPONENTS, COST_COMPONENT_CHARGING } from "./execution-economics";
+export type { CostCharging, CostComponent, ExecutionCost, ExecutionEconomics, VenuePricing } from "./execution-economics";
 
 export { proposeOrder, reserveOrder, settlementOf, validateOrder } from "./order";
 export type {
@@ -92,7 +96,7 @@ export type {
   VenueBehavior,
 } from "./faults";
 
-export { createPaperExchange } from "./exchange";
+export { RESOLUTION_BASES, createPaperExchange } from "./exchange";
 export type {
   CancelOrderRequest,
   CancelOrderResult,
@@ -103,6 +107,7 @@ export type {
   ReadVenueStateRequest,
   ReconcileOrderRequest,
   ReconcileOrderResult,
+  ResolutionBasis,
   SubmitOrderRequest,
   SubmitOrderResult,
   VenueOrderView,

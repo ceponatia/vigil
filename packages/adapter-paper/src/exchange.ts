@@ -1,19 +1,28 @@
 import { ageMs } from "@vigil/contracts";
 import type { DecimalString, IsoUtcTimestamp } from "@vigil/contracts";
 import { evaluateQuoteFreshness } from "@vigil/market";
+import type { QuoteSnapshot } from "@vigil/market";
 
 import { PAPER_ADAPTER_CAPABILITY, PAPER_ADAPTER_CAPABILITY_VERSION } from "./capability";
 import type { AdapterCapability } from "./capability";
 import { adapterRefusal, policyRefusal } from "./diagnostics";
 import type { PaperRefusal } from "./diagnostics";
+import { cumulativeFeeUnits, cumulativeNotionalUnits, worstCaseEconomics } from "./execution-economics";
+import type { VenuePricing } from "./execution-economics";
 import { ACKNOWLEDGE_AND_FILL } from "./faults";
 import type { ExecutionBehavior, ReconciliationCoverage, RestingBehavior, VenueBehavior } from "./faults";
 import type { OrderSide } from "./intent";
 import { applyOrderTransition } from "./order";
 import type { OrderExecution, PaperOrder } from "./order";
-import { isLegalOrderTransition, isLiveOrderState, isTerminalOrderState } from "./order-state";
+import {
+  CONFIRMED_VENUE_STATES,
+  isLegalOrderTransition,
+  isLiveOrderState,
+  isTerminalOrderState,
+  orderTransitionPath,
+} from "./order-state";
 import type { OrderState } from "./order-state";
-import { compareDecimals, mulDiv, renderUnits, scaleFactor, splitUnits, unitsOf } from "./venue-math";
+import { compareDecimals, mulDiv, renderUnits, splitUnits, unitsOf } from "./venue-math";
 
 /**
  * exchange.ts — the simulated venue.
@@ -32,17 +41,23 @@ import { compareDecimals, mulDiv, renderUnits, scaleFactor, splitUnits, unitsOf 
  *   venue accepted the order. The caller genuinely cannot tell, and this
  *   adapter offers no way to peek: the only route out is a reconciliation
  *   read (`docs/resilience.md` §3).
- * - Resubmitting under a client order id the venue already holds is
- *   REFUSED, not deduplicated: `TRANSACTION_UNRESOLVED` while that order is
- *   still working, `IDEMPOTENCY_KEY_ALREADY_USED` once it is terminal. An
- *   approved intent is consumable exactly once and reconciliation precedes
- *   resubmission (`docs/architecture.md` "Execution lifecycles"), so the
- *   adapter refuses rather than quietly returning the existing order and
- *   letting a caller believe its retry did something.
+ * - Re-dispatching an intent the venue may already hold is REFUSED, not
+ *   deduplicated. Two guards, because one is not enough: the order book
+ *   catches a client order id the venue accepted, and a private set of
+ *   dispatched ids catches the case where the venue accepted NOTHING, where
+ *   the book is empty and the caller still holds its untouched `RESERVED`
+ *   order and could simply submit it again. Both refuse before any quote or
+ *   envelope check, so the caller is told to reconcile rather than told to
+ *   refresh its quote.
  * - Nothing is released on an unsettled order. `settlementOf` reports
  *   `releasableRemainder: null` for every non-terminal state, so a partial
  *   fill that is still working, an `UNKNOWN` order, and an unconfirmed
  *   cancellation all release exactly nothing.
+ * - The caller can always catch up with the venue. When the venue moved two
+ *   documented steps at once — a venue-initiated cancellation takes a
+ *   resting order `ACKNOWLEDGED -> CANCEL_PENDING -> CANCELED` — the caller
+ *   is walked along the same route rather than being offered a jump that is
+ *   not in the table and then wedged when it is refused.
  *
  * Determinism: this module reads no clock and draws no random number. Time
  * arrives as an `IsoUtcTimestamp` parameter on every operation; fill
@@ -65,16 +80,22 @@ export type PaperExchangeConfig = {
   readonly moneyScale: number;
   /** Decimal places the venue accepts a quantity in. */
   readonly quantityScale: number;
-  /** Venue fee, in basis points of an execution's notional. Rounded up, always. */
+  /** Venue fee, in basis points of the cumulative notional. Rounded up, always. */
   readonly feeBasisPoints: number;
   /**
-   * The worst price movement against the caller the venue will apply,
-   * in basis points of the quoted price. It is a cap, not a draw: every
-   * execution fills at exactly this adjusted price, so the submission-time
-   * envelope check can prove no fill can breach the intent's `maxSpend` or
-   * `minAcceptableReceipt`.
+   * The worst price movement against the caller the venue will apply, in
+   * basis points of the quoted executable price. It is a cap, not a draw:
+   * every execution fills at exactly this adjusted price.
    */
   readonly slippageBasisPoints: number;
+  /**
+   * A flat cost the fixture charges once per order that actually produced a
+   * fill — a modeled network or transaction cost. Zero is valid and is the
+   * default for an exchange fixture. It is charged only when something
+   * filled: a cancellation invents no cost on the unfilled remainder
+   * (issue #33, "Explicit execution economics").
+   */
+  readonly fixedExecutionCost?: DecimalString;
   /** Applied to any client order id `behaviors` does not name. */
   readonly defaultBehavior?: VenueBehavior;
   /** Per-client-order-id fault script. */
@@ -108,7 +129,14 @@ export type PollOrderRequest = {
 export type PollOrderResult =
   | { readonly outcome: "UPDATED"; readonly order: PaperOrder; readonly newExecutions: readonly OrderExecution[] }
   | { readonly outcome: "UNCHANGED"; readonly order: PaperOrder }
-  | { readonly outcome: "REFUSED"; readonly refusal: PaperRefusal };
+  /**
+   * Refused — and the caller's order comes back anyway, carrying any
+   * executions the venue had reported but the caller had not yet seen. The
+   * STATE is never advanced on this path. An execution is a fact about money
+   * that already moved, so it is handed over even when the state cannot be
+   * reconciled; losing it would leave real exposure invisible.
+   */
+  | { readonly outcome: "REFUSED"; readonly order: PaperOrder; readonly refusal: PaperRefusal };
 
 export type CancelOrderRequest = {
   readonly order: PaperOrder;
@@ -140,6 +168,12 @@ export type VenueOrderView = {
   readonly acceptedAt: IsoUtcTimestamp;
   readonly closedAt: IsoUtcTimestamp | null;
   readonly executions: readonly OrderExecution[];
+  /**
+   * Venue-initiated events the lifecycle had no edge for by the time they
+   * came due, so the venue did not apply them. Reported rather than dropped
+   * silently: a scenario that scheduled one needs to know it did not happen.
+   */
+  readonly droppedVenueEvents: readonly string[];
 };
 
 export type VenueReconciliationReport = {
@@ -157,12 +191,26 @@ export type VenueReconciliationReport = {
 export type ReconcileOrderRequest = {
   /** Must be `UNKNOWN` or `CANCEL_PENDING` — the two unconfirmed states. */
   readonly order: PaperOrder;
+  /** Must be a report this exchange issued; a hand-built one authorizes nothing. */
   readonly report: VenueReconciliationReport;
   readonly now: IsoUtcTimestamp;
 };
 
+/**
+ * Why an order resolved the way it did. `REJECTED` reached through
+ * `VENUE_HELD_NO_RECORD` and `REJECTED` reached through `VENUE_CONFIRMED`
+ * are the same state and different facts: a venue that rejected an order may
+ * reject it again and the intent should not be re-dispatched blindly, while
+ * an order the venue never received is safe to dispatch again once the
+ * intent is re-validated. The distinction has to survive in something code
+ * can switch on, not only in a note a human reads.
+ */
+export const RESOLUTION_BASES = ["VENUE_CONFIRMED", "VENUE_HELD_NO_RECORD"] as const;
+
+export type ResolutionBasis = (typeof RESOLUTION_BASES)[number];
+
 export type ReconcileOrderResult =
-  | { readonly outcome: "RESOLVED"; readonly order: PaperOrder }
+  | { readonly outcome: "RESOLVED"; readonly order: PaperOrder; readonly resolution: ResolutionBasis }
   /** The read could not settle it. The order is returned unchanged, still unconfirmed. */
   | { readonly outcome: "UNRESOLVED"; readonly order: PaperOrder; readonly refusal: PaperRefusal }
   | { readonly outcome: "REFUSED"; readonly refusal: PaperRefusal };
@@ -187,7 +235,7 @@ type VenueOrderRecord = {
   readonly clientOrderId: string;
   readonly side: OrderSide;
   readonly quantityUnits: bigint;
-  readonly priceUnits: bigint;
+  readonly pricing: VenuePricing;
   readonly acceptedAt: IsoUtcTimestamp;
   state: OrderState;
   filledUnits: bigint;
@@ -196,6 +244,8 @@ type VenueOrderRecord = {
   pending: readonly PendingExecution[];
   executions: readonly OrderExecution[];
   closedAt: IsoUtcTimestamp | null;
+  restingEventSettled: boolean;
+  droppedVenueEvents: readonly string[];
 };
 
 function requireInteger(value: number, name: string, min: number, max: number): number {
@@ -203,6 +253,16 @@ function requireInteger(value: number, name: string, min: number, max: number): 
     throw new Error(`paper exchange configuration: ${name} must be an integer in [${String(min)}, ${String(max)}], got ${String(value)}`);
   }
   return value;
+}
+
+/**
+ * Concrete union rather than a structural `{ reason?: unknown }` shape: a
+ * parameter type whose properties are all optional is a "weak type", and
+ * TypeScript rejects passing it a record that shares no property with it —
+ * which is every `VenueOrderRecord` and every `VenuePricing`.
+ */
+function isRefusal(value: VenueOrderRecord | VenuePricing | PaperRefusal): value is PaperRefusal {
+  return "reason" in value;
 }
 
 /**
@@ -216,16 +276,41 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
   requireInteger(config.seed, "seed", Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
   const moneyScale = requireInteger(config.moneyScale, "moneyScale", 0, 18);
   const quantityScale = requireInteger(config.quantityScale, "quantityScale", 0, 18);
-  const feeBasisPoints = BigInt(requireInteger(config.feeBasisPoints, "feeBasisPoints", 0, 10_000));
+  const feeBasisPoints = requireInteger(config.feeBasisPoints, "feeBasisPoints", 0, 10_000);
   // Strictly under 10 000 bp: a 100% adverse move would drive a sell's
   // execution price to zero, which is not slippage but a different failure.
-  const slippageBasisPoints = BigInt(requireInteger(config.slippageBasisPoints, "slippageBasisPoints", 0, 9_999));
-  const quantityFactor = scaleFactor(quantityScale);
+  const slippageBasisPoints = requireInteger(config.slippageBasisPoints, "slippageBasisPoints", 0, 9_999);
   const defaultBehavior = config.defaultBehavior ?? ACKNOWLEDGE_AND_FILL;
   const behaviors = config.behaviors ?? {};
   const defaultCoverage: ReconciliationCoverage = config.reconciliationCoverage ?? "COMPLETE";
 
+  const fixedExecutionCost = config.fixedExecutionCost ?? renderUnits(0n, moneyScale);
+  const fixedExecutionCostUnits = unitsOf(fixedExecutionCost, moneyScale);
+  if (fixedExecutionCostUnits === null || fixedExecutionCostUnits < 0n) {
+    throw new Error(
+      `paper exchange configuration: fixedExecutionCost "${fixedExecutionCost}" must be a non-negative amount the venue can hold at money scale ${String(moneyScale)}`,
+    );
+  }
+
   const book = new Map<string, VenueOrderRecord>();
+  /**
+   * Client order ids this exchange has dispatched, whatever came back. The
+   * book alone cannot be the consumable-once guard: a submission the venue
+   * never accepted leaves no book entry, and `PaperOrder` is immutable, so
+   * the caller still holds its pre-submission `RESERVED` order and could
+   * dispatch it again without ever reconciling — the blind retry after
+   * UNKNOWN that `docs/architecture.md` forbids. An id leaves this set only
+   * when an authoritative read confirms the venue holds nothing under it.
+   */
+  const dispatched = new Set<string>();
+  /**
+   * Reports this instance issued, held by object identity. `reconcileOrder`
+   * takes the venue's state from `book`, never from the report's rows, and
+   * accepts only a report that came from here — so neither a hand-built
+   * report nor one mutated after it was taken can inject a fill that never
+   * happened. A `WeakSet` because a report is the caller's to discard.
+   */
+  const issuedReports = new WeakSet<VenueReconciliationReport>();
   let venueSequence = 0;
 
   function behaviorFor(clientOrderId: string): VenueBehavior {
@@ -251,6 +336,53 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
     if (isTerminalOrderState(next)) {
       record.closedAt = at;
     }
+  }
+
+  /**
+   * Fixes this order's economics from the quote it was submitted against.
+   *
+   * The midpoint is rounded per side — down for a buy, up for a sell —
+   * because the spread cost is measured against it, and rounding it the
+   * other way would understate what crossing the book cost. The crossed-book
+   * refusal above guarantees the midpoint sits between bid and ask, which is
+   * what makes both the spread and the slippage components non-negative.
+   */
+  function derivePricing(side: OrderSide, quote: QuoteSnapshot): VenuePricing | PaperRefusal {
+    const bidUnits = unitsOf(quote.bidPrice, moneyScale);
+    const askUnits = unitsOf(quote.askPrice, moneyScale);
+    if (bidUnits === null || askUnits === null) {
+      return adapterRefusal(
+        "VENUE_PRECISION_EXCEEDED",
+        `quoted prices ("${quote.bidPrice}" / "${quote.askPrice}") carry finer precision than the venue's money scale (${String(moneyScale)})`,
+      );
+    }
+    if (askUnits < bidUnits) {
+      return adapterRefusal(
+        "CROSSED_QUOTE_BOOK",
+        `the quote's ask (${quote.askPrice}) is below its bid (${quote.bidPrice}); a crossed book is corrupt market state and blocks new risk (docs/resilience.md §1)`,
+      );
+    }
+
+    const referenceUnits = side === "BUY" ? askUnits : bidUnits;
+    const midUnits = side === "BUY" ? (bidUnits + askUnits) / 2n : (bidUnits + askUnits + 1n) / 2n;
+    const slippage = BigInt(slippageBasisPoints);
+    const executionUnits =
+      side === "BUY"
+        ? mulDiv(referenceUnits, BASIS_POINT_DIVISOR + slippage, BASIS_POINT_DIVISOR, "UP")
+        : mulDiv(referenceUnits, BASIS_POINT_DIVISOR - slippage, BASIS_POINT_DIVISOR, "DOWN");
+
+    return {
+      moneyScale,
+      quantityScale,
+      feeBasisPoints,
+      slippageBasisPoints,
+      referenceBid: quote.bidPrice,
+      referenceAsk: quote.askPrice,
+      referenceMid: renderUnits(midUnits, moneyScale),
+      referencePrice: renderUnits(referenceUnits, moneyScale),
+      executionPrice: renderUnits(executionUnits, moneyScale),
+      fixedExecutionCost,
+    };
   }
 
   function planPendingExecutions(
@@ -290,20 +422,40 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
     }
   }
 
-  function buildExecution(record: VenueOrderRecord, quantityUnits: bigint, at: IsoUtcTimestamp): OrderExecution {
-    // A buyer's notional rounds UP and a seller's proceeds round DOWN, and
-    // the fee always rounds UP: every rounding decision in an execution is
-    // the one that cannot flatter vigil's own accounting.
-    const notionalUnits = mulDiv(quantityUnits, record.priceUnits, quantityFactor, record.side === "BUY" ? "UP" : "DOWN");
-    const feeUnits = mulDiv(notionalUnits, feeBasisPoints, BASIS_POINT_DIVISOR, "UP");
+  type BuiltExecution = {
+    readonly execution: OrderExecution;
+    readonly cumulativeNotional: bigint;
+    readonly cumulativeFee: bigint;
+    readonly cumulativeFilled: bigint;
+  };
+
+  /**
+   * Derives one execution as the INCREMENT of an exact cumulative total, not
+   * as an independently rounded product of its own quantity. See
+   * `execution-economics.ts` invariant 1: rounding each execution on its own
+   * makes the sum strictly exceed the same quantity filled at once, which
+   * silently carried a fill past the `maxSpend` the submission check had
+   * approved. Reading a fill, this means two executions of equal quantity may
+   * carry different notionals and an execution may carry a zero fee — each
+   * reports its own increment, and the increments add up exactly.
+   */
+  function buildExecution(record: VenueOrderRecord, quantityUnits: bigint, at: IsoUtcTimestamp): BuiltExecution {
+    const cumulativeFilled = record.filledUnits + quantityUnits;
+    const cumulativeNotional = cumulativeNotionalUnits(record.pricing, record.side, cumulativeFilled);
+    const cumulativeFee = cumulativeFeeUnits(record.pricing, cumulativeNotional);
     const sequence = record.executions.length + 1;
     return {
-      executionId: `${record.venueOrderId}-E${String(sequence).padStart(2, "0")}`,
-      reportedAt: at,
-      quantity: renderUnits(quantityUnits, quantityScale),
-      price: renderUnits(record.priceUnits, moneyScale),
-      notional: renderUnits(notionalUnits, moneyScale),
-      fee: renderUnits(feeUnits, moneyScale),
+      execution: {
+        executionId: `${record.venueOrderId}-E${String(sequence).padStart(2, "0")}`,
+        reportedAt: at,
+        quantity: renderUnits(quantityUnits, quantityScale),
+        price: record.pricing.executionPrice,
+        notional: renderUnits(cumulativeNotional - record.notionalUnits, moneyScale),
+        fee: renderUnits(cumulativeFee - record.feeUnits, moneyScale),
+      },
+      cumulativeNotional,
+      cumulativeFee,
+      cumulativeFilled,
     };
   }
 
@@ -330,16 +482,11 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
         break;
       }
       record.pending = record.pending.slice(1);
-      const execution = buildExecution(record, next.quantityUnits, now);
-      record.executions = [...record.executions, execution];
-      record.filledUnits += next.quantityUnits;
-      const notionalUnits = unitsOf(execution.notional, moneyScale);
-      const feeUnits = unitsOf(execution.fee, moneyScale);
-      if (notionalUnits === null || feeUnits === null) {
-        throw new Error("paper venue rendered an execution it cannot read back at its own money scale");
-      }
-      record.notionalUnits += notionalUnits;
-      record.feeUnits += feeUnits;
+      const built = buildExecution(record, next.quantityUnits, now);
+      record.executions = [...record.executions, built.execution];
+      record.filledUnits = built.cumulativeFilled;
+      record.notionalUnits = built.cumulativeNotional;
+      record.feeUnits = built.cumulativeFee;
       applied = true;
     }
 
@@ -360,26 +507,42 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
    */
   function applyRestingBehavior(record: VenueOrderRecord, elapsedMs: number, now: IsoUtcTimestamp): void {
     const resting: RestingBehavior = behaviorFor(record.clientOrderId).resting ?? { kind: "NONE" };
-    if (resting.kind === "NONE" || !isLiveOrderState(record.state) || resting.afterMs > elapsedMs) {
+    if (
+      resting.kind === "NONE" ||
+      record.restingEventSettled ||
+      !isLiveOrderState(record.state) ||
+      resting.afterMs > elapsedMs
+    ) {
       return;
     }
 
     switch (resting.kind) {
       case "EXPIRE":
       case "REJECT": {
-        // Only from ACKNOWLEDGED: the lifecycle draws no edge from
-        // PARTIALLY_FILLED to EXPIRED or REJECTED, and a partially filled
-        // order that the venue expires is a real case this machine cannot
-        // represent without a documented diagram change.
+        const target: OrderState = resting.kind === "EXPIRE" ? "EXPIRED" : "REJECTED";
         if (record.state !== "ACKNOWLEDGED") {
+          // The lifecycle draws no edge from PARTIALLY_FILLED to EXPIRED or
+          // REJECTED, so the event cannot be applied without inventing one.
+          // It is recorded rather than dropped in silence: a scenario that
+          // scheduled a venue expiry against an order that filled first would
+          // otherwise pass while having simulated nothing.
+          record.restingEventSettled = true;
+          record.droppedVenueEvents = [
+            ...record.droppedVenueEvents,
+            `venue ${resting.kind} due at +${String(resting.afterMs)}ms was not applied: the order was ${record.state}, and the Exchange lifecycle draws no edge from it to ${target}`,
+          ];
           return;
         }
         record.pending = [];
-        setVenueState(record, resting.kind === "EXPIRE" ? "EXPIRED" : "REJECTED", now);
+        record.restingEventSettled = true;
+        setVenueState(record, target, now);
         return;
       }
       case "CANCEL": {
+        // Legal from both ACKNOWLEDGED and PARTIALLY_FILLED, and it runs
+        // through CANCEL_PENDING exactly as a requested cancellation does.
         record.pending = [];
+        record.restingEventSettled = true;
         setVenueState(record, "CANCEL_PENDING", now);
         setVenueState(record, "CANCELED", now);
         return;
@@ -401,23 +564,34 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
       acceptedAt: record.acceptedAt,
       closedAt: record.closedAt,
       executions: record.executions,
+      droppedVenueEvents: record.droppedVenueEvents,
     };
   }
 
+  type SyncResult = {
+    readonly order: PaperOrder;
+    readonly newExecutions: readonly OrderExecution[];
+    readonly refusal: PaperRefusal | null;
+  };
+
   /**
    * Brings a caller's order up to the venue's record without inventing
-   * anything: it adopts the executions the caller has not yet seen and,
-   * only if the venue's state differs, records the transition. Comparing
-   * counts rather than replaying this call's own output means a caller that
-   * fell behind — because a different operation advanced the venue first —
-   * still catches up rather than silently missing a fill.
+   * anything: it adopts the executions the caller has not yet seen and then
+   * walks the caller along the documented route to the venue's state, one
+   * recorded transition per step.
+   *
+   * Walking rather than jumping is what keeps a venue-initiated cancellation
+   * from wedging the order. The venue takes a resting order
+   * `ACKNOWLEDGED -> CANCEL_PENDING -> CANCELED` in one go; a caller offered
+   * only the direct `ACKNOWLEDGED -> CANCELED` jump is refused, because the
+   * lifecycle does not draw it, and then no operation can advance the order
+   * ever again — its capital is never released and its fills are invisible.
+   * Every state walked through is one the venue genuinely passed through.
+   *
+   * The executions are adopted even when the walk fails, and the caller gets
+   * them back on the refusal path: an execution is money that already moved.
    */
-  function syncFromVenue(
-    order: PaperOrder,
-    record: VenueOrderRecord,
-    now: IsoUtcTimestamp,
-    note: string,
-  ): { readonly order: PaperOrder; readonly newExecutions: readonly OrderExecution[]; readonly refusal: PaperRefusal | null } {
+  function syncFromVenue(order: PaperOrder, record: VenueOrderRecord, now: IsoUtcTimestamp): SyncResult {
     const unseen = record.executions.slice(order.executions.length);
     let working: PaperOrder = {
       ...order,
@@ -425,12 +599,49 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
       executions: [...order.executions, ...unseen],
     };
 
-    if (record.state !== order.state && !isTerminalOrderState(order.state)) {
-      const moved = applyOrderTransition(working, record.state, now, note);
-      if (!moved.applied) {
-        return { order, newExecutions: [], refusal: moved.refusal };
+    if (isTerminalOrderState(order.state)) {
+      return { order: working, newExecutions: unseen, refusal: null };
+    }
+
+    // Where the caller has to get to, in order. When executions are being
+    // adopted, the fill state they imply comes FIRST even if a shorter route
+    // to the venue's current state exists: an order that partially filled and
+    // was then cancelled genuinely passed through PARTIALLY_FILLED, and a
+    // history that jumped straight to CANCELED would leave no trace that it
+    // ever held exposure. The executions are adopted either way; this is
+    // about the record being readable afterwards.
+    const waypoints: OrderState[] = [];
+    if (unseen.length > 0) {
+      waypoints.push(record.filledUnits >= record.quantityUnits ? "FILLED" : "PARTIALLY_FILLED");
+    }
+    waypoints.push(record.state);
+
+    for (const waypoint of waypoints) {
+      if (waypoint === working.state) {
+        continue;
       }
-      working = moved.order;
+      const path = orderTransitionPath(working.state, waypoint);
+      if (path === null) {
+        return {
+          order: working,
+          newExecutions: unseen,
+          refusal: adapterRefusal(
+            "RECONCILIATION_CONTRADICTION",
+            `the venue reports ${record.state}, which the Exchange lifecycle cannot reach from ${working.state} by any route; the order is not forced`,
+          ),
+        };
+      }
+      for (const step of path) {
+        const note =
+          step === record.state
+            ? `venue reports ${step}`
+            : `venue passed through ${step} on its way to ${record.state}`;
+        const moved = applyOrderTransition(working, step, now, note);
+        if (!moved.applied) {
+          return { order: working, newExecutions: unseen, refusal: moved.refusal };
+        }
+        working = moved.order;
+      }
     }
 
     return { order: working, newExecutions: unseen, refusal: null };
@@ -459,90 +670,11 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
       };
     }
 
-    if (ageMs(order.envelope.validUntil, now) > 0) {
-      return {
-        outcome: "REFUSED",
-        refusal: adapterRefusal(
-          "INTENT_EXPIRED",
-          `the intent's validity window closed at ${order.envelope.validUntil}, before the supplied time ${now}`,
-        ),
-      };
-    }
-
-    const evaluation = evaluateQuoteFreshness({
-      raw: request.quote,
-      now,
-      maxAgeMs: order.envelope.requiredFreshnessMs,
-    });
-    if (!evaluation.executable) {
-      return {
-        outcome: "REFUSED",
-        refusal:
-          evaluation.reasonCode === "STALE_QUOTE"
-            ? policyRefusal("STALE_QUOTE", evaluation.detail)
-            : adapterRefusal("QUOTE_UNUSABLE", `quote refused with ${evaluation.reasonCode}: ${evaluation.detail}`),
-      };
-    }
-
-    const quantityUnits = unitsOf(order.quantity, quantityScale);
-    if (quantityUnits === null || quantityUnits <= 0n) {
-      return {
-        outcome: "REFUSED",
-        refusal: adapterRefusal(
-          "VENUE_PRECISION_EXCEEDED",
-          `quantity "${order.quantity}" is not a positive quantity the venue can hold at scale ${String(quantityScale)}`,
-        ),
-      };
-    }
-
-    const referencePrice = order.side === "BUY" ? evaluation.quote.askPrice : evaluation.quote.bidPrice;
-    const referenceUnits = unitsOf(referencePrice, moneyScale);
-    if (referenceUnits === null) {
-      return {
-        outcome: "REFUSED",
-        refusal: adapterRefusal(
-          "VENUE_PRECISION_EXCEEDED",
-          `quoted price "${referencePrice}" carries finer precision than the venue's money scale (${String(moneyScale)})`,
-        ),
-      };
-    }
-
-    const priceUnits =
-      order.side === "BUY"
-        ? mulDiv(referenceUnits, BASIS_POINT_DIVISOR + slippageBasisPoints, BASIS_POINT_DIVISOR, "UP")
-        : mulDiv(referenceUnits, BASIS_POINT_DIVISOR - slippageBasisPoints, BASIS_POINT_DIVISOR, "DOWN");
-
-    // The whole order at the capped price is the worst case the venue can
-    // produce, because every execution fills at exactly this price. Proving
-    // the worst case fits the approved envelope here is what makes it
-    // impossible for any later fill to breach it.
-    const worstNotionalUnits = mulDiv(quantityUnits, priceUnits, quantityFactor, order.side === "BUY" ? "UP" : "DOWN");
-    const worstFeeUnits = mulDiv(worstNotionalUnits, feeBasisPoints, BASIS_POINT_DIVISOR, "UP");
-
-    if (order.side === "BUY") {
-      const worstSpend = renderUnits(worstNotionalUnits + worstFeeUnits, moneyScale);
-      if (compareDecimals(worstSpend, order.envelope.maxSpend) > 0) {
-        return {
-          outcome: "REFUSED",
-          refusal: adapterRefusal(
-            "MAX_SPEND_EXCEEDED",
-            `filling the whole order at the venue's capped price would spend ${worstSpend}, above the approved maxSpend ${order.envelope.maxSpend}`,
-          ),
-        };
-      }
-    } else {
-      const worstReceipt = renderUnits(worstNotionalUnits - worstFeeUnits, moneyScale);
-      if (compareDecimals(worstReceipt, order.envelope.minAcceptableReceipt) < 0) {
-        return {
-          outcome: "REFUSED",
-          refusal: adapterRefusal(
-            "RECEIPT_BELOW_MINIMUM",
-            `filling the whole order at the venue's capped price would receive ${worstReceipt}, below the approved minAcceptableReceipt ${order.envelope.minAcceptableReceipt}`,
-          ),
-        };
-      }
-    }
-
+    // Both consumable-once guards run BEFORE the quote and envelope checks.
+    // A caller re-dispatching an unresolved intent must be told to reconcile,
+    // not told its quote went stale — the second answer invites it to refresh
+    // the quote and try again, which is the blind retry the first answer
+    // exists to prevent.
     const existing = book.get(order.clientOrderId);
     if (existing !== undefined) {
       advanceVenue(existing, now);
@@ -564,16 +696,121 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
       };
     }
 
-    const dispatched = applyOrderTransition(
+    if (dispatched.has(order.clientOrderId)) {
+      return {
+        outcome: "REFUSED",
+        refusal: policyRefusal(
+          "TRANSACTION_UNRESOLVED",
+          `client order id "${order.clientOrderId}" was already dispatched and its outcome has not been resolved against an authoritative venue read; reconciliation precedes resubmission (docs/architecture.md "Execution lifecycles")`,
+        ),
+      };
+    }
+
+    if (ageMs(order.envelope.validUntil, now) > 0) {
+      return {
+        outcome: "REFUSED",
+        refusal: adapterRefusal(
+          "INTENT_EXPIRED",
+          `the intent's validity window closed at ${order.envelope.validUntil}, before the supplied time ${now}`,
+        ),
+      };
+    }
+
+    const evaluation = evaluateQuoteFreshness({
+      raw: request.quote,
+      now,
+      maxAgeMs: order.envelope.requiredFreshnessMs,
+    });
+    if (!evaluation.executable) {
+      return {
+        outcome: "REFUSED",
+        refusal:
+          evaluation.reasonCode === "STALE_QUOTE"
+            ? policyRefusal("STALE_QUOTE", evaluation.detail)
+            : // Unreachable against @vigil/market as it stands — every
+              // non-executable evaluation it returns carries STALE_QUOTE —
+              // and kept so a future reason code from that gate is surfaced
+              // honestly rather than relabelled as staleness.
+              adapterRefusal("QUOTE_UNUSABLE", `quote refused with ${evaluation.reasonCode}: ${evaluation.detail}`),
+      };
+    }
+
+    // Schema and freshness say the quote is well-formed and current; neither
+    // says it prices THIS order's assets. An instrument id is exactly
+    // `baseAssetId/quoteAssetId`, so the pair the order names derives the id
+    // its quote must carry — identity re-validated after parsing, which is
+    // what docs/resilience.md §5 asks for.
+    const expectedInstrumentId =
+      order.side === "BUY"
+        ? `${order.outputAssetId}/${order.inputAssetId}`
+        : `${order.inputAssetId}/${order.outputAssetId}`;
+    if (evaluation.quote.instrumentId !== expectedInstrumentId) {
+      return {
+        outcome: "REFUSED",
+        refusal: adapterRefusal(
+          "QUOTE_INSTRUMENT_MISMATCH",
+          `the quote prices "${evaluation.quote.instrumentId}" but this ${order.side} order trades "${expectedInstrumentId}"; a quote for another instrument never prices this order`,
+        ),
+      };
+    }
+
+    const quantityUnits = unitsOf(order.quantity, quantityScale);
+    if (quantityUnits === null || quantityUnits <= 0n) {
+      return {
+        outcome: "REFUSED",
+        refusal: adapterRefusal(
+          "VENUE_PRECISION_EXCEEDED",
+          `quantity "${order.quantity}" is not a positive quantity the venue can hold at scale ${String(quantityScale)}`,
+        ),
+      };
+    }
+
+    const priced = derivePricing(order.side, evaluation.quote);
+    if (isRefusal(priced)) {
+      return { outcome: "REFUSED", refusal: priced };
+    }
+
+    // Every execution fills at `priced.executionPrice` and every total is
+    // computed on the CUMULATIVE quantity, so filling the whole order is a
+    // genuine upper bound on what any pattern of executions can consume.
+    // That is what makes this check a proof rather than an estimate.
+    const worstCase = worstCaseEconomics(priced, order.side, quantityUnits);
+
+    if (order.side === "BUY") {
+      const worstSpend = renderUnits(worstCase.spendUnits, moneyScale);
+      if (compareDecimals(worstSpend, order.envelope.maxSpend) > 0) {
+        return {
+          outcome: "REFUSED",
+          refusal: adapterRefusal(
+            "MAX_SPEND_EXCEEDED",
+            `filling the whole order at the venue's capped price would spend ${worstSpend} including fees and fixed costs, above the approved maxSpend ${order.envelope.maxSpend}`,
+          ),
+        };
+      }
+    } else {
+      const worstReceipt = renderUnits(worstCase.receiptUnits, moneyScale);
+      if (compareDecimals(worstReceipt, order.envelope.minAcceptableReceipt) < 0) {
+        return {
+          outcome: "REFUSED",
+          refusal: adapterRefusal(
+            "RECEIPT_BELOW_MINIMUM",
+            `filling the whole order at the venue's capped price would receive ${worstReceipt} net of fees and fixed costs, below the approved minAcceptableReceipt ${order.envelope.minAcceptableReceipt}`,
+          ),
+        };
+      }
+    }
+
+    const dispatchedOrder = applyOrderTransition(
       order,
       "SUBMITTING",
       now,
       `attempt ${String(order.attempt)} dispatched to the simulated venue`,
     );
-    if (!dispatched.applied) {
-      return { outcome: "REFUSED", refusal: dispatched.refusal };
+    if (!dispatchedOrder.applied) {
+      return { outcome: "REFUSED", refusal: dispatchedOrder.refusal };
     }
-    const submitted: PaperOrder = dispatched.order;
+    const submitted: PaperOrder = { ...dispatchedOrder.order, pricing: priced };
+    dispatched.add(order.clientOrderId);
 
     const behavior = behaviorFor(order.clientOrderId);
 
@@ -583,7 +820,7 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
         clientOrderId: order.clientOrderId,
         side: order.side,
         quantityUnits,
-        priceUnits,
+        pricing: priced,
         acceptedAt: now,
         state,
         filledUnits: 0n,
@@ -592,6 +829,8 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
         pending: isLiveOrderState(state) ? planPendingExecutions(behavior.executions, quantityUnits, order.clientOrderId) : [],
         executions: [],
         closedAt: isTerminalOrderState(state) ? now : null,
+        restingEventSettled: false,
+        droppedVenueEvents: [],
       };
       book.set(order.clientOrderId, record);
       return record;
@@ -687,19 +926,15 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
     return record;
   }
 
-  function isRefusal(value: VenueOrderRecord | PaperRefusal): value is PaperRefusal {
-    return "reason" in value;
-  }
-
   function pollOrder(request: PollOrderRequest): PollOrderResult {
     const found = liveRecordFor(request.order, request.now, "polling");
     if (isRefusal(found)) {
-      return { outcome: "REFUSED", refusal: found };
+      return { outcome: "REFUSED", order: request.order, refusal: found };
     }
 
-    const synced = syncFromVenue(request.order, found, request.now, `venue reports ${found.state}`);
+    const synced = syncFromVenue(request.order, found, request.now);
     if (synced.refusal !== null) {
-      return { outcome: "REFUSED", refusal: synced.refusal };
+      return { outcome: "REFUSED", order: synced.order, refusal: synced.refusal };
     }
     if (synced.newExecutions.length === 0 && synced.order.state === request.order.state) {
       return { outcome: "UNCHANGED", order: synced.order };
@@ -718,12 +953,12 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
         outcome: "REFUSED",
         refusal: adapterRefusal(
           "ORDER_ALREADY_TERMINAL",
-          `the venue order reached ${found.state} before the cancellation arrived; poll the order to take up its executions before deciding what to do`,
+          `the venue order reached ${found.state} before the cancellation arrived; poll the order to take up its executions and its final state before deciding what to do`,
         ),
       };
     }
 
-    const synced = syncFromVenue(request.order, found, request.now, `venue reports ${found.state} as the cancellation is requested`);
+    const synced = syncFromVenue(request.order, found, request.now);
     if (synced.refusal !== null) {
       return { outcome: "REFUSED", refusal: synced.refusal };
     }
@@ -771,7 +1006,7 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
       executions.push(...record.executions);
     }
 
-    return {
+    const report: VenueReconciliationReport = {
       asOf: request.now,
       coverage: request.coverage ?? defaultCoverage,
       capabilityVersion: PAPER_ADAPTER_CAPABILITY_VERSION,
@@ -779,10 +1014,22 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
       closedOrders,
       executions,
     };
+    issuedReports.add(report);
+    return report;
   }
 
   function reconcileOrder(request: ReconcileOrderRequest): ReconcileOrderResult {
     const { order, report, now } = request;
+
+    if (!issuedReports.has(report)) {
+      return {
+        outcome: "REFUSED",
+        refusal: adapterRefusal(
+          "RECONCILIATION_REPORT_UNRECOGNIZED",
+          "this reconciliation read was not issued by this exchange; a report the venue did not produce authorizes nothing, least of all a fill",
+        ),
+      };
+    }
 
     if (order.state !== "UNKNOWN" && order.state !== "CANCEL_PENDING") {
       return {
@@ -794,21 +1041,12 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
       };
     }
 
-    if (report.capabilityVersion !== PAPER_ADAPTER_CAPABILITY_VERSION) {
-      return {
-        outcome: "REFUSED",
-        refusal: adapterRefusal(
-          "CAPABILITY_VERSION_MISMATCH",
-          `the reconciliation read was produced by adapter capability "${report.capabilityVersion}"; this adapter implements "${PAPER_ADAPTER_CAPABILITY_VERSION}"`,
-        ),
-      };
-    }
-
-    const view =
-      report.openOrders.find((candidate) => candidate.clientOrderId === order.clientOrderId) ??
-      report.closedOrders.find((candidate) => candidate.clientOrderId === order.clientOrderId);
-
-    if (view === undefined) {
+    // The venue's own book, not the report's rows. The report says how much
+    // of the venue the read could see and when it was taken; the state comes
+    // from the venue itself, so a report mutated after it was taken cannot
+    // introduce an order, a state, or an execution.
+    const record = book.get(order.clientOrderId);
+    if (record === undefined) {
       if (report.coverage === "INCOMPLETE") {
         return {
           outcome: "UNRESOLVED",
@@ -838,31 +1076,31 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
       if (!rejected.applied) {
         return { outcome: "UNRESOLVED", order, refusal: rejected.refusal };
       }
-      return { outcome: "RESOLVED", order: rejected.order };
+      // The venue holds nothing under this id, confirmed. The intent may be
+      // dispatched again as a fresh versioned attempt, so the dispatch guard
+      // is lifted — and only here, where an authoritative read said so.
+      dispatched.delete(order.clientOrderId);
+      return { outcome: "RESOLVED", order: rejected.order, resolution: "VENUE_HELD_NO_RECORD" };
     }
 
-    const adopted: PaperOrder = {
-      ...order,
-      venueOrderId: view.venueOrderId,
-      executions: view.executions,
-    };
-    const resolved = applyOrderTransition(
-      adopted,
-      view.state,
-      now,
-      `reconciliation: the venue confirms ${view.state} for ${view.venueOrderId}`,
-    );
-    if (!resolved.applied) {
+    advanceVenue(record, now);
+
+    if (order.state === "UNKNOWN" && !CONFIRMED_VENUE_STATES.includes(record.state)) {
       return {
         outcome: "UNRESOLVED",
         order,
         refusal: adapterRefusal(
           "RECONCILIATION_CONTRADICTION",
-          `the venue reports ${view.state}, which cannot follow ${order.state} in the Exchange lifecycle; the order stays unresolved rather than being forced`,
+          `the venue reports ${record.state}, which is not a confirmed outcome; reconciliation resolves an UNKNOWN order only to a state the venue has actually settled on`,
         ),
       };
     }
-    return { outcome: "RESOLVED", order: resolved.order };
+
+    const synced = syncFromVenue(order, record, now);
+    if (synced.refusal !== null) {
+      return { outcome: "UNRESOLVED", order, refusal: synced.refusal };
+    }
+    return { outcome: "RESOLVED", order: synced.order, resolution: "VENUE_CONFIRMED" };
   }
 
   return {

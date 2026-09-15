@@ -40,6 +40,10 @@ export const PAPER_ADAPTER_DIAGNOSTIC_CODES = [
   "VENUE_PRECISION_EXCEEDED",
   /** The quote backing the submission is not usable for a reason other than staleness. */
   "QUOTE_UNUSABLE",
+  /** The quote prices a different instrument than the order's own asset pair. */
+  "QUOTE_INSTRUMENT_MISMATCH",
+  /** The quote's ask is below its bid; a crossed book is corrupt market state. */
+  "CROSSED_QUOTE_BOOK",
   /** The order is not in the state this operation may be performed from. */
   "ILLEGAL_TRANSITION",
   /** Submission was asked for from a state other than RESERVED. */
@@ -60,6 +64,8 @@ export const PAPER_ADAPTER_DIAGNOSTIC_CODES = [
   "RECONCILIATION_NOT_APPLICABLE",
   /** The reconciliation read did not cover this order, so it stays unresolved. */
   "RECONCILIATION_INCOMPLETE",
+  /** The reconciliation read was not one this exchange issued, so it authorizes nothing. */
+  "RECONCILIATION_REPORT_UNRECOGNIZED",
   /** The venue's confirmed state cannot follow the order's current state. */
   "RECONCILIATION_CONTRADICTION",
   /** The exchange has no record of an order the caller believes is live there. */

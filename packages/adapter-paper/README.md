@@ -2,8 +2,10 @@
 
 A simulated exchange. It implements the Exchange order lifecycle from
 `docs/architecture.md` exactly — including `UNKNOWN` as a real state,
-partial fills, and a reconciliation read that resolves them — so the
-execution domain can be built and fault-tested without a venue.
+partial fills, and a reconciliation read that resolves them — and reports an
+exact execution-economics breakdown for every fill, so the execution domain
+can be built and fault-tested without a venue and small-trade costs are
+visible rather than hidden inside a price.
 
 It is the only execution adapter until a venue is selected, and the
 convention it establishes — `packages/adapter-<venue>` — is how a live
@@ -75,12 +77,42 @@ execution or it does not exist.
   `COMPLETE` reconciliation read that holds no record of an order confirms
   the venue never accepted it. An `INCOMPLETE` one confirms nothing by
   absence, and the order stays `UNKNOWN`.
-- **The approved envelope binds.** A submission is refused before the venue
-  sees it if the intent has expired, the quote fails `@vigil/market`'s
-  freshness gate (`STALE_QUOTE`), or the whole order at the venue's capped
-  price and fee would breach `maxSpend` or fall below
-  `minAcceptableReceipt`. Because every execution fills at exactly that
-  capped price, no fill the venue produces can land outside the envelope.
+- **The approved envelope binds, whatever pattern of fills delivers it.** A
+  submission is refused before the venue sees it if the intent has expired,
+  the quote fails `@vigil/market`'s freshness gate (`STALE_QUOTE`), the quote
+  prices a different instrument, the book is crossed, or the whole order at
+  the venue's capped price, fee and fixed cost would breach `maxSpend` or fall
+  below `minAcceptableReceipt`. Two things make that a proof rather than an
+  estimate: every execution fills at exactly the capped price, and every total
+  is computed on the CUMULATIVE filled quantity, so a stepped fill costs
+  exactly what the same quantity costs filled at once. Rounding each execution
+  independently instead — as an earlier revision did — makes a stepped fill
+  strictly dearer and carried real fills past an approved ceiling.
+- **A cost is reported once, where it was charged.** Spread and slippage are
+  `EMBEDDED_IN_PRICE` and are already inside `grossNotional`; the venue fee
+  and the fixture's fixed cost are `SEPARATELY_CHARGED`. A buy's
+  `netCapitalConsumed` equals `grossAtReferenceMid + totalIncrementalCost` and
+  a sell's `netProceeds` equals `grossAtReferenceMid - totalIncrementalCost`,
+  exactly, so double-charging is detectable rather than plausible.
+- **The quote has to be a quote for this order.** An instrument id is exactly
+  `baseAssetId/quoteAssetId`, so the order's own asset pair derives the id its
+  quote must carry. A fresh, well-formed quote for another instrument is
+  refused with `QUOTE_INSTRUMENT_MISMATCH` rather than silently pricing the
+  fill.
+- **Only a read this exchange issued resolves anything.** `reconcileOrder`
+  accepts a report by object identity and then takes the state from the
+  venue's own book, never from the report's rows, so neither a hand-built
+  report nor one edited after it was taken can introduce a fill.
+- **A dispatched intent is not dispatched again.** Two guards, because the
+  order book alone is not enough: a submission the venue never accepted leaves
+  no book entry, and the caller still holds its immutable `RESERVED` order.
+  The guard lifts only when an authoritative read confirms the venue holds
+  nothing, which is the legitimate reconcile-then-retry path.
+- **The caller can always catch up with the venue.** When the venue moves two
+  documented steps at once — a venue-initiated cancellation takes a resting
+  order `ACKNOWLEDGED -> CANCEL_PENDING -> CANCELED` — the caller is walked
+  along the same route, and through the fill state first when executions are
+  being adopted, so nothing is ever left with no legal way forward.
 - **Money is exact.** Decimal strings on the wire, `bigint` counts of units
   at a declared scale inside. Every rounding is the direction that cannot
   flatter vigil's accounting: a buyer's notional up, a seller's proceeds
@@ -148,10 +180,39 @@ import rules".
 | `order-state` | The lifecycle table, the legality guard, and the state groupings a caller reasons with |
 | `intent` | The execution-relevant subset of `ApprovedEconomicIntent`, parsed at the trust boundary |
 | `order` | The immutable order record, the caller's three transitions, and `settlementOf` |
+| `execution-economics` | What a fill cost: cumulative-exact totals, and the embedded-versus-charged breakdown |
 | `exchange` | The simulated venue: submit, poll, cancel, the reconciliation read, and resolution |
 | `faults` | The injection surface — submission, execution, cancellation, and resting behaviors |
 | `capability` | The capability stamp an intent's `adapterCapabilityVersion` must name |
 | `venue-math` | Exact `bigint`-on-scaled-integers arithmetic and the deterministic fill split |
+
+## Reading a fill
+
+`settlementOf(order)` returns the release half — what capital comes back —
+and `economics`, the cost breakdown issue #33 requires:
+
+| Field | What it is |
+| --- | --- |
+| `referenceBid` / `referenceAsk` | The top of book the simulation priced from |
+| `referenceMid` | The midpoint, rounded so the measured spread is never understated |
+| `referencePrice` | The executable side: the ask for a buy, the bid for a sell |
+| `executionPrice` | Where every execution filled: the reference moved by the slippage cap |
+| `grossAtReferenceMid` | What the filled quantity would have cost or yielded with no cost at all |
+| `grossNotional` | Gross at the execution price — already contains the embedded components |
+| `costs` | `SPREAD`, `SLIPPAGE`, `VENUE_FEE`, `FIXED_COST`, each with the amount and how it was charged |
+| `embeddedCost` / `separatelyChargedCost` / `totalIncrementalCost` | The two halves and their sum |
+| `netCapitalConsumed` / `netProceeds` | The side-appropriate net; the other is `null` |
+| `netCashFlow` | Signed, and what the ledger posts |
+
+Each execution reports its own exact INCREMENT of the running totals, not a
+rounding of itself, so two executions of equal quantity can carry different
+notionals and an execution can carry a zero fee. The increments sum to the
+totals exactly; that is the point.
+
+The components map onto `packages/policy`'s net-edge cost model directly:
+`VENUE_FEE` is the rate-on-notional term, `SPREAD` and `SLIPPAGE` are the
+per-unit terms, and `FIXED_COST` is the flat one. The `charging` marker is
+what keeps the embedded pair from being subtracted a second time there.
 
 ## Known limits
 

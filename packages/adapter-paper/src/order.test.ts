@@ -54,6 +54,18 @@ describe("proposeOrder refuses rather than building an order nothing authorized"
     expect(refusalCode(propose({ quantity: "-1.0000" }))).toBe("NON_POSITIVE_QUANTITY");
   });
 
+  it("refuses an amount carrying more precision than the arithmetic holds, rather than throwing", () => {
+    // `decimalStringSchema` bounds neither precision nor scale, so these are
+    // schema-legal values. Before the gate they reached `compareDecimals`,
+    // whose internal scale guard threw — out of a function documented never
+    // to throw on any input.
+    const tooPrecise = `0.${"0".repeat(30)}1`;
+    expect(refusalCode(propose({ quantity: tooPrecise }))).toBe("VENUE_PRECISION_EXCEEDED");
+    expect(refusalCode(propose({ maxSpend: tooPrecise }))).toBe("VENUE_PRECISION_EXCEEDED");
+    expect(refusalCode(propose({ minAcceptableReceipt: tooPrecise }))).toBe("VENUE_PRECISION_EXCEEDED");
+    expect(refusalCode(propose({ permittedResidual: tooPrecise }))).toBe("VENUE_PRECISION_EXCEEDED");
+  });
+
   it("refuses an attempt number that is not a positive integer", () => {
     expect(refusalCode(proposeOrder({ intent: rawIntent(), at: AT_PROPOSED, attempt: 0 }))).toBe("MALFORMED_INTENT");
   });
@@ -131,9 +143,14 @@ describe("settlementOf releases nothing until the venue has settled the order", 
     expect(settlement.releasableRemainder).toBeNull();
     expect(settlement.filledQuantity).toBe("0.0000");
     expect(settlement.unfilledQuantity).toBe("2.0000");
-    expect(settlement.grossNotional).toBe("0");
-    expect(settlement.feesPaid).toBe("0");
-    expect(settlement.netCashFlow).toBe("0");
     expect(settlement.residualExceedsPermitted).toBe(false);
+    // No pricing yet, so no economics to state — zeros and nulls, not a guess
+    // at what the order might have cost.
+    expect(settlement.economics.grossNotional).toBe("0");
+    expect(settlement.economics.totalIncrementalCost).toBe("0");
+    expect(settlement.economics.netCashFlow).toBe("0");
+    expect(settlement.economics.referenceBid).toBeNull();
+    expect(settlement.economics.executionPrice).toBeNull();
+    expect(settlement.economics.costs).toEqual([]);
   });
 });

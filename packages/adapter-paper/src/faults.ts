@@ -14,11 +14,20 @@ import type { DecimalString } from "@vigil/contracts";
  *
  * The one thing a behavior deliberately cannot set is an execution PRICE.
  * Price comes from the quote the caller submits against, adjusted by the
- * exchange's configured slippage cap and nothing else. A test that could
- * name an arbitrary fill price could drive a fill outside the intent's
- * approved `maxSpend`/`minAcceptableReceipt` envelope, and the whole point
- * of the submission-time envelope check is that no execution the venue
- * produces can land outside it.
+ * exchange's configured slippage cap and nothing else, so no scenario can
+ * name a fill price that was never quoted.
+ *
+ * That alone does NOT keep a fill inside the intent's approved
+ * `maxSpend`/`minAcceptableReceipt` envelope, and an earlier revision of this
+ * comment wrongly claimed it did. A fixed price still leaves the step pattern
+ * free, and rounding each execution independently made a stepped fill cost
+ * strictly more than the same quantity filled at once — enough to carry a
+ * fill past a ceiling the submission check had approved. What actually closes
+ * the envelope is that every total is computed on the cumulative quantity and
+ * each execution reports an exact increment of it
+ * (`execution-economics.ts`, invariant 1). Both halves are needed: a fixed
+ * price bounds WHERE it fills, cumulative totals bound WHAT ANY PATTERN of
+ * fills can cost.
  */
 
 export type SubmissionBehavior =

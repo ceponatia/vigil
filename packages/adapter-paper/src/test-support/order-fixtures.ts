@@ -101,6 +101,23 @@ export function rawIntent(overrides: Record<string, unknown> = {}): Record<strin
 }
 
 /**
+ * The overrides that turn the buy above into a sell.
+ *
+ * The assets SWAP, and that is not cosmetic: the adapter derives the
+ * instrument its quote must price from the order's own pair — `output/input`
+ * for a buy, `input/output` for a sell — so an "EXIT" that kept the buy's
+ * asset directions would be refused with `QUOTE_INSTRUMENT_MISMATCH` rather
+ * than quietly pricing the wrong way round. Both directions derive
+ * `SYNTHETIC_INSTRUMENT_ID`, which is what `rawQuote` carries.
+ */
+export const SELL_INTENT: Record<string, unknown> = {
+  action: "EXIT",
+  inputAssetId: TEST_BASE_ASSET_ID,
+  outputAssetId: TEST_QUOTE_ASSET_ID,
+  minAcceptableReceipt: "490.00",
+};
+
+/**
  * Walks an intent to `RESERVED` the way `apps/trading` will: propose,
  * record the policy check, record the reservation. Throws on a refusal,
  * because a refusal here is a broken fixture rather than the behavior under

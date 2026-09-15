@@ -75,6 +75,8 @@ export type AdapterCapability = {
   readonly supportsPartialFill: true;
   readonly supportsCancellation: true;
   readonly supportsReconciliation: true;
+  /** Every fill carries the cost breakdown issue #33 requires, including which components the price embeds. */
+  readonly reportsExecutionEconomics: true;
   readonly injectableFaults: readonly InjectableFault[];
 };
 
@@ -89,5 +91,6 @@ export const PAPER_ADAPTER_CAPABILITY: AdapterCapability = {
   supportsPartialFill: true,
   supportsCancellation: true,
   supportsReconciliation: true,
+  reportsExecutionEconomics: true,
   injectableFaults: INJECTABLE_FAULTS,
 };

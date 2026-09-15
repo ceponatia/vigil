@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CONFIRMED_VENUE_STATES,
+  orderTransitionPath,
   LIVE_ORDER_STATES,
   ORDER_STATES,
   ORDER_STATE_TRANSITIONS,
@@ -114,5 +115,67 @@ describe("the state groupings a caller reasons with", () => {
     expect(CONFIRMED_VENUE_STATES).not.toContain("VALIDATED");
     expect(CONFIRMED_VENUE_STATES).not.toContain("RESERVED");
     expect(CONFIRMED_VENUE_STATES).not.toContain("SUBMITTING");
+  });
+});
+
+/**
+ * The defect this suite kills: an order the venue moved two documented steps
+ * on — a venue-initiated cancellation takes a resting order
+ * `ACKNOWLEDGED -> CANCEL_PENDING -> CANCELED` — that the caller can only be
+ * offered as a single jump the table does not draw. Refusing that jump is
+ * right; having no route at all wedged the order permanently, with its
+ * capital unreleased and its fills invisible.
+ */
+describe("orderTransitionPath routes through the diagram rather than around it", () => {
+  it("takes the direct edge when the diagram draws one", () => {
+    expect(orderTransitionPath("ACKNOWLEDGED", "FILLED")).toEqual(["FILLED"]);
+    expect(orderTransitionPath("SUBMITTING", "UNKNOWN")).toEqual(["UNKNOWN"]);
+  });
+
+  it("walks the documented intermediate when the diagram draws no direct edge", () => {
+    expect(orderTransitionPath("ACKNOWLEDGED", "CANCELED")).toEqual(["CANCEL_PENDING", "CANCELED"]);
+    expect(orderTransitionPath("PARTIALLY_FILLED", "CANCELED")).toEqual(["CANCEL_PENDING", "CANCELED"]);
+  });
+
+  it("returns an empty route for a state that has not moved", () => {
+    for (const state of ORDER_STATES) {
+      expect(orderTransitionPath(state, state)).toEqual([]);
+    }
+  });
+
+  it("reports no route at all where the diagram genuinely has none", () => {
+    // Both of these are real venue behaviors the lifecycle does not draw, and
+    // an invented route is exactly what must not happen: the answer is null,
+    // and the adapter refuses rather than forcing the order.
+    expect(orderTransitionPath("PARTIALLY_FILLED", "EXPIRED")).toBeNull();
+    expect(orderTransitionPath("CANCEL_PENDING", "FILLED")).toBeNull();
+    for (const terminal of TERMINAL_ORDER_STATES) {
+      // PARTIALLY_FILLED is never itself terminal, so this is always a
+      // genuine "from a terminal state to somewhere else" question.
+      expect(orderTransitionPath(terminal, "PARTIALLY_FILLED")).toBeNull();
+    }
+  });
+
+  it("never returns a route containing a step the table does not draw", () => {
+    const illegal: string[] = [];
+    for (const from of ORDER_STATES) {
+      for (const to of ORDER_STATES) {
+        const path = orderTransitionPath(from, to);
+        if (path === null) {
+          continue;
+        }
+        let current = from;
+        for (const step of path) {
+          if (!isLegalOrderTransition(current, step)) {
+            illegal.push(`${from}->${to} via ${current}->${step}`);
+          }
+          current = step;
+        }
+        if (path.length > 0 && current !== to) {
+          illegal.push(`${from}->${to} ended at ${current}`);
+        }
+      }
+    }
+    expect(illegal).toEqual([]);
   });
 });

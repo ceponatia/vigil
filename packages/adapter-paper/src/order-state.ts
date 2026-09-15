@@ -140,3 +140,59 @@ export function isLegalOrderTransition(from: OrderState, to: OrderState): boolea
   }
   return ORDER_STATE_TRANSITIONS[from].includes(to);
 }
+
+/**
+ * The shortest sequence of documented transitions that walks `from` to `to`,
+ * as the states to move through (excluding `from`, including `to`), or `null`
+ * when the lifecycle draws no route at all. An empty array means the two are
+ * already the same state and nothing should be recorded.
+ *
+ * This exists because the venue can legitimately move two steps while the
+ * caller's view moves none — a venue-initiated cancellation takes a resting
+ * order `ACKNOWLEDGED -> CANCEL_PENDING -> CANCELED` in one go, and a caller
+ * that only ever applies a single direct edge has no way to catch up. Before
+ * this, such an order was wedged: no operation could advance it, its reserved
+ * capital was never released, and its fills at the venue were unobservable.
+ *
+ * Walking a path is not inventing one. Every state the caller passes through
+ * is a state the venue actually passed through, every edge comes out of the
+ * table, and the order's history records each one, so a reader can see the
+ * route rather than a jump. Breadth-first over the table in registry order,
+ * so the route chosen for a given pair is the same on every run and a direct
+ * edge always wins over a longer detour.
+ */
+export function orderTransitionPath(from: OrderState, to: OrderState): readonly OrderState[] | null {
+  if (from === to) {
+    return [];
+  }
+
+  const cameFrom = new Map<OrderState, OrderState>();
+  const seen = new Set<OrderState>([from]);
+  const queue: OrderState[] = [from];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined) {
+      break;
+    }
+    for (const next of ORDER_STATE_TRANSITIONS[current]) {
+      if (seen.has(next)) {
+        continue;
+      }
+      seen.add(next);
+      cameFrom.set(next, current);
+      if (next === to) {
+        const path: OrderState[] = [];
+        let step: OrderState | undefined = to;
+        while (step !== undefined && step !== from) {
+          path.unshift(step);
+          step = cameFrom.get(step);
+        }
+        return path;
+      }
+      queue.push(next);
+    }
+  }
+
+  return null;
+}

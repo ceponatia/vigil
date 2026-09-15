@@ -61,9 +61,18 @@ const PERMITTED_WORKSPACE_IMPORTS = ["@vigil/contracts", "@vigil/market"];
 
 const WORKSPACE_IMPORT = /from "(@vigil\/[^"]+)"/g;
 
+/**
+ * Every TypeScript file in the package except this one. Suites are scanned
+ * too: a fixture or a test helper that reached a real endpoint would be just
+ * as much a live code path as production code, and CI runs them. Only this
+ * file is excluded, because the token list below necessarily contains every
+ * construct it looks for.
+ */
+const SELF = "no-live-endpoint.test.ts";
+
 function sourceFiles(): readonly string[] {
   return readdirSync(SOURCE_DIR, { recursive: true, encoding: "utf8" })
-    .filter((entry) => entry.endsWith(".ts") && !entry.endsWith(".test.ts"))
+    .filter((entry) => entry.endsWith(".ts") && !entry.endsWith(SELF))
     .map((entry) => join(SOURCE_DIR, entry));
 }
 
@@ -71,7 +80,7 @@ describe("the paper adapter reaches no endpoint and holds no credential", () => 
   it("has source files to check at all", () => {
     // Without this, a scan that silently found nothing would pass every
     // assertion below by vacuity.
-    expect(sourceFiles().length).toBeGreaterThan(5);
+    expect(sourceFiles().length).toBeGreaterThan(10);
   });
 
   it("contains no network, filesystem, environment, or signing construct", () => {

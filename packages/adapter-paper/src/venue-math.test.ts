@@ -2,7 +2,16 @@ import { describe, expect, it } from "vitest";
 import { decimalStringSchema } from "@vigil/contracts";
 import type { DecimalString } from "@vigil/contracts";
 
-import { compareDecimals, fractionalDigits, mulDiv, renderUnits, scaleFactor, splitUnits, unitsOf } from "./venue-math";
+import {
+  MAX_SUPPORTED_DECIMAL_SCALE,
+  compareDecimals,
+  fractionalDigits,
+  mulDiv,
+  renderUnits,
+  scaleFactor,
+  splitUnits,
+  unitsOf,
+} from "./venue-math";
 
 const d = (value: string): DecimalString => decimalStringSchema.parse(value);
 
@@ -88,6 +97,13 @@ describe("mulDiv rounds in the direction the caller names and never loses an int
     expect(scaleFactor(0)).toBe(1n);
     expect(scaleFactor(4)).toBe(10_000n);
   });
+
+  it("publishes the precision ceiling its callers gate on, and refuses above it", () => {
+    // `proposeOrder` refuses an over-precise amount with a reason code
+    // precisely so this guard is never the thing a caller meets.
+    expect(MAX_SUPPORTED_DECIMAL_SCALE).toBe(30);
+    expect(() => unitsOf(d("1"), MAX_SUPPORTED_DECIMAL_SCALE + 1)).toThrow(/scale must be an integer/);
+  });
 });
 
 describe("compareDecimals orders by value, not by spelling", () => {
@@ -105,7 +121,13 @@ describe("compareDecimals orders by value, not by spelling", () => {
 describe("splitUnits is deterministic and always sums to exactly the whole", () => {
   const total = 20_000n;
 
-  it("produces the same split for the same seed material, every time", () => {
+  it("produces exactly this split for this seed material", () => {
+    // Pinned rather than merely self-consistent. Calling one pure function
+    // twice with the same arguments cannot notice a change to the hash
+    // constants or the weighting — which would silently reshape every seeded
+    // fill in the repository. This literal is the split's wire behavior, and
+    // `exchange.test.ts` pins the same one as rendered quantities.
+    expect(splitUnits(20_000n, 3, "20260915:idem-0001")).toEqual([7_228n, 8_915n, 3_857n]);
     expect(splitUnits(total, 3, "seed:idem-0001")).toEqual(splitUnits(total, 3, "seed:idem-0001"));
   });
 

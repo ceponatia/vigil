@@ -34,6 +34,18 @@ import type { DecimalString } from "@vigil/contracts";
  * one thing `docs/resilience.md` §4 still reserves an exception for.
  */
 
+/**
+ * The widest decimal scale this module's arithmetic accepts. It is a real
+ * limit, not a formality: `decimalStringSchema` deliberately bounds neither
+ * precision nor scale (`packages/contracts/src/money.ts`), so a schema-legal
+ * amount can carry more fractional digits than any helper here will convert.
+ * A caller that might receive such a value gates on this ceiling and refuses
+ * with a reason code BEFORE reaching this module, rather than letting an
+ * internal guard throw out of a function documented never to throw — see
+ * `proposeOrder`.
+ */
+export const MAX_SUPPORTED_DECIMAL_SCALE = 30;
+
 const DECIMAL_PARTS = /^(-?)(\d+)(?:\.(\d+))?$/;
 
 type DecimalParts = {
@@ -43,8 +55,8 @@ type DecimalParts = {
 };
 
 function assertScale(scale: number, caller: string): void {
-  if (!Number.isInteger(scale) || scale < 0 || scale > 30) {
-    throw new Error(`${caller}: scale must be an integer in [0, 30], got ${String(scale)}`);
+  if (!Number.isInteger(scale) || scale < 0 || scale > MAX_SUPPORTED_DECIMAL_SCALE) {
+    throw new Error(`${caller}: scale must be an integer in [0, ${String(MAX_SUPPORTED_DECIMAL_SCALE)}], got ${String(scale)}`);
   }
 }
 
