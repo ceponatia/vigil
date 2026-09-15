@@ -814,7 +814,14 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
 
     const behavior = behaviorFor(order.clientOrderId);
 
-    function accept(state: OrderState): VenueOrderRecord {
+    // An arrow bound to a `const`, deliberately, not a `function`
+    // declaration. Both `quantityUnits` and `priced` above are narrowed out
+    // of a union by their own early returns, and TypeScript will not carry a
+    // narrowing into a HOISTED function — a hoisted function could in
+    // principle be called before the narrowing runs, so inside its body both
+    // revert to `bigint | null` and `VenuePricing | PaperRefusal`. A closure
+    // created after the narrowing keeps it.
+    const accept = (state: OrderState): VenueOrderRecord => {
       const record: VenueOrderRecord = {
         venueOrderId: nextVenueOrderId(),
         clientOrderId: order.clientOrderId,
@@ -834,7 +841,7 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
       };
       book.set(order.clientOrderId, record);
       return record;
-    }
+    };
 
     switch (behavior.submission.kind) {
       case "ACKNOWLEDGE": {

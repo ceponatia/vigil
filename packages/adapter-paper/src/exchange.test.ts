@@ -321,14 +321,16 @@ describe("fills: exact arithmetic, nothing reported before it is due, identical 
       cancellation: { kind: "CONFIRM" },
     };
 
-    function driveToFill(): PaperOrder {
+    // Same reason as `accept` in exchange.ts: a closure bound to a `const`
+    // rather than a hoisted declaration, so it keeps any narrowing in scope.
+    const driveToFill = (): PaperOrder => {
       const exchange = exchangeWith(seeded);
       let order = submitted(submitDefault(exchange), "ACKNOWLEDGED");
       for (const offset of [1_000, 2_000, 3_000]) {
         order = polled(exchange.pollOrder({ order, now: afterAcceptance(offset) }));
       }
       return order;
-    }
+    };
 
     const first = driveToFill();
     const second = driveToFill();
