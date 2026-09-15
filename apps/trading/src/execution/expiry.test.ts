@@ -25,7 +25,14 @@ import {
 // only has to satisfy the parameter's type.
 const FAKE_DB = {} as unknown as VigilDatabase;
 
-const EMPTY: ExpirySweepSummary = { examined: 0, expired: 0, releasedBase: 0n, alreadyExpired: 0, refusals: [] };
+const EMPTY: ExpirySweepSummary = {
+  examined: 0,
+  expired: 0,
+  releasedByAsset: new Map(),
+  alreadyExpired: 0,
+  refusals: [],
+  truncated: false,
+};
 
 type RecordingLogger = {
   readonly debug: (detail: Record<string, unknown>, message: string) => void;
@@ -57,7 +64,8 @@ describe("sweepExpiredReservations", () => {
     const summary = await sweepExpiredReservations(FAKE_DB, { asOf: "2026-02-30T00:00:00.000Z" });
 
     expect(summary.expired).toBe(0);
-    expect(summary.releasedBase).toBe(0n);
+    expect(summary.releasedByAsset.size).toBe(0);
+    expect(summary.truncated).toBe(false);
     expect(summary.refusals).toHaveLength(1);
     expect(summary.refusals[0]?.code).toBe("INVALID_INSTANT");
   });
@@ -180,15 +188,16 @@ describe("startReservationExpirySweep", () => {
     loop.stop();
   });
 
-  it("reports how many holds it ended without logging the amount — catches a balance-like figure reaching a structured log line (docs/resilience.md §10)", async () => {
+  it("reports how many holds it ended and how many it refused, without logging any amount — catches a balance-like figure reaching a structured log line (docs/resilience.md §10), and a pass that refuses everything reading exactly like one with nothing to do", async () => {
     const logger = silentLogger();
     const sweep = vi.fn(
       async (): Promise<ExpirySweepSummary> => ({
         examined: 3,
         expired: 2,
-        releasedBase: 600_000_000n,
+        releasedByAsset: new Map([["1337|native|VGLSTABLE|SYNTHETIC_TESTNET", 600_000_000n]]),
         alreadyExpired: 1,
         refusals: [{ reservationId: "reservation-9", intentId: "intent-9", code: "INTENT_ATTEMPT_LIVE", detail: "still live" }],
+        truncated: false,
       }),
     );
 
@@ -201,7 +210,10 @@ describe("startReservationExpirySweep", () => {
     });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(logger.info).toHaveBeenCalledWith({ expired: 2, examined: 3 }, "expired reservations released");
+    expect(logger.info).toHaveBeenCalledWith(
+      { examined: 3, expired: 2, alreadyExpired: 1, refused: 1 },
+      "reservation expiry sweep pass",
+    );
     // A hold left standing behind a live attempt is the sweep working, not
     // failing, so it is debug rather than warn.
     expect(logger.debug).toHaveBeenCalledWith(
@@ -209,6 +221,89 @@ describe("startReservationExpirySweep", () => {
       "reservation left standing by the expiry sweep",
     );
     expect(logger.warn).not.toHaveBeenCalled();
+
+    loop.stop();
+  });
+
+  it("warns when a pass runs out of page budget rather than out of holds — catches a backlog the sweep can never reach the end of going unreported, which is what head-of-line starvation looks like from outside", async () => {
+    const logger = silentLogger();
+    const sweep = vi.fn(
+      async (): Promise<ExpirySweepSummary> => ({ ...EMPTY, examined: 5_000, refusals: [], truncated: true }),
+    );
+
+    const loop = startReservationExpirySweep({
+      db: FAKE_DB,
+      logger,
+      intervalMs: 60_000,
+      now: () => "2026-01-02T03:11:00.000Z",
+      sweep,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      { examined: 5_000, expired: 0, refused: 0 },
+      "reservation expiry sweep hit its page budget with holds still unexamined",
+    );
+
+    loop.stop();
+  });
+
+  it("keeps ticking when a pass throws synchronously instead of rejecting — catches the latch being left set by a throw that never becomes a rejection, which stops the sweep for the life of the process and says nothing", async () => {
+    const logger = silentLogger();
+    let calls = 0;
+    // Not `async`: this throws on the call itself rather than returning a
+    // rejected promise, which is the case a `.catch()` on the result never
+    // sees.
+    const sweep = vi.fn((): Promise<ExpirySweepSummary> => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error("sweep exploded on the way in");
+      }
+      return Promise.resolve(EMPTY);
+    });
+
+    const loop = startReservationExpirySweep({
+      db: FAKE_DB,
+      logger,
+      intervalMs: 1_000,
+      now: () => "2026-01-02T03:11:00.000Z",
+      sweep,
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(logger.warn).toHaveBeenCalledWith({ error: "sweep exploded on the way in" }, "reservation expiry sweep failed");
+
+    // The latch cleared, so the next tick actually runs.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sweep).toHaveBeenCalledTimes(2);
+
+    loop.stop();
+  });
+
+  it("keeps ticking when the clock itself throws — catches the one throw that happens before the pass exists to catch anything, leaving the latch set with no pass to clear it", async () => {
+    const logger = silentLogger();
+    const sweep = vi.fn(async (): Promise<ExpirySweepSummary> => EMPTY);
+    let reads = 0;
+    const loop = startReservationExpirySweep({
+      db: FAKE_DB,
+      logger,
+      intervalMs: 1_000,
+      now: () => {
+        reads += 1;
+        if (reads === 1) {
+          throw new Error("clock unavailable");
+        }
+        return "2026-01-02T03:11:00.000Z";
+      },
+      sweep,
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sweep).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith({ error: "clock unavailable" }, "reservation expiry sweep could not start");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sweep).toHaveBeenCalledTimes(1);
 
     loop.stop();
   });

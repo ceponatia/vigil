@@ -14,6 +14,7 @@ import {
   releaseReservation,
   reserveAvailable,
   EXPIRED_HOLD_SCAN_LIMIT,
+  type ExpireHoldRequest,
   type ReserveRequest,
 } from "./reservation-store";
 import { openAttempt, storeApprovedIntent } from "../test-support/intent-fixtures";
@@ -257,15 +258,10 @@ async function storedState(reservationId: string): Promise<string> {
   return rows.rows[0]?.state ?? "(absent)";
 }
 
-function expiry(overrides: Record<string, string> = {}): {
-  intentId: string;
-  entryId: string;
-  occurredAt: string;
-  recordedAt: string;
-  asOf: string;
-} {
+function expiry(overrides: Record<string, string> = {}): ExpireHoldRequest {
   return {
     intentId: "intent-1",
+    reservationId: "reservation-1",
     entryId: "entry-expire-1",
     occurredAt: "2026-01-02T03:10:00.000Z",
     recordedAt: AFTER_EXPIRY,
@@ -660,6 +656,264 @@ describe("loadExpiredReservations", () => {
 
   it("answers a malformed instant with a reason code rather than a throw — catches schema-legal input reaching the caller as an exception (docs/resilience.md §4)", async () => {
     const refused = await loadExpiredReservations(db, { asOf: "2026-02-30T00:00:00.000Z" });
+
+    expect(refused.outcome).toBe("refused");
+    if (refused.outcome === "refused") {
+      expect(refused.code).toBe("INVALID_INSTANT");
+    }
+  });
+});
+
+describe("reserveAvailable against an idempotency key whose hold has ended", () => {
+  /**
+   * The key `dispatch.ts` derives, deterministically, per intent. A retry is
+   * a versioned attempt on the same authorization, so it arrives here under
+   * the key the first attempt used.
+   */
+  const DISPATCH_KEY = "reserve:intent-1";
+
+  it("still answers duplicate while the hold is live — catches a guard so eager that the versioned retry the design supports can never reach its own standing hold", async () => {
+    await reserveAvailable(db, request({ idempotencyKey: DISPATCH_KEY, amountBase: HOLD_BASE }));
+
+    const retry = await reserveAvailable(
+      db,
+      request({ reservationId: "reservation-2", entryId: "entry-hold-2", idempotencyKey: DISPATCH_KEY, attempt: 2 }),
+    );
+
+    expect(retry).toEqual({ outcome: "duplicate", reservationId: "reservation-1", entryId: "entry-hold-1" });
+    expect(await reservedBase()).toBe(HOLD_BASE);
+  });
+
+  it("refuses once the sweep has given that hold back — catches the defect this whole slice arms: a cancelled-and-never-filled intent's hold is expired, its capital is back in available where another intent can take it, and the retry is told its funds are still held, so dispatch submits to the venue backed by nothing", async () => {
+    await authorize();
+    await reserveAvailable(db, request({ idempotencyKey: DISPATCH_KEY, amountBase: HOLD_BASE }));
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+    await recordAttemptOutcome(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      state: "CANCELED",
+      spentBase: 0n,
+      receivedBase: 0n,
+      venueOrderId: "venue-order-1",
+      stateChangedAt: "2026-01-02T03:06:00.000Z",
+      recordedAt: "2026-01-02T03:06:00.100Z",
+      reconciliation: null,
+    });
+    const swept = await expireReservation(db, expiry());
+    expect(swept.outcome).toBe("transitioned");
+    // The precondition that makes the old answer dangerous: the capital is
+    // free, and another intent may already have taken it.
+    expect(await availableBase()).toBe(FUNDED_BASE);
+    expect(await reservedBase()).toBe(0n);
+
+    const retry = await reserveAvailable(
+      db,
+      request({ reservationId: "reservation-2", entryId: "entry-hold-2", idempotencyKey: DISPATCH_KEY, attempt: 2 }),
+    );
+
+    expect(retry.outcome).toBe("refused");
+    if (retry.outcome === "refused") {
+      expect(retry.code).toBe("RESERVATION_NOT_ACTIVE");
+      // No balance was read under a lock, so there is no measured figure —
+      // reporting 0 here would read as "the account is empty".
+      expect(retry.availableBase).toBeNull();
+    }
+    expect(await loadActiveReservations(db, TEST_ASSET)).toHaveLength(0);
+    expect(await reservedBase()).toBe(0n);
+  });
+
+  it("refuses for a released and for a consumed hold too — catches a guard written for the sweep alone, when a consumed authorization is the one that must never be retried at all", async () => {
+    await reserveAvailable(db, request({ idempotencyKey: DISPATCH_KEY, amountBase: HOLD_BASE }));
+    await releaseReservation(db, {
+      intentId: "intent-1",
+      entryId: "entry-release-1",
+      occurredAt: "2026-01-02T03:06:00.000Z",
+      recordedAt: "2026-01-02T03:06:00.000Z",
+    });
+
+    const afterRelease = await reserveAvailable(
+      db,
+      request({ reservationId: "reservation-2", entryId: "entry-hold-2", idempotencyKey: DISPATCH_KEY, attempt: 2 }),
+    );
+
+    expect(afterRelease.outcome).toBe("refused");
+    if (afterRelease.outcome === "refused") {
+      expect(afterRelease.code).toBe("RESERVATION_NOT_ACTIVE");
+      expect(afterRelease.detail).toContain("released");
+    }
+  });
+});
+
+describe("consumeReservation against the journal", () => {
+  /** A settlement that posted its trade and died before its release. */
+  async function spendHalfAndCrash(): Promise<void> {
+    await authorize();
+    await reserveAvailable(db, request({ amountBase: HOLD_BASE }));
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+    await recordAttemptOutcome(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      state: "FILLED",
+      spentBase: 400_000_000n,
+      receivedBase: 480_000_000n,
+      venueOrderId: "venue-order-1",
+      stateChangedAt: "2026-01-02T03:07:00.000Z",
+      recordedAt: "2026-01-02T03:07:00.100Z",
+      reconciliation: null,
+    });
+    const trade = await postJournalEntry(db, {
+      ...storeEntry("entry-trade", "trade", [
+        creditOf(heldIn("reserved"), 400_000_000n),
+        debitOf(counterFamily("exchange"), 400_000_000n),
+      ]),
+      intentId: "intent-1",
+    });
+    expect(trade.outcome).toBe("posted");
+  }
+
+  it("refuses while any of the hold is still in reserved — catches the one transition admitted on the caller's word, where recording `consumed` over capital that never moved strands it behind every path at once: the projection stops reporting it, the sweep skips it, and no transition will touch it again", async () => {
+    await spendHalfAndCrash();
+
+    const tooEarly = await consumeReservation(db, { intentId: "intent-1" });
+
+    expect(tooEarly.outcome).toBe("refused");
+    if (tooEarly.outcome === "refused") {
+      expect(tooEarly.code).toBe("HOLD_ALREADY_UNWOUND");
+      expect(tooEarly.detail).toContain("200000000");
+    }
+    // Left standing, which is what makes the replay below possible.
+    expect(await storedState("reservation-1")).toBe("active");
+    expect(await loadActiveReservations(db, TEST_ASSET)).toHaveLength(1);
+  });
+
+  it("succeeds once a replay completes the postings, re-posting none of them — catches the crash-then-replay ordering settle.ts rests its safety argument on: the transition runs after the journal, so a crash between them heals on the next pass instead of stranding the hold", async () => {
+    await spendHalfAndCrash();
+
+    // The replay. The entries' own idempotency keys make the first one a
+    // no-op; the second is the release that never happened.
+    const replayed = await postJournalEntry(db, {
+      ...storeEntry("entry-trade", "trade", [
+        creditOf(heldIn("reserved"), 400_000_000n),
+        debitOf(counterFamily("exchange"), 400_000_000n),
+      ]),
+      intentId: "intent-1",
+    });
+    await postJournalEntry(db, {
+      ...storeEntry("entry-settle-release", "reservation-release", [
+        debitOf(heldIn("available"), HOLD_BASE - 400_000_000n),
+        creditOf(heldIn("reserved"), HOLD_BASE - 400_000_000n),
+      ]),
+      intentId: "intent-1",
+    });
+
+    const consumed = await consumeReservation(db, { intentId: "intent-1" });
+
+    expect(replayed.outcome).toBe("duplicate");
+    expect(consumed).toMatchObject({ outcome: "transitioned", state: "consumed", releasedBase: 0n, entryId: null });
+    expect(await reservedBase()).toBe(0n);
+    expect(await loadActiveReservations(db, TEST_ASSET)).toHaveLength(0);
+  });
+});
+
+describe("expireReservation naming the hold a scan examined", () => {
+  it("refuses when the intent's live hold is no longer the one examined — catches a stale scan ending whichever hold happens to be active, under an entry id minted from a different one", async () => {
+    await reserveAvailable(db, request({ amountBase: HOLD_BASE }));
+
+    const stale = await expireReservation(db, expiry({ reservationId: "reservation-someone-else" }));
+
+    expect(stale.outcome).toBe("refused");
+    if (stale.outcome === "refused") {
+      expect(stale.code).toBe("RESERVATION_SUPERSEDED");
+    }
+    expect(await storedState("reservation-1")).toBe("active");
+    expect(await reservedBase()).toBe(HOLD_BASE);
+  });
+});
+
+describe("loadExpiredReservations paging past what a caller could not end", () => {
+  it("continues after a cursor, so a hold a caller refuses cannot hide every hold behind it — catches head-of-line starvation: a refused hold stays active with a past expiry and returns at the head of every later page, and once a page fills with them no releasable hold is ever examined again", async () => {
+    for (const [index, expiresAt] of [
+      "2026-01-02T03:06:00.000Z",
+      "2026-01-02T03:07:00.000Z",
+      "2026-01-02T03:08:00.000Z",
+    ].entries()) {
+      const suffix = String(index + 1);
+      await reserveAvailable(
+        db,
+        request({
+          reservationId: `reservation-page-${suffix}`,
+          intentId: `intent-page-${suffix}`,
+          entryId: `entry-hold-page-${suffix}`,
+          idempotencyKey: `idem-page-${suffix}`,
+          amountBase: 1_000_000n,
+          expiresAt,
+        }),
+      );
+    }
+
+    const first = await loadExpiredReservations(db, { asOf: AFTER_EXPIRY, limit: 1 });
+    expect(first.outcome === "scanned" ? first.holds.map((hold) => hold.reservationId) : first).toEqual([
+      "reservation-page-1",
+    ]);
+
+    const head = first.outcome === "scanned" ? first.holds[0] : undefined;
+    expect(head).toBeDefined();
+    const rest = await loadExpiredReservations(db, {
+      asOf: AFTER_EXPIRY,
+      after: { expiresAt: head?.expiresAt ?? "", reservationId: head?.reservationId ?? "" },
+    });
+
+    // The cursor steps past the hold the caller could not end, rather than
+    // re-offering it — and the ones behind it are now reachable.
+    expect(rest.outcome === "scanned" ? rest.holds.map((hold) => hold.reservationId) : rest).toEqual([
+      "reservation-page-2",
+      "reservation-page-3",
+    ]);
+  });
+
+  it("is a row-value cursor, not an offset, so ending a hold does not step over the one behind it — catches a pass that skips exactly as many un-examined holds as it succeeded on", async () => {
+    for (const [index, expiresAt] of [
+      "2026-01-02T03:06:00.000Z",
+      "2026-01-02T03:07:00.000Z",
+      "2026-01-02T03:08:00.000Z",
+    ].entries()) {
+      const suffix = String(index + 1);
+      await reserveAvailable(
+        db,
+        request({
+          reservationId: `reservation-page-${suffix}`,
+          intentId: `intent-page-${suffix}`,
+          entryId: `entry-hold-page-${suffix}`,
+          idempotencyKey: `idem-page-${suffix}`,
+          amountBase: 1_000_000n,
+          expiresAt,
+        }),
+      );
+    }
+
+    // The caller ends the first hold, so it leaves the result set entirely.
+    const ended = await expireReservation(
+      db,
+      expiry({ intentId: "intent-page-1", reservationId: "reservation-page-1", entryId: "entry-expire-page-1" }),
+    );
+    expect(ended.outcome).toBe("transitioned");
+
+    const rest = await loadExpiredReservations(db, {
+      asOf: AFTER_EXPIRY,
+      after: { expiresAt: "2026-01-02T03:06:00.000Z", reservationId: "reservation-page-1" },
+    });
+
+    expect(rest.outcome === "scanned" ? rest.holds.map((hold) => hold.reservationId) : rest).toEqual([
+      "reservation-page-2",
+      "reservation-page-3",
+    ]);
+  });
+
+  it("answers a malformed cursor instant with a reason code rather than a throw — catches a caller's own bookkeeping reaching the store as an exception", async () => {
+    const refused = await loadExpiredReservations(db, {
+      asOf: AFTER_EXPIRY,
+      after: { expiresAt: "2026-02-30T00:00:00.000Z", reservationId: "reservation-1" },
+    });
 
     expect(refused.outcome).toBe("refused");
     if (refused.outcome === "refused") {

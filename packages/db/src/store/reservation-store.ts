@@ -5,7 +5,7 @@ import type { VigilDatabase } from "../client";
 import {
   executionAttempts,
   reservations,
-  LIVE_EXECUTION_ATTEMPT_STATES,
+  TERMINAL_EXECUTION_ATTEMPT_STATES,
   type ReservationStateValue,
 } from "../schema/intents";
 import { assetScales, journalEntries, journalLines, ledgerBalances } from "../schema/journal";
@@ -77,11 +77,15 @@ export type ReserveResult =
       readonly availableBeforeBase: bigint;
       readonly availableAfterBase: bigint;
     }
-  /** This idempotency key already holds funds; nothing new was written. */
+  /**
+   * This idempotency key holds funds **now**; nothing new was written, and
+   * the caller may act on the standing hold. A key whose hold has since been
+   * released, consumed or expired is a refusal, not a duplicate.
+   */
   | { readonly outcome: "duplicate"; readonly reservationId: string; readonly entryId: string }
   | {
       readonly outcome: "refused";
-      readonly code: StoreDiagnosticCode;
+      readonly code: ReservationDiagnosticCode;
       readonly detail: string;
       /**
        * The available balance this store read under the row lock, or `null`
@@ -112,17 +116,65 @@ function holdingsAccountFor(assetId: string, holdingsState: "available" | "reser
   return { family: "holdings", assetId, holdingsState };
 }
 
-async function findByIdempotencyKey(
-  db: VigilDatabase,
-  idempotencyKey: string,
-): Promise<{ readonly reservationId: string; readonly journalEntryId: string } | null> {
+type ExistingHold = {
+  readonly reservationId: string;
+  readonly journalEntryId: string;
+  readonly state: ReservationStateValue;
+};
+
+async function findByIdempotencyKey(db: VigilDatabase, idempotencyKey: string): Promise<ExistingHold | null> {
   const rows = await db
-    .select({ reservationId: reservations.reservationId, journalEntryId: reservations.journalEntryId })
+    .select({
+      reservationId: reservations.reservationId,
+      journalEntryId: reservations.journalEntryId,
+      // The state is not decoration. Until the transitions below existed,
+      // `active` was the only value this column could hold and reading it
+      // would have been dead weight; now a sweep produces terminal holds
+      // unattended, and "a row exists under this key" and "this key still
+      // holds funds" are different facts.
+      state: reservations.state,
+    })
     .from(reservations)
     .where(eq(reservations.idempotencyKey, idempotencyKey))
     .limit(1);
   const row = rows[0];
-  return row === undefined ? null : { reservationId: row.reservationId, journalEntryId: row.journalEntryId };
+  return row === undefined
+    ? null
+    : { reservationId: row.reservationId, journalEntryId: row.journalEntryId, state: row.state };
+}
+
+/**
+ * What it means that this idempotency key already named a reservation.
+ *
+ * `duplicate` is a promise to the caller: *the funds you asked for are held,
+ * carry on*. `dispatch.ts` reads it that way — it refuses only on `refused`,
+ * so a `duplicate` falls straight through to opening an attempt and
+ * submitting to the venue. That promise is only true while the hold is
+ * `active`.
+ *
+ * Once a hold is `released`, `consumed` or `expired` its base units are back
+ * in `available` (or gone to the venue) and another intent may already have
+ * taken them, so answering `duplicate` would dispatch an order backed by
+ * nothing. The reachable sequence is the ordinary one this module exists to
+ * support: an attempt cancelled with no fill leaves its hold standing, the
+ * expiry sweep hands the capital back when the intent's window closes, and
+ * the versioned retry then reserves under the same deterministic key.
+ *
+ * Refusing is the fail-closed answer rather than a temporary one: the key is
+ * unique, so the row cannot be re-reserved under it, and a hold that ended
+ * because its intent expired is a hold whose intent may no longer be
+ * dispatched at all.
+ */
+function answerForExistingHold(existing: ExistingHold, idempotencyKey: string): ReserveResult {
+  if (existing.state === "active") {
+    return { outcome: "duplicate", reservationId: existing.reservationId, entryId: existing.journalEntryId };
+  }
+  return {
+    outcome: "refused",
+    code: "RESERVATION_NOT_ACTIVE",
+    detail: `idempotency key ${idempotencyKey} already named reservation ${existing.reservationId}, which is now ${existing.state}; the capital it held has been accounted for and this key holds nothing`,
+    availableBase: null,
+  };
 }
 
 /**
@@ -178,7 +230,7 @@ export async function reserveAvailable(db: VigilDatabase, request: ReserveReques
 
   const existing = await findByIdempotencyKey(db, request.idempotencyKey);
   if (existing !== null) {
-    return { outcome: "duplicate", reservationId: existing.reservationId, entryId: existing.journalEntryId };
+    return answerForExistingHold(existing, request.idempotencyKey);
   }
 
   try {
@@ -342,11 +394,13 @@ export async function reserveAvailable(db: VigilDatabase, request: ReserveReques
 
     // A duplicate here is the same request arriving twice concurrently: the
     // fast-path lookup above found nothing because the winner had not
-    // committed yet. Report the hold that exists rather than a refusal.
+    // committed yet. Report the hold that exists — on the same terms the
+    // fast path reports it, so a hold that ended in between is a refusal
+    // here too rather than a `duplicate` this path alone would wave through.
     if (refusal.code === "DUPLICATE_RECORD") {
       const duplicate = await findByIdempotencyKey(db, request.idempotencyKey);
       if (duplicate !== null) {
-        return { outcome: "duplicate", reservationId: duplicate.reservationId, entryId: duplicate.journalEntryId };
+        return answerForExistingHold(duplicate, request.idempotencyKey);
       }
     }
 
@@ -412,9 +466,10 @@ export async function loadActiveReservations(
  * else to spend that capital. Two conditions make that unsafe, and both are
  * checked against durable rows inside the transaction that would do it:
  *
- * - **A live attempt** (`LIVE_EXECUTION_ATTEMPT_STATES`, which counts
- *   `UNKNOWN`). Releasing under a live order hands the same base units to a
- *   second intent while the venue can still fill the first.
+ * - **A live attempt** — anything not in `TERMINAL_EXECUTION_ATTEMPT_STATES`,
+ *   which is how `UNKNOWN` is counted and how a state neither list names
+ *   blocks rather than passes. Releasing under a live order hands the same
+ *   base units to a second intent while the venue can still fill the first.
  *   `docs/resilience.md` §3 is explicit that an unresolved order releases
  *   nothing and resolves only through reconciliation, so a hold behind an
  *   `UNKNOWN` attempt deliberately does *not* expire. That is the one shape
@@ -496,8 +551,12 @@ export const RESERVATION_TRANSITION_CODES = [
   "INTENT_ALREADY_SPENT",
   /** Nothing was spent against this intent, so no hold on it was consumed. */
   "INTENT_NOTHING_SPENT",
-  /** The journal says this intent's hold is not fully backed in `reserved` any more. */
+  /** The journal disagrees with the transition about how much of this hold is still in `reserved`. */
   "HOLD_ALREADY_UNWOUND",
+  /** The balance row this release must move is not in the projection. */
+  "BALANCE_ROW_MISSING",
+  /** The hold examined by a scan is no longer the intent's active one. */
+  "RESERVATION_SUPERSEDED",
   /** The instant supplied is not an ISO-8601 UTC instant on a real calendar day. */
   "INVALID_INSTANT",
 ] as const;
@@ -522,6 +581,15 @@ export type ReleaseHoldRequest = {
 };
 
 export type ExpireHoldRequest = ReleaseHoldRequest & {
+  /**
+   * The hold the caller examined. Named explicitly because a scan and the
+   * transaction that acts on it are two moments: between them another writer
+   * can end this hold and the intent can open its next one, and `#47` will
+   * create intents that have more than one. Ending a hold the caller never
+   * looked at — under an entry id minted from the one it did — is a posting
+   * whose name does not match what it moved.
+   */
+  readonly reservationId: string;
   /** ISO-8601 UTC; the instant the sweep is asking about. The hold expires only if `expires_at` is at or before it. */
   readonly asOf: string;
 };
@@ -676,7 +744,15 @@ async function describeIntentActivity(
   const live: string[] = [];
   let spentBase = 0n;
   for (const row of rows) {
-    if ((LIVE_EXECUTION_ATTEMPT_STATES as readonly string[]).includes(row.state)) {
+    // Not-terminal rather than in-the-live-list, and the difference is the
+    // default for a state neither list names. The two lists partition the
+    // enum today, so a positive live test is correct today — but it fails
+    // **open**: a state added to the enum and to neither list would read as
+    // not-live and the sweep would hand back a hold behind an order that can
+    // still fill. Asking the terminal question makes an unrecognised state
+    // block, which is what a capital-authority predicate owes
+    // (`docs/resilience.md` §1).
+    if (!(TERMINAL_EXECUTION_ATTEMPT_STATES as readonly string[]).includes(row.state)) {
       live.push(row.state);
     }
     spentBase += row.spentBase;
@@ -789,21 +865,47 @@ async function finishHold(
     // updates the same two rows in. Two writers that take one pair of row
     // locks in opposite orders deadlock instead of queueing, and agreeing on
     // one order costs nothing.
-    await tx
+    //
+    // **These two updates must stay ahead of the `reservations` update
+    // below.** That ordering, not the `for update` in `lockHolds`, is what
+    // makes it safe for this module to take no `ledger_balances` lock up
+    // front. `reserveAvailable` locks the balance rows and then inserts its
+    // reservation row; a cycle needs this transaction to be holding a
+    // *modified* reservation row while waiting for those balance locks.
+    // Postgres hands an inserter an immediate unique violation against a row
+    // that is only `for update`-locked, but it makes the inserter **wait**
+    // on a row that has been `UPDATE`d — so at the single moment a cycle
+    // could form, the row must still be locked-only. Moving the state change
+    // above these two writes would silently reintroduce the deadlock.
+    const credited = await tx
       .update(ledgerBalances)
       .set({
         debitBase: sql`${ledgerBalances.debitBase} + ${hold.amountBase.toString()}::numeric`,
         lastRecordedAt: posting.recordedAt,
       })
-      .where(eq(ledgerBalances.accountKey, availableKey));
+      .where(eq(ledgerBalances.accountKey, availableKey))
+      .returning({ accountKey: ledgerBalances.accountKey });
 
-    await tx
+    const debited = await tx
       .update(ledgerBalances)
       .set({
         creditBase: sql`${ledgerBalances.creditBase} + ${hold.amountBase.toString()}::numeric`,
         lastRecordedAt: posting.recordedAt,
       })
-      .where(eq(ledgerBalances.accountKey, reservedKey));
+      .where(eq(ledgerBalances.accountKey, reservedKey))
+      .returning({ accountKey: ledgerBalances.accountKey });
+
+    // Unreachable while the hold that seeded both rows exists and nothing
+    // deletes from `ledger_balances` — and checked anyway, because the
+    // failure it describes is silent: an UPDATE that matches no row writes
+    // the postings and moves no balance, leaving the projection disagreeing
+    // with the journal it is derived from.
+    if (credited.length !== 1 || debited.length !== 1) {
+      throw new TransitionRefused(
+        "BALANCE_ROW_MISSING",
+        `releasing reservation ${hold.reservationId} moved ${String(credited.length)} available and ${String(debited.length)} reserved balance rows for ${hold.assetId}; a release must move exactly one of each`,
+      );
+    }
   }
 
   // `state = 'active'` is redundant under the row lock taken above and kept
@@ -921,6 +1023,12 @@ export async function expireReservation(
   try {
     return await db.transaction(async (tx): Promise<ReservationTransitionResult> => {
       const chosen = selectHold(await lockHolds(tx, request.intentId), request.intentId, "expired");
+      if (chosen.hold.reservationId !== request.reservationId) {
+        throw new TransitionRefused(
+          "RESERVATION_SUPERSEDED",
+          `intent ${request.intentId}'s live hold is now ${chosen.hold.reservationId}, not the ${request.reservationId} this sweep examined; the next scan decides that one on its own window`,
+        );
+      }
       if (chosen.kind === "noop") {
         return { outcome: "noop", reservationId: chosen.hold.reservationId, state: "expired" };
       }
@@ -979,6 +1087,29 @@ export async function consumeReservation(
         );
       }
 
+      // The claim this transition rests on — that the settlement's own
+      // entries have already moved every base unit of the hold out of
+      // `reserved` — checked rather than assumed. `finishHold` skips its
+      // backing check when there is nothing to post, so `consumed` would
+      // otherwise be the one state admitted on the caller's word.
+      //
+      // It is also the state that forecloses every remedy: once a hold is
+      // terminal, `loadActiveReservations` stops reporting it,
+      // `loadExpiredReservations` skips it and `selectHold` refuses every
+      // further transition. Recording `consumed` over capital still sitting
+      // in `reserved` would strand it permanently — the defect this whole
+      // family exists to kill, reached from the other side.
+      const reservedKey = accountKeyFor(holdingsAccountFor(chosen.hold.assetId, "reserved"));
+      const backingBase = await reservedBackingFor(tx, request.intentId, reservedKey);
+      if (backingBase !== 0n) {
+        throw new TransitionRefused(
+          "HOLD_ALREADY_UNWOUND",
+          backingBase > 0n
+            ? `intent ${request.intentId} still has ${backingBase.toString()} base units of ${chosen.hold.assetId} in reserved, so reservation ${chosen.hold.reservationId} is not consumed; recording it as consumed would leave that capital held with no reservation naming it`
+            : `the journal has taken ${(-backingBase).toString()} base units of ${chosen.hold.assetId} more out of reserved than intent ${request.intentId} ever held; reservation ${chosen.hold.reservationId} is left standing rather than closed over an unexplained overdraw`,
+        );
+      }
+
       return await finishHold(tx, chosen.hold, "consumed", null);
     });
   } catch (error) {
@@ -994,6 +1125,14 @@ export type ExpiredHold = {
   readonly amountBase: bigint;
   /** ISO-8601 UTC. */
   readonly expiresAt: string;
+};
+
+/** Where a scan left off, in the order the scan returns rows. */
+export type ExpiredHoldCursor = {
+  /** ISO-8601 UTC; the `expires_at` of the last hold the previous page returned. */
+  readonly expiresAt: string;
+  /** That hold's id, which breaks ties between two holds expiring in the same millisecond. */
+  readonly reservationId: string;
 };
 
 export type ExpiredHoldScan =
@@ -1015,10 +1154,23 @@ export const EXPIRED_HOLD_SCAN_LIMIT = 200;
  *
  * It reads `(state, expires_at)`, which is exactly
  * `reservations_state_expires_at_idx`.
+ *
+ * `after` continues a previous page, and a caller sweeping a backlog needs
+ * it. A hold this scan offers and the caller then refuses — one behind a
+ * live or `UNKNOWN` attempt, which `docs/resilience.md` §3 resolves only
+ * through reconciliation — stays `active` with a past `expires_at`, so it
+ * comes back at the head of the next page for as long as it exists. Enough
+ * of those and the first page is entirely holds that can never be ended,
+ * and no releasable hold behind them is ever examined again.
+ *
+ * The cursor is a row value over `(expires_at, reservation_id)` rather than
+ * an offset: rows the caller *does* end leave the result set between pages,
+ * and an offset would step over exactly as many un-examined holds as the
+ * caller succeeded on.
  */
 export async function loadExpiredReservations(
   db: VigilDatabase,
-  options: { readonly asOf: string; readonly limit?: number },
+  options: { readonly asOf: string; readonly limit?: number; readonly after?: ExpiredHoldCursor },
 ): Promise<ExpiredHoldScan> {
   const asOf = parseIsoInstant(options.asOf);
   if (asOf === null) {
@@ -1026,6 +1178,16 @@ export async function loadExpiredReservations(
       outcome: "refused",
       code: "INVALID_INSTANT",
       detail: `${options.asOf} is not an ISO-8601 UTC instant on a real calendar day`,
+    };
+  }
+
+  const after = options.after;
+  const afterInstant = after === undefined ? null : parseIsoInstant(after.expiresAt);
+  if (after !== undefined && afterInstant === null) {
+    return {
+      outcome: "refused",
+      code: "INVALID_INSTANT",
+      detail: `the scan cursor names ${after.expiresAt}, which is not an ISO-8601 UTC instant on a real calendar day`,
     };
   }
 
@@ -1041,7 +1203,15 @@ export async function loadExpiredReservations(
       expiresAt: reservations.expiresAt,
     })
     .from(reservations)
-    .where(and(eq(reservations.state, "active"), lte(reservations.expiresAt, asOf)))
+    .where(
+      and(
+        eq(reservations.state, "active"),
+        lte(reservations.expiresAt, asOf),
+        afterInstant === null || after === undefined
+          ? undefined
+          : sql`(${reservations.expiresAt}, ${reservations.reservationId}) > (${afterInstant}::timestamptz, ${after.reservationId}::text)`,
+      ),
+    )
     .orderBy(asc(reservations.expiresAt), asc(reservations.reservationId))
     .limit(limit);
 

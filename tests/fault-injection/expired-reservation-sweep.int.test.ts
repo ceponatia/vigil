@@ -115,6 +115,7 @@ function abandonedHold(): ReserveRequest {
 function sweepRequest(entryId: string): ExpireHoldRequest {
   return {
     intentId: "intent-abandoned",
+    reservationId: "reservation-abandoned",
     entryId,
     occurredAt: "2026-04-01T03:10:00.000Z",
     recordedAt: AFTER_EXPIRY,
@@ -209,11 +210,19 @@ describe("two runtimes sweeping one abandoned hold", () => {
     const first = expireReservation(runtimeOne.db, sweepRequest("entry-expire-one"));
     const second = expireReservation(runtimeTwo.db, sweepRequest("entry-expire-two"));
 
+    // The gate is opened in `finally` so that a failed wait fails this test
+    // legibly instead of leaving two transactions parked behind a gate
+    // nobody ever commits, which hangs the suite rather than failing it.
+    let blocked = 0;
+    try {
+      blocked = await waitUntilBlocked(2);
+    } finally {
+      gate.open();
+      await gate.held;
+    }
     // Without this the suite would prove nothing: it is the evidence that
     // both sweeps really are contending rather than running in sequence.
-    expect(await waitUntilBlocked(2)).toBeGreaterThanOrEqual(2);
-    gate.open();
-    await gate.held;
+    expect(blocked).toBeGreaterThanOrEqual(2);
 
     const [one, two] = await Promise.all([first, second]);
 
@@ -271,9 +280,14 @@ describe("an expiry sweep and an explicit release arriving together", () => {
       recordedAt: AFTER_EXPIRY,
     });
 
-    expect(await waitUntilBlocked(2)).toBeGreaterThanOrEqual(2);
-    gate.open();
-    await gate.held;
+    let blocked = 0;
+    try {
+      blocked = await waitUntilBlocked(2);
+    } finally {
+      gate.open();
+      await gate.held;
+    }
+    expect(blocked).toBeGreaterThanOrEqual(2);
 
     const [swept, released] = await Promise.all([sweep, explicit]);
 

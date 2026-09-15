@@ -99,6 +99,7 @@ export type {
   ConsumeHoldRequest,
   ExpireHoldRequest,
   ExpiredHold,
+  ExpiredHoldCursor,
   ExpiredHoldScan,
   ReleaseHoldRequest,
   ReservationDiagnosticCode,
