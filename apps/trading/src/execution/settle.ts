@@ -2,8 +2,20 @@ import { assetIdSchema } from "@vigil/contracts";
 import type { AssetId, IsoUtcTimestamp } from "@vigil/contracts";
 import { settlementOf } from "@vigil/adapter-paper";
 import type { OrderSettlement, PaperOrder } from "@vigil/adapter-paper";
-import { loadApprovedIntent, loadExecutionAttempts, postJournalEntry, recordAttemptOutcome } from "@vigil/db";
-import type { ExecutionAttemptStateValue, StoreApprovedIntent, StoreEntry, VigilDatabase } from "@vigil/db";
+import {
+  consumeReservation,
+  loadApprovedIntent,
+  loadExecutionAttempts,
+  postJournalEntry,
+  recordAttemptOutcome,
+} from "@vigil/db";
+import type {
+  ExecutionAttemptStateValue,
+  ReservationStateValue,
+  StoreApprovedIntent,
+  StoreEntry,
+  VigilDatabase,
+} from "@vigil/db";
 import { buildEntry, counterAccount, holdingsAccount } from "@vigil/ledger";
 import type { EntryKind, HoldingsState, JournalEntry, JournalLine } from "@vigil/ledger";
 
@@ -59,14 +71,27 @@ import { unitsAt } from "./venue-economics";
  * and releasing would leave that retry dispatching against capital nobody
  * holds.
  *
- * What this cannot do is move the `reservations` row out of `active`:
- * `@vigil/db` exports `reserveAvailable` and `loadActiveReservations` and no
- * state transition at all. So after a release the balances are right and
- * `loadActiveReservations` still reports the hold. That over-reports
- * commitments, which under-reports available funds — the conservative
- * direction — but it is a genuine divergence between two durable records and
- * it has to close before a second authorization runs against the same
- * capital.
+ * Once those postings are durable the hold's own row follows them, through
+ * `consumeReservation`: every base unit of the hold has left `reserved` — to
+ * the venue through the trade and fee entries, and back to `available`
+ * through the release — so the reservation is `consumed` and
+ * `loadActiveReservations` stops reporting it. The store call posts nothing;
+ * the entries above already moved the money, and a second movement here
+ * would move it twice.
+ *
+ * It runs **after** the journal, not before, and that order is the whole
+ * safety argument. A crash in between leaves the hold `active` on an intent
+ * whose attempt records `spent_base > 0`, which is precisely the condition
+ * the expiry sweep refuses to touch, so nothing hands that capital back
+ * behind the settlement's back; replaying this path re-posts nothing (the
+ * entries' idempotency keys) and then moves the row. Claiming the row first
+ * would instead leave a window in which the reservation is terminal and its
+ * postings are not durable.
+ *
+ * A refused transition is surfaced beside the recorded settlement rather
+ * than instead of it, for the same reason `overspend` is: the venue has
+ * already acted, and refusing to report a confirmed movement would blind the
+ * application to real exposure.
  */
 
 /** The ledger entry ids this settlement may post. Injected so a replay is byte-identical. */
@@ -112,6 +137,18 @@ export type AttemptSettlement = {
   readonly releasedBase: bigint | null;
   /** The ledger entries this settlement posted, in posting order. */
   readonly journaledEntryIds: readonly string[];
+  /**
+   * The terminal state this settlement's hold reached, or `null` when no
+   * transition was attempted (nothing was confirmed spent, so the hold is
+   * still open to a retry) or when one was attempted and refused.
+   */
+  readonly reservationState: ReservationStateValue | null;
+  /**
+   * Set when the hold's row could not be moved even though the postings that
+   * unwound it are durable — a divergence between two durable records,
+   * surfaced beside the settlement rather than instead of it.
+   */
+  readonly reservationRefusal: ExecutionRefusal | null;
   /**
    * Set when the confirmed spend exceeded the authorization's own ceiling.
    * The overspend has already happened at the venue, so it is surfaced
@@ -287,6 +324,14 @@ async function recordSettlement(
     return refused(journaled.refusal);
   }
 
+  // A confirmed spend is what makes the hold `consumed`: the authorization
+  // has been consumed exactly once, and `journalSettlement` has just moved
+  // the whole hold out of `reserved`. A terminal attempt that spent nothing
+  // posts nothing and moves nothing — its hold stays open to a versioned
+  // retry, and ends through release or expiry instead.
+  const hold =
+    settlement.settled && amounts.spentBase > 0n ? await consumeReservation(db, { intentId: request.intentId }) : null;
+
   return {
     outcome: "recorded",
     order: request.order,
@@ -296,6 +341,14 @@ async function recordSettlement(
     receivedBase: amounts.receivedBase,
     releasedBase: journaled.releasedBase,
     journaledEntryIds: journaled.entryIds,
+    reservationState: hold === null || hold.outcome === "refused" ? null : hold.state,
+    reservationRefusal:
+      hold !== null && hold.outcome === "refused"
+        ? executionRefusal(
+            "PERSISTENCE_REFUSED",
+            `the postings for intent ${request.intentId} are durable but its reservation could not be recorded as consumed (${hold.code}): ${hold.detail}`,
+          )
+        : null,
     overspend,
   };
 }

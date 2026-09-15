@@ -4,17 +4,32 @@ import { createDbClient } from "@vigil/db";
 import pino from "pino";
 
 import { loadTradingConfig } from "./config";
+import { startReservationExpirySweep } from "./execution/expiry";
 import { startHeartbeatLoop } from "./health/heartbeat";
 
 /**
  * main.ts — BOOT-07's runtime entry point: config, a database connection,
- * structured logging, and the heartbeat loop the dashboard reads
+ * structured logging, the heartbeat loop the dashboard reads
  * (`apps/trading/README.md` "Planned module directories", `health/`;
- * `apps/control/src/lib/health.ts`). Market, strategy, allocator,
- * execution, outbox, and reconcile are BOOT-06 and not built here.
+ * `apps/control/src/lib/health.ts`), and the reservation expiry sweep. The
+ * market, strategy, allocator, outbox, and reconcile loops are not built
+ * here.
+ *
+ * The expiry sweep is started here rather than by whatever drives execution
+ * because it is not driven by execution at all: the hold it exists to end
+ * belongs to an intent that stopped producing events, so a sweep reachable
+ * only from the execution path would never reach it
+ * (`execution/expiry.ts`).
  */
 
 const HEARTBEAT_INTERVAL_MS = 5_000;
+
+/**
+ * A minute. The window being enforced is the intent's own `valid_until`,
+ * measured in minutes at least, so a sweep an order of magnitude finer than
+ * that buys nothing and costs a query per tick.
+ */
+const RESERVATION_EXPIRY_SWEEP_INTERVAL_MS = 60_000;
 
 function instanceId(): string {
   // `pid` alone collides across containers — every container's first
@@ -51,6 +66,13 @@ async function main(): Promise<void> {
     lastQuoteAcquiredAt: () => null,
   });
 
+  const expirySweep = startReservationExpirySweep({
+    db: client.db,
+    logger,
+    intervalMs: RESERVATION_EXPIRY_SWEEP_INTERVAL_MS,
+    now: () => new Date().toISOString(),
+  });
+
   let shuttingDown = false;
   // `string`, not the global `NodeJS` namespace's `Signals` type —
   // `no-undef` (`js.configs.recommended`) does not know that namespace
@@ -64,6 +86,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     logger.info({ signal }, "vigil-trading shutting down");
     loop.stop();
+    expirySweep.stop();
     client
       .close()
       .then(() => {

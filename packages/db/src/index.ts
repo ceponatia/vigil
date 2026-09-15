@@ -85,8 +85,30 @@ export type {
   StoredBalance,
 } from "./store/journal-store";
 
-export { loadActiveReservations, reserveAvailable } from "./store/reservation-store";
-export type { ReserveRequest, ReserveResult } from "./store/reservation-store";
+export {
+  consumeReservation,
+  expireReservation,
+  loadActiveReservations,
+  loadExpiredReservations,
+  releaseReservation,
+  reserveAvailable,
+  EXPIRED_HOLD_SCAN_LIMIT,
+  RESERVATION_TRANSITION_CODES,
+} from "./store/reservation-store";
+export type {
+  ConsumeHoldRequest,
+  ExpireHoldRequest,
+  ExpiredHold,
+  ExpiredHoldCursor,
+  ExpiredHoldScan,
+  ReleaseHoldRequest,
+  ReservationDiagnosticCode,
+  ReservationTransitionCode,
+  ReservationTransitionResult,
+  ReserveRequest,
+  ReserveResult,
+  TerminalReservationState,
+} from "./store/reservation-store";
 
 export {
   loadApprovedIntent,
