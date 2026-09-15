@@ -21,7 +21,9 @@ A dead LLM provider, an exhausted research budget, or a stale news feed degrades
 
 ## 3. UNKNOWN is a state
 
-A submission timeout, a cancellation timeout, and broadcast ambiguity all resolve to UNKNOWN, never to an assumed success or failure. UNKNOWN resolves only through reconciliation against the venue's or chain's own confirmed state — orders, history, executions, and balances — before any resubmission, replacement, or cancellation retry proceeds. Filled exposure from a partial fill persists through a cancellation; only the confirmed unfilled remainder is released.
+A submission timeout, a cancellation timeout, and broadcast ambiguity are never resolved by assumption; none of them produces a success or a failure. A submission timeout and broadcast ambiguity produce the UNKNOWN state. A cancellation timeout produces an UNKNOWN attempt result and leaves the order where it already is — the state that means the cancellation was requested and not confirmed, `CANCEL_PENDING` in the exchange lifecycle — because an unconfirmed cancellation has neither taken effect nor been refused.
+
+An order in either condition releases nothing and accepts no further operation: it is not polled forward, not cancelled again, and not resubmitted. It resolves only through reconciliation against the venue's or chain's own confirmed state — orders, history, executions, and balances — which precedes any resubmission, replacement, or cancellation retry. Filled exposure from a partial fill persists through a cancellation; only the confirmed unfilled remainder is released.
 
 ## 4. Diagnostics and reason codes over exceptions
 
