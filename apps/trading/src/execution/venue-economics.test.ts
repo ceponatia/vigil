@@ -235,7 +235,15 @@ describe("envelopeFor against the real paper exchange", () => {
 
 describe("the capital bound policy solves against this cost model", () => {
   const pricing = pricingOrThrow();
-  const envelope = envelopeFor(pricing, unitsOrThrow("1.0000", QUANTITY_SCALE));
+
+  // A THOUSAND units, not one. At one unit the two wirings differ by 0.00065
+  // of cash — `250.9859` against `250.98525` per unit — which is below one
+  // money unit at scale 2, so no funds figure can tell them apart and the
+  // case would pass under either. At a thousand the difference is 0.65 of
+  // cash, which at exactly the envelope buys 1000.0025 under the ask-based
+  // wiring and exactly 1000.0000 under this one.
+  const QUANTITY_UNITS = 10_000_000n;
+  const envelope = envelopeFor(pricing, QUANTITY_UNITS);
 
   function sizeWithFunds(fundsAvailableQuote: string): string | null {
     const sized = sizeTrade({
@@ -243,9 +251,9 @@ describe("the capital bound policy solves against this cost model", () => {
         fundsAvailableQuote: money(fundsAvailableQuote),
         // Every other bound deliberately out of the way, so the funds bound
         // is the one being measured.
-        exposureHeadroomQuote: money("1000000.00"),
-        executableLiquidityBase: money("1000.0000"),
-        adverseLossBudgetQuote: money("1000000.00"),
+        exposureHeadroomQuote: money("100000000.00"),
+        executableLiquidityBase: money("1000000.0000"),
+        adverseLossBudgetQuote: money("100000000.00"),
         stopDistanceQuote: money("10.00"),
         executablePrice: pricing.executionPrice,
       },
@@ -255,18 +263,18 @@ describe("the capital bound policy solves against this cost model", () => {
     return sized.outcome === "sized" ? sized.size.quantityBase : null;
   }
 
-  it("covers the whole quantity at exactly the envelope, and not at one unit less", () => {
-    const exact = decimalAt(envelope.maxSpendUnits, MONEY_SCALE);
-    const short = decimalAt(envelope.maxSpendUnits - 1n, MONEY_SCALE);
-
-    const atExact = sizeWithFunds(exact);
-    const atShort = sizeWithFunds(short);
+  it("buys EXACTLY the quantity at exactly the envelope, and less at one unit under it", () => {
+    const atExact = sizeWithFunds(decimalAt(envelope.maxSpendUnits, MONEY_SCALE));
+    const atShort = sizeWithFunds(decimalAt(envelope.maxSpendUnits - 1n, MONEY_SCALE));
 
     expect(atExact).not.toBeNull();
     expect(atShort).not.toBeNull();
     if (atExact !== null && atShort !== null) {
-      expect(unitsOrThrow(atExact, QUANTITY_SCALE)).toBeGreaterThanOrEqual(unitsOrThrow("1.0000", QUANTITY_SCALE));
-      expect(unitsOrThrow(atShort, QUANTITY_SCALE)).toBeLessThan(unitsOrThrow("1.0000", QUANTITY_SCALE));
+      // Exactly, not at-least. `toBeGreaterThanOrEqual` cannot fail in the
+      // one direction that costs money — a bound that permits MORE than the
+      // funds cover is the defect, and it looks like success to it.
+      expect(unitsOrThrow(atExact, QUANTITY_SCALE)).toBe(QUANTITY_UNITS);
+      expect(unitsOrThrow(atShort, QUANTITY_SCALE)).toBeLessThan(QUANTITY_UNITS);
     }
   });
 });

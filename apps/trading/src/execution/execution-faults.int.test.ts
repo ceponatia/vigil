@@ -178,44 +178,74 @@ describe("crash after exchange acceptance but before local acknowledgement", () 
   });
 });
 
-describe("a dispatch blocked by something policy never judged", () => {
-  it("stays enqueued rather than being abandoned under a borrowed reason code, and a restart can see it", async () => {
-    const label = "pending";
-    const scene = await scenario(label, {
-      submission: { kind: "ACKNOWLEDGE" },
-      executions: { kind: "NONE" },
-      cancellation: { kind: "CONFIRM" },
-    });
+describe("a venue that refuses what the gate had already cleared", () => {
+  it("leaves the attempt live and the dispatch enqueued, so a restart can see an outcome nobody knows", async () => {
+    const label = "venuerefuse";
+    const instrument = syntheticInstrument(label);
+    await fund(db, instrument.quoteAssetId, MONEY_SCALE, FUNDING_BASE, label);
 
-    // A quote for another instrument: an execution fact, not a policy
-    // decision about this proposal.
-    const blocked = await dispatchAttempt(scene.wiring, {
-      intentId: scene.intentId,
+    // The venue charges 200bp of slippage; the injected cost model says 10.
+    // So this application sizes and bounds `maxSpend` against one set of
+    // numbers and the venue bills another — the exact divergence
+    // `venue-economics.test.ts` guards against, here end to end. The gate
+    // clears, because the gate uses this application's model, and the venue
+    // then refuses the submission.
+    const exchange = paperExchange({ slippageBasisPoints: 200 });
+    const wiring = runtime(db, exchange);
+
+    const authorized = await authorizeProposal(db, {
+      proposal: proposal(label, instrument),
+      quote: parsedQuote(instrument),
+      now: NOW,
+      operatingMode: "PAPER",
+      venue: VENUE,
+      policyConfig: policyConfig(),
+      portfolio: portfolio(),
+      capital: capital(),
+    });
+    expect(authorized.outcome).toBe("authorized");
+    if (authorized.outcome !== "authorized") {
+      return;
+    }
+
+    const blocked = await dispatchAttempt(wiring, {
+      intentId: authorized.intentId,
       attempt: 1,
-      instrument: scene.instrument,
+      instrument,
       plan: planTerms(),
-      quote: rawQuote(syntheticInstrument(`${label}other`)),
+      quote: rawQuote(instrument),
       now: NOW,
       portfolio: portfolio(),
       ids: dispatchIds(label),
     });
 
     expect(blocked.outcome).toBe("blocked");
-    if (blocked.outcome === "blocked") {
-      expect(blocked.stage).toBe("instrument");
-      expect(blocked.recordedReasonCode).toBeNull();
-      expect(blocked.persistence).toBeNull();
+    if (blocked.outcome !== "blocked") {
+      return;
     }
+    expect(blocked.stage).toBe("venue");
+    expect(blocked.refusal.reason).toEqual({ source: "adapter", code: "MAX_SPEND_EXCEEDED" });
+    // Not a policy decision, so nothing is recorded under a policy code.
+    expect(blocked.reasonCode).toBeNull();
 
-    const dispatchRow = await loadDispatch(db, scene.intentId, 1);
+    // Deliberately NOT abandoned. The gate cleared and the venue disagreed,
+    // which is an incident rather than a skip: marking the row `abandoned`
+    // would hide an unresolved dispatch from every read that exists to find
+    // one, while the attempt stayed live and blocked every retry.
+    const dispatchRow = await loadDispatch(db, authorized.intentId, 1);
     expect(dispatchRow?.state).toBe("pending");
     expect(dispatchRow?.abandonmentReasonCode).toBeNull();
+    expect(dispatchRow?.dispatchedAt).toBeNull();
 
     const unresolved = await loadUnresolvedDispatches(db);
-    const mine = unresolved.find((row) => row.intentId === scene.intentId);
+    const mine = unresolved.find((row) => row.intentId === authorized.intentId);
     expect(mine).toBeDefined();
     expect(mine?.attemptState).toBe("SUBMITTING");
     expect(mine?.attemptLive).toBe(true);
+
+    // And nothing filled: the venue holds no order under this id.
+    const report = exchange.readVenueState({ now: NOW });
+    expect([...report.openOrders, ...report.closedOrders]).toEqual([]);
   });
 });
 

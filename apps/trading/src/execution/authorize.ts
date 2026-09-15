@@ -357,6 +357,14 @@ export async function authorizeProposal(
 
   return {
     outcome: "authorized",
+    // On a duplicate this is the id of the authorization that ALREADY
+    // stands, which is deliberately not `record.intentId` — the record below
+    // is what this delivery would have written, sized against this
+    // delivery's own quote, and it was not written. Nothing downstream is
+    // misled today because `dispatchAttempt` reads the authorization back
+    // with `loadApprovedIntent` rather than trusting a record handed to it,
+    // but a caller that persisted `record` on a duplicate would be storing a
+    // second, never-approved set of numbers under a live id.
     intentId: written.intentId,
     duplicate: written.outcome === "duplicate",
     side,

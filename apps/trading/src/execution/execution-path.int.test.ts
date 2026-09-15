@@ -330,22 +330,120 @@ describe("dispatchAttempt", () => {
     }
     expect(blocked.stage).toBe("netEdge");
     expect(blocked.refusal.reason).toEqual({ source: "policy", code: "INSUFFICIENT_NET_EDGE" });
-    expect(blocked.recordedReasonCode).toBe("INSUFFICIENT_NET_EDGE");
+    // The code the caller records; this domain writes no decision of its own.
+    expect(blocked.reasonCode).toBe("INSUFFICIENT_NET_EDGE");
     expect(blocked.persistence).toBeNull();
+    expect(blocked.attemptId).toBeNull();
+    expect(blocked.dispatchId).toBeNull();
 
-    const dispatch = await loadDispatch(db, authorized.intentId, 1);
-    expect(dispatch?.state).toBe("abandoned");
-    expect(dispatch?.abandonmentReasonCode).toBe("INSUFFICIENT_NET_EDGE");
-    expect(dispatch?.dispatchedAt).toBeNull();
+    // NOTHING durable was written. This is the defect that matters: a skip is
+    // the gate's designed-for common case, and an attempt row or a hold left
+    // behind here would strand the authorization and its capital for good —
+    // the attempt live-forever under `execution_attempts_intent_id_live_key`,
+    // the hold unreleasable because a release needs a settled attempt that
+    // actually spent something.
+    expect(await loadExecutionAttempts(db, authorized.intentId)).toEqual([]);
+    expect(await loadDispatch(db, authorized.intentId, 1)).toBeNull();
+    const reservedAfterBlock = (await loadBalances(db)).find(
+      (balance) => balance.assetId === instrument.quoteAssetId && balance.holdingsState === "reserved",
+    );
+    expect(reservedAfterBlock === undefined ? 0n : reservedAfterBlock.debitBase - reservedAfterBlock.creditBase).toBe(
+      0n,
+    );
 
     // The venue was never asked, so it holds nothing under this id.
     const report = exchange.readVenueState({ now: NOW });
     expect([...report.openOrders, ...report.closedOrders]).toEqual([]);
 
-    // The attempt exists and is still live, so nothing can be dispatched
-    // against this authorization until it is resolved.
-    const attempts = await loadExecutionAttempts(db, authorized.intentId);
-    expect(attempts[0]?.state).toBe("SUBMITTING");
+    // And the authorization is still exactly as usable as it was: the same
+    // intent, the same attempt number, dispatched against a quote whose edge
+    // still clears.
+    const retried = await dispatchAttempt(wiring, {
+      intentId: authorized.intentId,
+      attempt: 1,
+      instrument,
+      plan: planTerms(),
+      quote: rawQuote(instrument),
+      now: NOW,
+      portfolio: portfolio(),
+      ids: dispatchIds(label),
+    });
+    expect(retried.outcome).toBe("dispatched");
+    if (retried.outcome === "dispatched") {
+      expect(retried.attemptState).toBe("ACKNOWLEDGED");
+    }
+  });
+
+  it("completes the journal when a settlement is redelivered, rather than refusing the replay its idempotency keys exist for", async () => {
+    const label = "resettle";
+    const instrument = syntheticInstrument(label);
+    await fund(db, instrument.quoteAssetId, MONEY_SCALE, FUNDING_BASE, label);
+
+    const exchange = paperExchange({ defaultBehavior: ACKNOWLEDGE_AND_FILL });
+    const wiring = runtime(db, exchange);
+    const authorized = await authorizeProposal(db, {
+      proposal: proposal(label, instrument),
+      quote: parsedQuote(instrument),
+      now: NOW,
+      operatingMode: "PAPER",
+      venue: VENUE,
+      policyConfig: policyConfig(),
+      portfolio: portfolio(),
+      capital: capital(),
+    });
+    expect(authorized.outcome).toBe("authorized");
+    if (authorized.outcome !== "authorized") {
+      return;
+    }
+    const dispatched = await dispatchAttempt(wiring, {
+      intentId: authorized.intentId,
+      attempt: 1,
+      instrument,
+      plan: planTerms(),
+      quote: rawQuote(instrument),
+      now: NOW,
+      portfolio: portfolio(),
+      ids: dispatchIds(label),
+    });
+    if (dispatched.outcome !== "dispatched") {
+      return;
+    }
+
+    const settle = {
+      intentId: authorized.intentId,
+      attempt: 1,
+      instrument,
+      order: dispatched.order,
+      now: NOW,
+      ids: settlementIds(label),
+    } as const;
+
+    const first = await pollAttempt(wiring, settle);
+    expect(first.outcome).toBe("recorded");
+
+    // The attempt is now FILLED, and `execution_attempts_terminal_is_final`
+    // fires on ANY update of a settled attempt — including one that changes
+    // nothing. An at-least-once caller redelivering must still succeed, and,
+    // far more importantly, a crash part-way through the postings must be
+    // able to finish them: they are written in separate transactions and only
+    // a re-run can complete a partial journal.
+    // Replayed with the order the caller HELD, not the settled one it got
+    // back — which is the shape a real replay takes, because the process that
+    // crashed never saw the settled order. Polling the settled order itself
+    // is refused by the adapter (`ORDER_ALREADY_TERMINAL`) long before the
+    // database is touched, so it is not the case that matters here.
+    const second = await pollAttempt(wiring, settle);
+    expect(second.outcome).toBe("recorded");
+    if (second.outcome === "recorded" && first.outcome === "recorded") {
+      expect(second.spentBase).toBe(first.spentBase);
+      expect(second.receivedBase).toBe(first.receivedBase);
+      // Re-posted under the same keys, so the journal is complete and not
+      // doubled.
+      expect(second.journaledEntryIds).toEqual(first.journaledEntryIds);
+    }
+
+    const entries = (await loadJournalEntries(db)).filter((entry) => entry.intentId === authorized.intentId);
+    expect(entries.map((entry) => entry.kind).toSorted()).toEqual(["fee", "reservation-hold", "trade"]);
   });
 
   it("refuses to dispatch an intent that is not in durable history", async () => {

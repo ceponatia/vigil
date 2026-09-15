@@ -58,9 +58,33 @@ import type { VenueExecutionConfig } from "./venue";
  * `checkNetEdge` and `sizeTrade` would apply the rate to a notional at the
  * ask. The fee on the slippage component would go uncharged, so net edge
  * would be overstated and the capital bound would permit a quantity whose
- * actual cash out exceeds the funds available. Passing `executionPrice`
- * makes `sizeTrade`'s closed form `q*(price*(1 + rate)) + fixed` identically
- * this venue's `notional + fee + fixed`, with nothing left over.
+ * actual cash out exceeds the funds available.
+ *
+ * Passing `executionPrice` lines `sizeTrade`'s closed form up with what the
+ * venue charges. It is an **inequality, not an identity**, and the direction
+ * is worth stating plainly:
+ *
+ * ```text
+ *   policy models   q*p*(1 + r)                     + fixed
+ *   the venue bills ceil(q*p) + ceil(ceil(q*p) * r) + fixed
+ * ```
+ *
+ * Two ceilings, so the venue's figure is greater than or equal to policy's,
+ * by at most about two money units. Sizing therefore models very slightly
+ * LESS cash out than the venue will charge — the permissive direction — and
+ * what keeps that harmless is not this file but `reserveAvailable`, which
+ * re-reads the balance under `SELECT … FOR UPDATE` and refuses
+ * `INSUFFICIENT_AVAILABLE` before any attempt is opened. A sized quantity
+ * the funds do not quite cover fails there, leaving nothing behind.
+ *
+ * The over-permission is real rather than absorbed, and it is stated here so
+ * it is not mistaken for a guarantee. In cash it is bounded by those ~2
+ * money units whatever the instrument; in quantity it is that cash divided
+ * by the per-unit cost, so a cheaper instrument at the same two scales turns
+ * the same 2 units of cash into a larger quantity. Either way the excess is
+ * caught in exactly one place — a refused reservation — and never reaches a
+ * venue, because the reservation is taken before the attempt is opened and a
+ * refusal there leaves nothing behind.
  *
  * Both embedded components therefore sum into policy's single
  * `embedded.spreadCostPerUnitQuote` field. They stay separately visible in

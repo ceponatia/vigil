@@ -10,9 +10,8 @@ import { isPolicyReason, type PolicyRefusal } from "@vigil/policy";
  * `@vigil/ledger` already make:
  *
  * - **Policy reason codes** (`docs/policy.md`) are decisions about the
- *   proposal. They are the only refusals this application writes onto a
- *   durable record as a reason: `abandonDispatch` takes a `REASON_CODES`
- *   member, and a record saying an intent was skipped for
+ *   proposal, and the only refusals that may ever be written onto a durable
+ *   record as a reason: a row saying an intent was skipped for
  *   `INSUFFICIENT_NET_EDGE` is a claim that policy actually made that
  *   judgement.
  * - **Adapter diagnostics** (`@vigil/adapter-paper`) are execution facts:
@@ -24,13 +23,8 @@ import { isPolicyReason, type PolicyRefusal } from "@vigil/policy";
  *   question could not be asked here": a malformed cost model, a durable
  *   write that refused, an adapter that is not the paper one.
  *
- * None of the last two may be recorded as a policy decision. A dispatch
- * blocked by one of them is **not abandoned**: the outbox row stays
- * `pending`, where `loadPendingDispatches` surfaces it and the attempt's own
- * live state still blocks a retry. That is the fail-closed answer for a
- * configuration or caller bug — the fix is to correct the configuration and
- * dispatch the same attempt, whose payload digest has not changed, rather
- * than to burn the attempt under a reason code policy never gave.
+ * None of the last two may be recorded as a policy decision, and
+ * `recordableReasonCode` below is the one place that distinction is drawn.
  */
 
 export const EXECUTION_DIAGNOSTIC_CODES = [
@@ -46,6 +40,30 @@ export const EXECUTION_DIAGNOSTIC_CODES = [
   "UNKNOWN_INTENT",
   /** The intent's action authorizes no execution — a decision to do nothing is never turned into an order. */
   "NON_EXECUTABLE_ACTION",
+  /**
+   * An earlier attempt on this authorization is still unresolved, so no
+   * further attempt may be opened. **Reconcile, then retry** — distinct from
+   * `INTENT_ALREADY_CONSUMED`, whose answer is never to retry at all.
+   */
+  "ATTEMPT_ALREADY_LIVE",
+  /**
+   * An earlier attempt already spent against this authorization. **Never
+   * retry**: a remainder is a new authorization, not a further attempt.
+   */
+  "INTENT_ALREADY_CONSUMED",
+  /**
+   * The authorization routes over a chain. The Exchange attempt lifecycle
+   * cannot describe a broadcast and the `transactions` record family is not
+   * built, so this is refused before any capital is held.
+   */
+  "CHAIN_LIFECYCLE_UNSUPPORTED",
+  /**
+   * A settlement disagrees with what durable history already confirmed about
+   * the same attempt. Never an edit: confirmed money does not move backwards,
+   * and a reconciliation that contradicts a settled attempt is an incident to
+   * record rather than a write to force.
+   */
+  "SETTLEMENT_CONTRADICTS_HISTORY",
   /**
    * The action is an exit. Authorizing one needs a position basis and
    * realized-P&L accounting this build does not have, and inventing them
@@ -139,10 +157,9 @@ export function fromAdapterRefusal(refusal: PaperRefusal): ExecutionRefusal {
  * The `docs/policy.md` code this refusal may be recorded under, or `null`
  * when it is not a policy decision at all.
  *
- * The null branch is the load-bearing one. `abandonDispatch` writes a reason
- * code onto durable history, and giving a configuration bug the nearest
- * plausible policy code would put a decision policy never made into the
- * record an operator reads.
+ * The null branch is the load-bearing one: giving a configuration bug or an
+ * adapter fault the nearest plausible policy code would put a decision policy
+ * never made into the record an operator reads.
  */
 export function recordableReasonCode(refusal: ExecutionRefusal): ReasonCode | null {
   return refusal.reason.source === "policy" ? refusal.reason.code : null;

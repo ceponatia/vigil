@@ -4,7 +4,6 @@ import type { AssetId, IsoUtcTimestamp, ReasonCode } from "@vigil/contracts";
 import { proposeOrder, reserveOrder, validateOrder } from "@vigil/adapter-paper";
 import type { OrderSide, PaperExchange, PaperOrder } from "@vigil/adapter-paper";
 import {
-  abandonDispatch,
   loadApprovedIntent,
   markDispatched,
   openExecutionAttempt,
@@ -33,12 +32,13 @@ import { decimalAt, scaledProduct } from "./venue-economics";
  *
  * ```text
  *   loadApprovedIntent        the authorization, read back from durable history
+ *   proposeOrder              PROPOSED                       (pure, nothing durable)
+ *   revalidateBeforeDispatch  the fresh quote / net-edge gate <- blocks here, leaving
+ *                                                               NOTHING durable behind
+ *   validateOrder             VALIDATED (the gate passed)
  *   reserveAvailable          capital held, once per intent
+ *   reserveOrder              RESERVED  (the hold above)
  *   openExecutionAttempt      attempt + outbox row, in one transaction
- *   proposeOrder              PROPOSED
- *   revalidateBeforeDispatch  the fresh quote / net-edge gate  <- blocks here, or
- *   validateOrder             VALIDATED (records that the gate passed)
- *   reserveOrder              RESERVED  (records the hold taken above)
  *   exchange.submitOrder      the one call in this application that reaches a venue
  *   markDispatched            the payload left
  *   recordAttemptOutcome      what the venue said, including UNKNOWN
@@ -74,6 +74,19 @@ import { decimalAt, scaledProduct } from "./venue-economics";
  * and it does not weaken guard 4 — a second attempt exists only because
  * guard 2 allowed it, which happens only once the venue has confirmed what
  * became of the first.
+ *
+ * ## Why the gate runs before anything is written
+ *
+ * `docs/resilience.md` §9 requires the intent and the reservation to be
+ * durable before **submission**. The revalidation is not a submission — it
+ * is a pure local computation, and when it refuses nothing has been handed
+ * to a venue. Writing the hold and the attempt first would make every
+ * ordinary `INSUFFICIENT_NET_EDGE` skip — the case this whole slice exists
+ * for — leave a live `SUBMITTING` attempt that
+ * `execution_attempts_intent_id_live_key` then refuses to follow with
+ * another, and a hold no exported path can release, because a release needs
+ * a settled attempt that actually spent something. The authorization and its
+ * capital would be stranded by the gate working correctly.
  *
  * ## What the caller has to supply, and why
  *
@@ -157,19 +170,35 @@ export type DispatchedAttempt = {
 
 export type BlockedDispatch = {
   readonly outcome: "blocked";
-  readonly attemptId: string;
-  readonly dispatchId: string;
+  /**
+   * `null` when the pre-dispatch gate refused, which is the ordinary case:
+   * nothing durable was written at all, so there is no attempt and no outbox
+   * row to name. Non-null only on the `"venue"` stage, where the gate had
+   * already cleared and the attempt was made durable before the venue was
+   * asked.
+   */
+  readonly attemptId: string | null;
+  readonly dispatchId: string | null;
   /** `"venue"` when every gate passed and the venue itself refused the submission. */
   readonly stage: RevalidationStage | "venue";
   readonly refusal: ExecutionRefusal;
   /**
-   * The `docs/policy.md` code this block was recorded under, or `null` when
-   * the refusal was a local diagnostic. A null block leaves the outbox row
-   * `pending` rather than abandoning it under a code policy never gave —
-   * `loadPendingDispatches` still surfaces it and the live attempt still
-   * blocks a retry, so nothing is silently skipped.
+   * The `docs/policy.md` code this skip carries, or `null` when the refusal
+   * was a local diagnostic rather than a decision about the proposal.
+   *
+   * **This domain does not write it down.** A gate refusal leaves no durable
+   * trace by design — that is what keeps the authorization retryable — and a
+   * skip is a *decision*, which `docs/architecture.md` puts in the
+   * `decisions` record family: a `candidate_evaluations` row with a
+   * `BLOCKED` outcome, exactly as `packages/db`'s intent store says ("a
+   * refusal is a `candidate_evaluations` row ... not a
+   * `rejection_reason_code` on the authorization"). That row needs a
+   * candidate, and `candidate_evaluations.candidate_id` is `NOT NULL`, so
+   * only the caller — which holds the candidate this intent came from, and
+   * which may legitimately have none for a protective action — can write it.
+   * This field is what it records.
    */
-  readonly recordedReasonCode: ReasonCode | null;
+  readonly reasonCode: ReasonCode | null;
   /** A durable write that refused while recording this block. */
   readonly persistence: ExecutionRefusal | null;
 };
@@ -338,7 +367,87 @@ export async function dispatchAttempt(runtime: ExecutionRuntime, request: Dispat
     );
   }
 
-  // ---- persistence before action (docs/resilience.md §9) ------------------
+  // The exchange attempt lifecycle cannot describe a broadcast, and
+  // `openExecutionAttempt` refuses an on-chain authorization outright. Caught
+  // here, before any capital is held, so a chain-routed intent cannot leave a
+  // hold behind that no attempt will ever consume.
+  if (intent.chainId !== null) {
+    return refused(
+      executionRefusal(
+        "CHAIN_LIFECYCLE_UNSUPPORTED",
+        `intent ${intentId} routes over chain ${intent.chainId}; the exchange attempt lifecycle cannot describe a broadcast, and the transactions record family is not built`,
+      ),
+    );
+  }
+
+  // `proposeOrder` is pure — it parses the authorization and opens a
+  // `PROPOSED` order in memory. Nothing durable happens until the gate below
+  // has passed.
+  const clientOrderId = clientOrderIdFor(intent.idempotencyKey, attempt);
+  const proposed = proposeOrder({
+    intent: adapterIntentFor({ intent, side, clientOrderId, venue }),
+    at: now,
+    attempt,
+  });
+  if (!proposed.accepted) {
+    return refused(fromAdapterRefusal(proposed.refusal));
+  }
+  const order = proposed.order;
+
+  // ---- the pre-dispatch gate, BEFORE anything is made durable ------------
+  //
+  // `docs/resilience.md` §9 requires the intent and the reservation to be
+  // persisted before **submission**. This gate is not a submission: it is a
+  // pure local computation over a quote, and nothing has been handed to a
+  // venue when it refuses. Running it first is what makes a refusal leave no
+  // durable trace at all — no hold, no attempt row, no outbox row — so the
+  // authorization stays exactly as retryable as it was.
+  //
+  // The order matters more than it looks. `INSUFFICIENT_NET_EDGE` is this
+  // slice's designed-for common case, not an exotic fault. Holding capital
+  // and opening an attempt first would mean every ordinary skip left a live
+  // `SUBMITTING` attempt — which `execution_attempts_intent_id_live_key`
+  // then refuses to follow with another, permanently — and a hold that no
+  // exported path can release, because a release needs a settled attempt
+  // that actually spent something. A handful of skips would strand the whole
+  // funding account.
+  const clearance = revalidateBeforeDispatch({
+    intent: {
+      intentId,
+      side,
+      baseAssetId: instrument.baseAssetId,
+      quoteAssetId: instrument.quoteAssetId,
+      quantityUnits: intent.output.quantityBase,
+      entryZone: request.plan.entryZone,
+      requiredFreshnessMs: intent.requiredFreshnessMs,
+    },
+    thesis: request.plan.thesis,
+    quote: request.quote,
+    now,
+    venue,
+    policyConfig,
+    portfolio: request.portfolio,
+  });
+
+  if (clearance.outcome === "blocked") {
+    return {
+      outcome: "blocked",
+      attemptId: null,
+      dispatchId: null,
+      stage: clearance.stage,
+      refusal: clearance.refusal,
+      reasonCode: recordableReasonCode(clearance.refusal),
+      persistence: null,
+    };
+  }
+
+  // Policy validated, on this quote, a moment ago.
+  const validated = validateOrder(order, now);
+  if (!validated.applied) {
+    return refused(fromAdapterRefusal(validated.refusal));
+  }
+
+  // ---- persistence before submission (docs/resilience.md §9) -------------
   //
   // The hold is taken once per INTENT, not once per attempt: the partial
   // unique index over `reservations` where `state = 'active'` allows exactly
@@ -375,16 +484,10 @@ export async function dispatchAttempt(runtime: ExecutionRuntime, request: Dispat
     );
   }
 
-  const clientOrderId = clientOrderIdFor(intent.idempotencyKey, attempt);
-  const proposed = proposeOrder({
-    intent: adapterIntentFor({ intent, side, clientOrderId, venue }),
-    at: now,
-    attempt,
-  });
-  if (!proposed.accepted) {
-    return refused(fromAdapterRefusal(proposed.refusal));
+  const reserved = reserveOrder(validated.order, now);
+  if (!reserved.applied) {
+    return refused(fromAdapterRefusal(reserved.refusal));
   }
-  const order = proposed.order;
 
   const opened = await openExecutionAttempt(db, {
     attemptId: ids.attemptId,
@@ -402,70 +505,28 @@ export async function dispatchAttempt(runtime: ExecutionRuntime, request: Dispat
     },
   });
   if (opened.outcome === "refused") {
-    return refused(
-      executionRefusal(
-        "PERSISTENCE_REFUSED",
-        `attempt ${String(attempt)} on intent ${intentId} could not be opened (${opened.code}): ${opened.detail}`,
-      ),
-    );
-  }
-
-  // ---- the pre-dispatch gate ---------------------------------------------
-  const clearance = revalidateBeforeDispatch({
-    intent: {
-      intentId,
-      side,
-      baseAssetId: instrument.baseAssetId,
-      quoteAssetId: instrument.quoteAssetId,
-      quantityUnits: intent.output.quantityBase,
-      entryZone: request.plan.entryZone,
-      requiredFreshnessMs: intent.requiredFreshnessMs,
-    },
-    thesis: request.plan.thesis,
-    quote: request.quote,
-    now,
-    venue,
-    policyConfig,
-    portfolio: request.portfolio,
-  });
-
-  if (clearance.outcome === "blocked") {
-    const abandoned = await abandonIfPolicySaidSo(runtime, request, clearance.refusal);
-    return {
-      outcome: "blocked",
-      attemptId: opened.attemptId,
-      dispatchId: opened.dispatchId,
-      stage: clearance.stage,
-      refusal: clearance.refusal,
-      recordedReasonCode: abandoned.reasonCode,
-      persistence: abandoned.persistence,
-    };
-  }
-
-  // The caller-side transitions, recorded now that each step has actually
-  // happened: policy validated immediately above, capital held further above.
-  const validated = validateOrder(order, now);
-  if (!validated.applied) {
-    return refused(fromAdapterRefusal(validated.refusal));
-  }
-  const reserved = reserveOrder(validated.order, now);
-  if (!reserved.applied) {
-    return refused(fromAdapterRefusal(reserved.refusal));
+    return refused(describeOpenRefusal(opened.code, opened.detail, intentId, attempt));
   }
 
   // ---- the one call in this application that reaches a venue -------------
   const submitted = exchange.submitOrder({ order: reserved.order, quote: clearance.quote, now });
   if (submitted.outcome === "REFUSED") {
-    const refusal = fromAdapterRefusal(submitted.refusal);
-    const abandoned = await abandonIfPolicySaidSo(runtime, request, refusal);
+    const venueRefusal = fromAdapterRefusal(submitted.refusal);
+    // Deliberately NOT abandoned. The gate cleared and the venue then refused,
+    // so this application's model of the venue and the venue's own answer
+    // disagree — an incident, not a skip. The outbox row stays `pending` and
+    // the attempt stays live, which is what keeps both visible to
+    // `loadUnresolvedDispatches` and to the one-live-attempt index; marking
+    // the row `abandoned` would hide an unresolved dispatch from every read
+    // that exists to find one.
     return {
       outcome: "blocked",
       attemptId: opened.attemptId,
       dispatchId: opened.dispatchId,
       stage: "venue",
-      refusal,
-      recordedReasonCode: abandoned.reasonCode,
-      persistence: abandoned.persistence,
+      refusal: venueRefusal,
+      reasonCode: recordableReasonCode(venueRefusal),
+      persistence: null,
     };
   }
 
@@ -509,6 +570,39 @@ export async function dispatchAttempt(runtime: ExecutionRuntime, request: Dispat
 }
 
 /**
+ * Why an attempt could not be opened, in this domain's vocabulary.
+ *
+ * `@vigil/db` distinguishes three situations whose correct responses are
+ * opposite — reconcile and then retry, never retry, retry later — and
+ * flattening all three into one code with the real one buried in prose would
+ * leave a retry driver parsing a sentence to decide whether it may act.
+ */
+function describeOpenRefusal(
+  code: string,
+  detail: string,
+  intentId: string,
+  attempt: number,
+): ExecutionRefusal {
+  const where = `attempt ${String(attempt)} on intent ${intentId}`;
+  if (code === "INTENT_ALREADY_LIVE") {
+    return executionRefusal(
+      "ATTEMPT_ALREADY_LIVE",
+      `${where} cannot be opened while an earlier attempt is unresolved; reconciliation precedes resubmission (${detail})`,
+    );
+  }
+  if (code === "INTENT_ALREADY_CONSUMED") {
+    return executionRefusal(
+      "INTENT_ALREADY_CONSUMED",
+      `${where} cannot be opened: this authorization has already been economically consumed, and a remainder is a new authorization rather than a further attempt (${detail})`,
+    );
+  }
+  if (code === "CHAIN_LIFECYCLE_UNSUPPORTED") {
+    return executionRefusal("CHAIN_LIFECYCLE_UNSUPPORTED", `${where}: ${detail}`);
+  }
+  return executionRefusal("PERSISTENCE_REFUSED", `${where} could not be opened (${code}): ${detail}`);
+}
+
+/**
  * The shape every `@vigil/db` write result shares: a refusal carrying a code
  * and a detail, or anything else, which means it took.
  */
@@ -522,47 +616,6 @@ function describeWriteRefusal(result: DurableWriteResult, what: string): Executi
     return null;
   }
   return executionRefusal("PERSISTENCE_REFUSED", `${what} could not be recorded (${result.code}): ${result.detail}`);
-}
-
-/**
- * Abandons the dispatch when — and only when — the refusal is a policy
- * decision carrying a `docs/policy.md` code.
- *
- * A local diagnostic leaves the row `pending` on purpose. `abandonDispatch`
- * writes a reason code onto durable history, and the nearest plausible code
- * for a malformed cost model or an unreachable answer would put a decision
- * policy never made into the record an operator reads. A pending row is
- * still visible to `loadPendingDispatches`, the attempt is still live and
- * still blocks a retry, and the same payload can be dispatched once the
- * configuration is fixed — its digest has not changed.
- */
-async function abandonIfPolicySaidSo(
-  runtime: ExecutionRuntime,
-  request: DispatchRequest,
-  refusal: ExecutionRefusal,
-): Promise<{ readonly reasonCode: ReasonCode | null; readonly persistence: ExecutionRefusal | null }> {
-  const reasonCode = recordableReasonCode(refusal);
-  if (reasonCode === null) {
-    return { reasonCode: null, persistence: null };
-  }
-  const abandoned = await abandonDispatch(runtime.db, {
-    intentId: request.intentId,
-    attempt: request.attempt,
-    dispatcherInstanceId: runtime.dispatcherInstanceId,
-    fencingToken: runtime.fencingToken,
-    recordedAt: request.now,
-    reasonCode,
-  });
-  return {
-    // Reported as recorded only when the write actually took. A caller that
-    // was told the block was journaled under a code, when it was not, would
-    // believe durable history explains a skip that nothing explains.
-    reasonCode: abandoned.outcome === "refused" ? null : reasonCode,
-    persistence: describeWriteRefusal(
-      abandoned,
-      `the abandonment of attempt ${String(request.attempt)} on intent ${request.intentId}`,
-    ),
-  };
 }
 
 /**

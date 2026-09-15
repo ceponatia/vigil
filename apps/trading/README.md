@@ -38,8 +38,8 @@ elsewhere, and nothing that can move money also calls a model provider.
 - `strategy/` — invocation of `@vigil/strategies` candidates on a schedule.
 - `allocator/` — portfolio/risk allocation across concurrent candidates.
 - `execution/` — the adapter boundary; wires in `@vigil/adapter-paper` (and
-  later a live adapter) behind one execution interface. **Built.** See
-  "The execution domain" below.
+  later a live adapter) behind one execution interface. See "The execution
+  domain" below.
 - `outbox/` — durable dispatch: an approved intent is written once and
   retried as versioned attempts, never re-approved.
 - `reconcile/` — periodic reconciliation against venue/chain truth.

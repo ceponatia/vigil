@@ -2,7 +2,7 @@ import { assetIdSchema } from "@vigil/contracts";
 import type { AssetId, IsoUtcTimestamp } from "@vigil/contracts";
 import { settlementOf } from "@vigil/adapter-paper";
 import type { OrderSettlement, PaperOrder } from "@vigil/adapter-paper";
-import { loadApprovedIntent, postJournalEntry, recordAttemptOutcome } from "@vigil/db";
+import { loadApprovedIntent, loadExecutionAttempts, postJournalEntry, recordAttemptOutcome } from "@vigil/db";
 import type { ExecutionAttemptStateValue, StoreApprovedIntent, StoreEntry, VigilDatabase } from "@vigil/db";
 import { buildEntry, counterAccount, holdingsAccount } from "@vigil/ledger";
 import type { EntryKind, HoldingsState, JournalEntry, JournalLine } from "@vigil/ledger";
@@ -243,13 +243,28 @@ async function recordSettlement(
     recordedAt: request.now,
     reconciliation,
   });
+
   if (written.outcome === "refused") {
-    return refused(
-      executionRefusal(
-        "PERSISTENCE_REFUSED",
-        `the outcome of attempt ${String(request.attempt)} on intent ${request.intentId} could not be recorded (${written.code}): ${written.detail}`,
-      ),
-    );
+    // `execution_attempts_terminal_is_final` fires on any UPDATE of a settled
+    // attempt, whether or not the values change — so a redelivery of the very
+    // settlement already recorded arrives here looking like a failure.
+    //
+    // It must not stop the postings. `journalSettlement` writes up to three
+    // entries in separate transactions, so a crash between them leaves the
+    // journal partial; the only way to complete it is to run this path again,
+    // and the entries' own idempotency keys make re-posting a no-op. Refusing
+    // here would lock the door in front of the replay those keys exist for,
+    // leaving the fee and the release stranded in `reserved` for good.
+    const redelivery =
+      written.code === "ATTEMPT_SETTLED"
+        ? await describeRedelivery(db, request, attemptState, amounts)
+        : executionRefusal(
+            "PERSISTENCE_REFUSED",
+            `the outcome of attempt ${String(request.attempt)} on intent ${request.intentId} could not be recorded (${written.code}): ${written.detail}`,
+          );
+    if (redelivery !== null) {
+      return refused(redelivery);
+    }
   }
 
   const overspend =
@@ -283,6 +298,51 @@ async function recordSettlement(
     journaledEntryIds: journaled.entryIds,
     overspend,
   };
+}
+
+/**
+ * Whether a refused write against a settled attempt is the same settlement
+ * arriving twice, or a genuine contradiction.
+ *
+ * `ATTEMPT_SETTLED` says only that the stored attempt is terminal — not that
+ * it holds what this call is trying to write. A redelivery of the recorded
+ * outcome is safe to wave through; a *different* outcome against a settled
+ * attempt is durable history being contradicted, which
+ * `drizzle/0011_intent_lifecycle_guard_gaps.sql` is explicit is an incident
+ * to record rather than an edit that erases it.
+ *
+ * Returns `null` when it is a redelivery and the caller should carry on, or
+ * the refusal to return when it is not.
+ *
+ * The contradiction branch is **unreachable through `@vigil/adapter-paper`**
+ * and is kept anyway. `syncFromVenue` walks a caller's order to the venue's
+ * own record before any of this runs, so a replay always converges on the
+ * settlement already stored; producing a disagreement needs a venue that
+ * changed its mind, which a deterministic simulation has no way to do. What
+ * the branch buys is that `ATTEMPT_SETTLED` is not treated as an
+ * unconditional pass — the over-broad fix, which would wave a genuinely
+ * different outcome through against a settled attempt.
+ */
+async function describeRedelivery(
+  db: VigilDatabase,
+  request: SettleRequest,
+  attemptState: ExecutionAttemptStateValue,
+  amounts: ConfirmedAmounts,
+): Promise<ExecutionRefusal | null> {
+  const attempts = await loadExecutionAttempts(db, request.intentId);
+  const stored = attempts.find((candidate) => candidate.attempt === request.attempt);
+  const where = `attempt ${String(request.attempt)} on intent ${request.intentId}`;
+
+  if (stored === undefined) {
+    return executionRefusal("PERSISTENCE_REFUSED", `${where} is settled but could not be read back`);
+  }
+  if (stored.state === attemptState && stored.spentBase === amounts.spentBase && stored.receivedBase === amounts.receivedBase) {
+    return null;
+  }
+  return executionRefusal(
+    "SETTLEMENT_CONTRADICTS_HISTORY",
+    `${where} is settled as ${stored.state} having spent ${stored.spentBase.toString()} and received ${stored.receivedBase.toString()}; this settlement reports ${attemptState}, ${amounts.spentBase.toString()} and ${amounts.receivedBase.toString()}, which is an incident to record rather than a write to force`,
+  );
 }
 
 type ConfirmedAmounts = {
