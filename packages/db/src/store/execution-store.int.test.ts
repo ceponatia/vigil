@@ -1062,11 +1062,15 @@ describe("loadUnresolvedAttempts", () => {
     ]);
   });
 
-  it("returns the oldest unresolved attempt first, whatever order the attempts were opened in — catches a driver working a backlog newest-first while the oldest ambiguity, which is the one whose money has been in doubt longest, keeps waiting", async () => {
+  it("returns the oldest unresolved attempt first, and breaks a tie on attempt id rather than on whatever order the rows come back in — catches a driver working a backlog newest-first while the oldest ambiguity, the one whose money has been in doubt longest, keeps waiting; and catches an order that is only stable until two attempts are opened in the same millisecond, which is the ordinary case for a batch", async () => {
+    // Opened deliberately out of order, and `intent-tie-b` ahead of
+    // `intent-tie-a`: with no second sort key the two tied rows come back in
+    // whatever order the scan produces, which is this insertion order.
     const opened = [
       ["intent-late", "2026-01-02T03:30:00.000Z"],
+      ["intent-tie-b", "2026-01-02T03:20:00.000Z"],
       ["intent-early", "2026-01-02T03:10:00.000Z"],
-      ["intent-middle", "2026-01-02T03:20:00.000Z"],
+      ["intent-tie-a", "2026-01-02T03:20:00.000Z"],
     ] as const;
 
     for (const [intentId, submittedAt] of opened) {
@@ -1078,7 +1082,8 @@ describe("loadUnresolvedAttempts", () => {
 
     expect((await loadUnresolvedAttempts(db)).map((attempt) => attempt.intentId)).toEqual([
       "intent-early",
-      "intent-middle",
+      "intent-tie-a",
+      "intent-tie-b",
       "intent-late",
     ]);
   });
@@ -1115,11 +1120,16 @@ describe("loadOverspentAttempts", () => {
   it("returns an overspent attempt whose outcome is still open alongside a settled one — catches a read restricted to live attempts, which would report almost no overspend at all since an over-fill is terminal by the time anyone looks, and one restricted to settled attempts, which would hide exposure that is still growing", async () => {
     const ceiling = await authorizedCeiling("intent-1");
 
+    // Both opened in the same millisecond, so the order below is this read's
+    // own tie-break on attempt id — `att-intent-1-1` before
+    // `att-intent-settled-1` — rather than the order the rows happen to be
+    // stored in. Without that second sort key two overspends recorded in one
+    // batch would come back in no particular order.
     await openExecutionAttempt(db, openAttempt("intent-1", 1, { submittedAt: "2026-01-02T03:10:00.000Z" }));
     await drive("intent-1", "PARTIALLY_FILLED", ceiling + 50n, 400_000_000n);
 
     await approve("intent-settled");
-    await openExecutionAttempt(db, openAttempt("intent-settled", 1, { submittedAt: "2026-01-02T03:20:00.000Z" }));
+    await openExecutionAttempt(db, openAttempt("intent-settled", 1, { submittedAt: "2026-01-02T03:10:00.000Z" }));
     await drive("intent-settled", "FILLED", ceiling + 1n, 500_000_000n);
 
     expect(

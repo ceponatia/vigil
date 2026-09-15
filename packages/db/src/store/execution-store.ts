@@ -795,15 +795,23 @@ export async function loadPendingDispatches(db: VigilDatabase): Promise<readonly
  * dispatch state, and no absent outbox row, that could filter an attempt out
  * of it; the only thing that decides membership is the attempt's own state.
  *
- * That predicate is `LIVE_EXECUTION_ATTEMPT_STATES` itself — the list
- * `execution_attempts_intent_id_live_key` is defined on — rather than a
- * second list written out here. The two agreeing is the point: what this
- * returns is precisely the set of attempts that block a further attempt on
- * their own intent, so a caller that has reconciled everything this read
- * returns has reconciled everything standing between an authorization and
- * its next attempt. A list restated here would be a second answer to that
- * question, free to disagree with the index by one state — and the attempts
- * in that state would simply be invisible.
+ * That predicate is `LIVE_EXECUTION_ATTEMPT_STATES` itself rather than a
+ * second list written out here, because the same constant is what
+ * `schema/intents.ts` renders into `execution_attempts_intent_id_live_key`,
+ * the partial unique index that refuses a second attempt while one is live.
+ * One list, so "is this attempt still standing between its authorization and
+ * the next attempt on it" has one answer, and a caller that has reconciled
+ * everything this read returns has reconciled everything that answer covers.
+ *
+ * One list at *generation* time, though, and the distinction is worth being
+ * exact about. The index that actually exists is whatever
+ * `drizzle/0009_approved_intents_economics_attempts_and_outbox.sql` created,
+ * its state list frozen into the migration's SQL, and nothing in CI compares
+ * the two. So adding a sixth live state to the constant changes this read the
+ * moment it ships while the index goes on allowing a second attempt against
+ * attempts in that state until a migration is generated and applied. The two
+ * are generated from one list and have to be regenerated together; nothing
+ * else keeps them in step.
  *
  * Nothing here resolves anything, and nothing here decides what to do. An
  * `UNKNOWN` attempt leaves that state only through a reconciliation recorded
