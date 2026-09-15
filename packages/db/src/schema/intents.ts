@@ -834,6 +834,28 @@ export const executionAttempts = pgTable(
     // Receiving without spending is not a fill; it is a row that says this
     // application got something for nothing.
     check("execution_attempts_received_implies_spent", sql`received_base = 0 or spent_base > 0`),
+    // A state that asserts a fill must carry one. This is the backstop
+    // behind the `fill_confirms_amounts` rule in the lifecycle trigger, and
+    // it is here rather than only there because this is a money-safety
+    // invariant: `FILLED` with nothing spent is terminal enough to leave
+    // `execution_attempts_intent_id_live_key` and not positive enough to
+    // enter `execution_attempts_intent_id_consumed_key`, so the
+    // authorization falls through the gap between the two and a second
+    // attempt can be dispatched against it. Consume-once survives its
+    // trigger being dropped because a partial index holds it; without this
+    // constraint the fill guard would be the one money invariant in the
+    // family with nothing behind it.
+    //
+    // Deliberately the same boundary as the trigger, state for state: the
+    // two are refused on exactly the set the trigger refuses, which
+    // `execution-store.int.test.ts` checks against the enum rather than
+    // against a list somebody has to keep in step. `CANCELED`, `REJECTED`
+    // and `EXPIRED` are outside it — those legitimately confirm nothing —
+    // and so is `SUBMITTING`, which is how every attempt is born.
+    check(
+      "execution_attempts_fill_quantified",
+      sql`state not in ('FILLED', 'PARTIALLY_FILLED') or (spent_base > 0 and received_base > 0)`,
+    ),
     check(
       "execution_attempts_scale_range",
       sql.raw(`input_asset_scale between 0 and ${MAX_ASSET_SCALE} and output_asset_scale between 0 and ${MAX_ASSET_SCALE}`),

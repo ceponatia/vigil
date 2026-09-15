@@ -274,6 +274,13 @@ export function describeIntentDriverRefusal(
         code: "FILL_WITHOUT_AMOUNTS",
         detail: "a fill with no confirmed amounts would settle the attempt without consuming the intent",
       },
+      // The same refusal from the check constraint behind that trigger rule.
+      // Both map to one code on purpose: which of the two guards caught it
+      // is this schema's business, not the caller's.
+      execution_attempts_fill_quantified: {
+        code: "FILL_WITHOUT_AMOUNTS",
+        detail: "a fill with no confirmed amounts would settle the attempt without consuming the intent",
+      },
       execution_attempts_venue_order_assigned_once: {
         code: "VENUE_ORDER_REASSIGNED",
         detail: "the attempt is already associated with a different venue order",

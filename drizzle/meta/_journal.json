@@ -85,6 +85,13 @@
       "when": 1789487346567,
       "tag": "0011_intent_lifecycle_guard_gaps",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789487506159,
+      "tag": "0012_execution_attempt_fill_quantified",
+      "breakpoints": true
     }
   ]
 }

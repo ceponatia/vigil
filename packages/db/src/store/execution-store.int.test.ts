@@ -1,7 +1,7 @@
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { executionAttempts, intentDispatchOutbox } from "../schema/intents";
+import { executionAttempts, intentDispatchOutbox, type ExecutionAttemptStateValue } from "../schema/intents";
 import { openAttempt, storeApprovedIntent, TEST_OTHER_SCALE, TEST_PAYLOAD_DIGEST } from "../test-support/intent-fixtures";
 import { openLedgerTestDb, TEST_SCALE } from "../test-support/journal-fixtures";
 import {
@@ -12,6 +12,7 @@ import {
   markDispatched,
   openExecutionAttempt,
   recordAttemptOutcome,
+  EXECUTION_ATTEMPT_STATES,
 } from "./execution-store";
 import { recordApprovedIntent } from "./intent-store";
 import { postgresConstraintName, postgresErrorCode, PG_FOREIGN_KEY_VIOLATION, PG_RAISE_EXCEPTION } from "./pg-errors";
@@ -605,6 +606,67 @@ describe("an approved intent is consumable exactly once", () => {
     expect(canceled).toMatchObject({ outcome: "recorded", state: "CANCELED" });
     // Nothing was spent, so the authorization genuinely is available again.
     expect(await openExecutionAttempt(db, openAttempt("intent-1", 2))).toMatchObject({ outcome: "opened" });
+  });
+
+  // The check constraint behind the trigger's fill rule. A backstop only ever
+  // observed with its trigger in place has not been observed, and two guards
+  // that differ by one state would be worse than one guard — so this sweeps
+  // the whole enum with and without the trigger and requires the two refusal
+  // sets to be identical. Enumerated from `EXECUTION_ATTEMPT_STATES` rather
+  // than from a list written out here, so a tenth state is covered the day it
+  // is added.
+  it("refuses exactly the same states with the lifecycle trigger stood down as with it in place — catches the one money invariant in this family having nothing behind its trigger, and catches the constraint and the trigger disagreeing about where the boundary is", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+
+    class Rollback extends Error {}
+
+    const refusesZeroAmountState = async (state: ExecutionAttemptStateValue): Promise<boolean> => {
+      try {
+        await db.transaction(async (tx) => {
+          await tx
+            .update(executionAttempts)
+            .set({ state, stateChangedAt: new Date("2026-01-02T03:20:00.000Z") })
+            .where(eq(executionAttempts.intentId, "intent-1"));
+          // Roll back whether or not the write was allowed, so every state is
+          // tried against the same starting row.
+          throw new Rollback();
+        });
+        return false;
+      } catch (error) {
+        return !(error instanceof Rollback);
+      }
+    };
+
+    const sweep = async (): Promise<readonly string[]> => {
+      const refused: string[] = [];
+      for (const state of EXECUTION_ATTEMPT_STATES) {
+        if (await refusesZeroAmountState(state)) {
+          refused.push(state);
+        }
+      }
+      return refused;
+    };
+
+    const withTrigger = await sweep();
+
+    let withoutTrigger: readonly string[] = [];
+    let failure: unknown = null;
+    await db.execute(sql`alter table ${executionAttempts} disable trigger execution_attempts_transition`);
+    try {
+      withoutTrigger = await sweep();
+      failure = await errorFrom(() =>
+        db.execute(
+          sql`update ${executionAttempts} set state = 'FILLED', state_changed_at = '2026-01-02T03:20:00Z' where intent_id = 'intent-1'`,
+        ),
+      );
+    } finally {
+      await db.execute(sql`alter table ${executionAttempts} enable trigger execution_attempts_transition`);
+    }
+
+    expect(withTrigger).toEqual(["PARTIALLY_FILLED", "FILLED"]);
+    expect(withoutTrigger).toEqual(withTrigger);
+    expect(postgresConstraintName(failure)).toBe("execution_attempts_fill_quantified");
+    expect((await loadExecutionAttempts(db, "intent-1"))[0]?.state).toBe("SUBMITTING");
   });
 
   it("keeps the venue order an attempt was first associated with — catches a later out-of-order or misassociated event pointing every subsequent reconciliation at a different order", async () => {

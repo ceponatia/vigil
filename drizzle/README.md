@@ -20,6 +20,15 @@ Generated from `packages/db/src/schema/`:
   `candidate_horizon` / `candidate_outcome` enums) and the `ops` family's
   `heartbeats`. Every table is new, so there is nothing to back-fill and no
   existing row to reinterpret.
+- `0012_execution_attempt_fill_quantified` adds the check constraint behind
+  the lifecycle trigger's fill rule: a `FILLED` or `PARTIALLY_FILLED` attempt
+  must carry a positive confirmed spend and receipt. One `ALTER TABLE ADD
+  CONSTRAINT` and nothing else — the validation scan it runs is against an
+  empty table in every environment, since nothing is deployed and CI migrates
+  from zero. It exists because consume-once survives its trigger being
+  dropped (a partial unique index holds it) and the fill rule did not, which
+  would have left the one money-safety invariant in this family with nothing
+  behind it.
 - `0009_approved_intents_economics_attempts_and_outbox` creates the rest of
   the `intents` family — `approved_intents` with the executable-economics
   evidence that passed policy, `intent_cost_components`,
