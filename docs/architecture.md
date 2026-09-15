@@ -240,9 +240,9 @@ type ApprovedEconomicIntent = TradeProposal & {
   inputAssetId: string;
   outputAssetId: string;
   quantity: string;
-  maxSpend: string;
-  minAcceptableReceipt: string;
-  permittedResidual: string;
+  maxSpend: string; // input-asset units
+  minAcceptableReceipt: string; // output-asset units
+  permittedResidual: string; // input-asset units, like maxSpend: how much of the approved spend may go unconsumed before the action counts as incomplete
   validUntil: string;
   requiredFreshnessMs: number;
   protectionPlan: string | null;
