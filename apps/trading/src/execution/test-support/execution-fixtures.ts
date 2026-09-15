@@ -385,8 +385,25 @@ export function openExecutionTestDb(applicationName: string): {
 }
 
 /**
+ * When a funding contribution happened, for a suite that does not say.
+ *
+ * Twelve hours before `NOW`, on the same day every other instant in these
+ * fixtures sits on: capital has to be in the account before the trade that
+ * spends it, and a suite reading its own journal should not find the deposit
+ * dated after the trade.
+ */
+export const FUNDED_AT = "2026-03-01T00:00:00.000Z";
+
+/**
  * Funds an asset's `available` balance with a synthetic owner deposit —
  * basis in, never profit — so a reservation has something to hold.
+ *
+ * `occurredAt` defaults to `FUNDED_AT`, which is what every suite anchored to
+ * this file's own 2026-03-01 clock wants. A suite driving a recording from
+ * another era passes its own instant instead, so the contribution is not
+ * dated years after the trade it pays for — the timestamp family is evidence,
+ * and an impossible ordering in it is a defect whether or not an assertion
+ * reads it.
  */
 export async function fund(
   db: VigilDatabase,
@@ -394,12 +411,13 @@ export async function fund(
   scale: number,
   amountBase: bigint,
   label: string,
+  occurredAt: string = FUNDED_AT,
 ): Promise<void> {
   const entry: StoreEntry = {
     entryId: `funding-${label}`,
     kind: "contribution",
-    occurredAt: "2026-03-01T00:00:00.000Z",
-    recordedAt: "2026-03-01T00:00:00.000Z",
+    occurredAt,
+    recordedAt: occurredAt,
     correlationId: `corr-funding-${label}`,
     idempotencyKey: `idem-funding-${label}`,
     intentId: null,

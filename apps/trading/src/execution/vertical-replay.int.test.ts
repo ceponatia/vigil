@@ -15,7 +15,7 @@ import {
 import type { StoreCandidate, StoreCandidateEvaluation, StoredBalance, VigilDatabase } from "@vigil/db";
 import { quoteSnapshotSchema } from "@vigil/market";
 import type { QuoteSnapshot } from "@vigil/market";
-import { addDecimal, compareDecimal, evaluateEntry, generateCandidate, subtractDecimal } from "@vigil/strategies";
+import { addDecimal, evaluateEntry, generateCandidate, subtractDecimal } from "@vigil/strategies";
 import type { Candidate, EntryEvaluationRecord, StrategyConfig } from "@vigil/strategies";
 
 import { authorizeProposal } from "./authorize";
@@ -125,6 +125,17 @@ import type { SyntheticMarketFixtureQuote } from "../../../../tests/fixtures/syn
  * carries an entry zone and an invalidation price, not an exit target) and
  * the policy/portfolio provenance versions.
  *
+ * ## The scenario's premise is guarded next door
+ *
+ * `vertical-replay-premise.test.ts` pins the recorded prices, instants and
+ * quantity this file's arithmetic was derived from, and re-derives the entry
+ * zone from them. It is a pure `*.test.ts` on purpose: the `integration` job
+ * is not selected for `tests/fixtures/*` or `packages/strategies/*`, which
+ * are the two paths a change invalidating that premise would touch, so a
+ * guard living in here would never run on the change it exists to catch.
+ * The strategy config and the two quote indexes are stated in both files;
+ * change them together.
+ *
  * ## Terminal record
  *
  * The terminal state asserted here is the existing candidate evaluation
@@ -172,6 +183,14 @@ const FUNDING_BASE = 10_000_000n;
 
 /** Well after every instant in this replay; bounds the intent and its hold. */
 const VALID_UNTIL = instant("2024-01-01T01:00:00.000Z");
+
+/**
+ * When the synthetic capital arrived: the recording's own first instant,
+ * before anything this replay does. `fund`'s default sits on the fixtures'
+ * 2026-03-01 clock, which against this recording would date the deposit two
+ * years after the trade it pays for.
+ */
+const CAPITAL_FUNDED_AT = instant("2024-01-01T00:00:00.000Z");
 
 /**
  * The recorded BOOT-03 quotes this replay runs on. Index 5 is a local high
@@ -259,16 +278,19 @@ function recordedQuoteAt(index: number): SyntheticMarketFixtureQuote {
 }
 
 /**
- * The recorded prices and instants this replay's arithmetic was derived
- * from. `tests/replay/synthetic-market.test.ts` owns the claim that these
- * are what the feed produces; this asserts only that they are still the
- * pullback the scenario below needs.
+ * The five recorded values this file's own assertions are derived from: the
+ * two asks that fix every execution price below, the quantity the trade is
+ * sized to, and the two instants the injected clock sits one second after.
+ *
+ * The full premise — including the entry zone re-derived from the formation
+ * ask — is `vertical-replay-premise.test.ts`, which runs under `unit tests`
+ * and so is actually selected when the fixture or the strategy changes. This
+ * is the short version, here only so a drifted fixture fails on the value
+ * that drifted rather than deep inside a settlement assertion.
  */
-function assertRecordedPremise(): void {
-  expect(FORMATION_QUOTE.bidPrice).toBe("250.86");
+function assertScenarioInputs(): void {
   expect(FORMATION_QUOTE.askPrice).toBe("250.96");
   expect(FORMATION_QUOTE.timestamps.quoteAcquiredAt).toBe("2024-01-01T00:05:00.000Z");
-  expect(ENTRY_QUOTE.bidPrice).toBe("249.51");
   expect(ENTRY_QUOTE.askPrice).toBe("249.61");
   expect(ENTRY_QUOTE.askQuantity).toBe("48.6798");
   expect(ENTRY_QUOTE.timestamps.quoteAcquiredAt).toBe("2024-01-01T00:08:00.000Z");
@@ -391,13 +413,25 @@ function storeEvaluationFrom(evaluation: EntryEvaluationRecord, recordedAt: stri
 /**
  * `Candidate` -> `TradeProposal`: the translation no production module owns.
  *
- * The load-bearing line is `entryZone: candidate.entryZone`. The zone is
- * carried across unchanged and never re-derived from the price being
- * authorized against, which is what makes the chasing case below a real
- * guard rather than a decision this test made for the application: if this
- * translation recomputed the zone from the current quote — the classic
- * chase — the eligible case would still pass and the chasing case would
- * authorize a spend.
+ * The load-bearing line is `entryZone: candidate.entryZone`: the zone is
+ * carried across unchanged, never re-derived from the price being authorized
+ * against.
+ *
+ * A translation that DID re-derive it — the obvious bad implementation — is
+ * caught by the ELIGIBLE case below, not by the chasing one. Re-derived from
+ * the entry quote, the same rule gives [247.61, 249.11], and that dispatch's
+ * executable price of 249.86 sits above it: the authorization refuses and
+ * `expect(authorized.outcome).toBe("authorized")` fails. The stored plan's
+ * terms are asserted against the candidate's own bounds for the same reason,
+ * so the zone's identity is pinned and not merely its effect.
+ *
+ * That mutation is structurally invisible to any chasing case built on this
+ * strategy, which is worth stating so nobody adds one expecting it to help.
+ * `generateCandidate` sets `max = ask - pullback` with a strictly positive
+ * pullback, and a BUY's executable price is the ask moved UP by the venue's
+ * slippage cap. So for EVERY quote Q, a zone re-derived from Q has a maximum
+ * strictly below Q's own executable price, and the gate refuses whichever
+ * zone it was handed. A refusal there discriminates nothing.
  *
  * `thesis.expectedExitPriceQuote` has to be invented, because a `Candidate`
  * carries an entry zone and an invalidation price but no exit target. It is
@@ -472,49 +506,13 @@ async function reservationRowsFor(database: VigilDatabase, intentId: string) {
   return rows.filter((row) => row.intentId === intentId);
 }
 
-describe("the BOOT-03 recording this replay is built on", () => {
-  it("still forms an entry zone that brackets the later pullback and excludes the quote that formed it", () => {
-    assertRecordedPremise();
-
-    const instrument = syntheticInstrument("vertpremise");
-    const candidate = candidateFrom(instrument, FORMATION_QUOTE, FORMATION_NOW);
-
-    // The zone the strategy sets from the formation ask: 250.96 - 0.50 =
-    // 250.46 down to 250.46 - 1.50 = 248.96, invalidated 2.00 below that.
-    expect(candidate.entryZone.max).toBe("250.46");
-    expect(candidate.entryZone.min).toBe("248.96");
-    expect(candidate.invalidationPrice).toBe("246.96");
-
-    const entryAsk = money(ENTRY_QUOTE.askPrice);
-    expect(compareDecimal(entryAsk, candidate.entryZone.min)).toBeGreaterThanOrEqual(0);
-    expect(compareDecimal(entryAsk, candidate.entryZone.max)).toBeLessThanOrEqual(0);
-
-    // And the ask that formed the candidate is beyond the allowed
-    // extension, so it is a MISSED entry and never a late BUY. That
-    // ordering is structural: `pullback` > `allowedExtension`.
-    const extendedMax = addDecimal(candidate.entryZone.max, candidate.allowedExtension);
-    expect(extendedMax).toBe("250.71");
-    expect(compareDecimal(money(FORMATION_QUOTE.askPrice), extendedMax)).toBeGreaterThan(0);
-
-    // The staged plan the candidate carries, which the replay persists and
-    // reads back below. Quantities sum to the configured total; triggers
-    // walk the zone from its top to its floor.
-    expect(candidate.positionPlan.tranches.map((tranche) => tranche.quantity)).toEqual(["1", "1", "1"]);
-    expect(candidate.positionPlan.tranches.map((tranche) => tranche.triggerPrice)).toEqual([
-      "250.46",
-      "249.71",
-      "248.96",
-    ]);
-  });
-});
-
-describe("the vertical PAPER replay", () => {
+describe("the vertical PAPER replay (composed by this test; apps/trading wires no such driver)", () => {
   it("carries one recorded pullback from strategy candidate to settled journal, balance, reservation and candidate state", async () => {
-    assertRecordedPremise();
+    assertScenarioInputs();
 
     const label = "vertfill";
     const instrument = syntheticInstrument(label);
-    await fund(db, instrument.quoteAssetId, MONEY_SCALE, FUNDING_BASE, label);
+    await fund(db, instrument.quoteAssetId, MONEY_SCALE, FUNDING_BASE, label, CAPITAL_FUNDED_AT);
 
     // ---- 1. the synthetic market becomes a candidate ----------------------
     const candidate = candidateFrom(instrument, FORMATION_QUOTE, FORMATION_NOW);
@@ -679,7 +677,6 @@ describe("the vertical PAPER replay", () => {
     const settledRows = await reservationRowsFor(db, authorized.intentId);
     expect(settledRows).toHaveLength(1);
     expect(settledRows[0]?.state).toBe("consumed");
-    expect(settledRows.filter((row) => row.state === "active")).toEqual([]);
 
     // The decision the dashboard's Candidates panel renders, still pointing
     // at the entry this replay actually took, under the strategy's own
@@ -704,13 +701,13 @@ describe("the vertical PAPER replay", () => {
   });
 
   it("refuses to authorize the same candidate at the price that formed it, and leaves nothing durable behind", async () => {
-    assertRecordedPremise();
+    assertScenarioInputs();
 
     const label = "vertchase";
     const instrument = syntheticInstrument(label);
     // Funded, so the spend this case forbids is genuinely affordable: the
     // guard is what stops it, not an empty account.
-    await fund(db, instrument.quoteAssetId, MONEY_SCALE, FUNDING_BASE, label);
+    await fund(db, instrument.quoteAssetId, MONEY_SCALE, FUNDING_BASE, label, CAPITAL_FUNDED_AT);
 
     const candidate = candidateFrom(instrument, FORMATION_QUOTE, FORMATION_NOW);
     const recordedCandidate = await recordCandidate(db, storeCandidateFrom(candidate, FORMATION_NOW));
@@ -733,8 +730,22 @@ describe("the vertical PAPER replay", () => {
     // Now the part that matters. The authorization is attempted ANYWAY,
     // through the identical translation, at the chasing price — so what
     // refuses is the application's own entry-zone gate and not this test
-    // declining to make the call. A translation that re-derived the zone
-    // from the current quote would authorize here.
+    // declining to make the call.
+    //
+    // What this case distinguishes, exactly: a translation whose approved
+    // band reaches the price this dispatch would actually pay. That price is
+    // 251.22 — the 250.96 ask plus the venue's 10bp cap, rounded up — against
+    // an approved maximum of 250.46, a gap of 0.76. Any band widened past
+    // that authorizes a spend and fails here: an unbounded or default-
+    // permissive zone, a band taken from the candidate's invalidation price
+    // upward, or one re-centred on the current price with a tolerance of
+    // 0.76 or more.
+    //
+    // What it does NOT distinguish, stated so the next reader does not
+    // over-claim it: a band widened only by the candidate's own
+    // `allowedExtension` (0.25, reaching 250.71) still refuses, and so does a
+    // zone re-derived from the quote being authorized against — see
+    // `proposalFromCandidate` for why no chasing case can catch that one.
     const chaseProposal = proposalFromCandidate(
       candidate,
       instrument,
