@@ -1,5 +1,5 @@
 import { reasonCodeSchema } from "@vigil/contracts";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, sql } from "drizzle-orm";
 
 import type { VigilDatabase } from "../client";
 import {
@@ -7,6 +7,7 @@ import {
   executionAttempts,
   executionAttemptStateEnum,
   intentDispatchOutbox,
+  LIVE_EXECUTION_ATTEMPT_STATES,
   type DispatchStateValue,
   type ExecutionAttemptStateValue,
 } from "../schema/intents";
@@ -774,4 +775,111 @@ export async function loadPendingDispatches(db: VigilDatabase): Promise<readonly
     .where(eq(intentDispatchOutbox.state, "pending"))
     .orderBy(asc(intentDispatchOutbox.enqueuedAt), asc(intentDispatchOutbox.dispatchId));
   return rows.map(toStoredDispatch);
+}
+
+/**
+ * Every execution attempt whose outcome is still open, across every intent,
+ * oldest first.
+ *
+ * This is the read `loadPendingDispatches` cannot be, and the difference is
+ * not a detail: an outbox row records how far the *hand-off* got, so the
+ * moment a payload leaves, that row settles to `dispatched` and stops being
+ * evidence of anything unresolved. What is unresolved is the attempt. A
+ * submission whose acknowledgement never came back is `UNKNOWN` sitting
+ * behind a `dispatched` outbox row (`docs/resilience.md` §3) — money that
+ * may already have moved at the venue — and that is exactly the attempt a
+ * restarted process has to be able to find without being told which intent
+ * to look under.
+ *
+ * So this reads `execution_attempts` alone and joins nothing. There is no
+ * dispatch state, and no absent outbox row, that could filter an attempt out
+ * of it; the only thing that decides membership is the attempt's own state.
+ *
+ * That predicate is `LIVE_EXECUTION_ATTEMPT_STATES` itself rather than a
+ * second list written out here, because the same constant is what
+ * `schema/intents.ts` renders into `execution_attempts_intent_id_live_key`,
+ * the partial unique index that refuses a second attempt while one is live.
+ * One list, so "is this attempt still standing between its authorization and
+ * the next attempt on it" has one answer, and a caller that has reconciled
+ * everything this read returns has reconciled everything that answer covers.
+ *
+ * One list at *generation* time, though, and the distinction is worth being
+ * exact about. The index that actually exists is whatever
+ * `drizzle/0009_approved_intents_economics_attempts_and_outbox.sql` created,
+ * its state list frozen into the migration's SQL, and nothing in CI compares
+ * the two. So adding a sixth live state to the constant changes this read the
+ * moment it ships while the index goes on allowing a second attempt against
+ * attempts in that state until a migration is generated and applied. The two
+ * are generated from one list and have to be regenerated together; nothing
+ * else keeps them in step.
+ *
+ * Nothing here resolves anything, and nothing here decides what to do. An
+ * `UNKNOWN` attempt leaves that state only through a reconciliation recorded
+ * against the venue's own confirmed state; this read makes the work visible.
+ */
+export async function loadUnresolvedAttempts(db: VigilDatabase): Promise<readonly StoredExecutionAttempt[]> {
+  const rows = await db
+    .select()
+    .from(executionAttempts)
+    .where(inArray(executionAttempts.state, LIVE_EXECUTION_ATTEMPT_STATES))
+    .orderBy(asc(executionAttempts.submittedAt), asc(executionAttempts.attemptId));
+  return rows.map(toStoredAttempt);
+}
+
+/**
+ * One attempt that confirmed a spend larger than its authorization allowed,
+ * carrying the ceiling it exceeded and by how much.
+ */
+export type StoredOverspentAttempt = StoredExecutionAttempt & {
+  /** `max_spend_base` from the intent this attempt consumed. */
+  readonly maxSpendBase: bigint;
+  /** `spentBase - maxSpendBase`; strictly positive, by the predicate below. */
+  readonly overspendBase: bigint;
+};
+
+/**
+ * Every attempt that spent more than its authorization allowed, oldest
+ * first.
+ *
+ * `spent_base` is deliberately uncapped against `max_spend_base`: by the
+ * time an over-fill is recorded it has already happened at the venue, and
+ * refusing to persist it would leave the application blind to money that
+ * actually moved (`drizzle/0010_intent_lifecycle_guards.sql`). The
+ * consequence is that an overspend is visible at the instant it is settled
+ * and nowhere afterwards, which is what this read fixes — a restarted
+ * process, or an operator hours later, can enumerate the ones that happened.
+ *
+ * Strictly greater, never `>=`. An attempt that spent its ceiling exactly
+ * spent what it was authorized to spend; reporting it here would bury the
+ * real overspends among every attempt that used its whole authorization.
+ *
+ * Deliberately not restricted to live attempts. The ordinary overspend is an
+ * over-fill, which is `FILLED` and terminal by the time anybody reads it, so
+ * a state filter here would return almost nothing and hide the case this
+ * exists for.
+ *
+ * The ceiling lives on the authorization rather than on the attempt, so this
+ * is the one read in this module that joins. It is an inner join from a
+ * `NOT NULL` foreign key to that table's primary key: exactly one intent row
+ * for each attempt, so the join can neither drop an attempt nor return one
+ * twice. Postgres compares the two `numeric` columns exactly, and the
+ * difference is computed as `bigint` subtraction — no step of this is ever a
+ * float.
+ */
+export async function loadOverspentAttempts(db: VigilDatabase): Promise<readonly StoredOverspentAttempt[]> {
+  const rows = await db
+    .select({ attempt: executionAttempts, maxSpendBase: approvedIntents.maxSpendBase })
+    .from(executionAttempts)
+    .innerJoin(approvedIntents, eq(approvedIntents.intentId, executionAttempts.intentId))
+    .where(gt(executionAttempts.spentBase, approvedIntents.maxSpendBase))
+    .orderBy(asc(executionAttempts.submittedAt), asc(executionAttempts.attemptId));
+
+  return rows.map((row) => {
+    const attempt = toStoredAttempt(row.attempt);
+    return {
+      ...attempt,
+      maxSpendBase: row.maxSpendBase,
+      overspendBase: attempt.spentBase - row.maxSpendBase,
+    };
+  });
 }

@@ -113,7 +113,9 @@ export {
   abandonDispatch,
   loadDispatch,
   loadExecutionAttempts,
+  loadOverspentAttempts,
   loadPendingDispatches,
+  loadUnresolvedAttempts,
   markDispatched,
   openExecutionAttempt,
   recordAttemptOutcome,
@@ -130,6 +132,7 @@ export type {
   RecordAttemptOutcomeResult,
   StoredDispatch,
   StoredExecutionAttempt,
+  StoredOverspentAttempt,
 } from "./store/execution-store";
 
 export {

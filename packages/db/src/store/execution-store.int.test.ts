@@ -1,20 +1,28 @@
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { executionAttempts, intentDispatchOutbox, type ExecutionAttemptStateValue } from "../schema/intents";
+import {
+  executionAttempts,
+  intentDispatchOutbox,
+  LIVE_EXECUTION_ATTEMPT_STATES,
+  TERMINAL_EXECUTION_ATTEMPT_STATES,
+  type ExecutionAttemptStateValue,
+} from "../schema/intents";
 import { openAttempt, storeApprovedIntent, TEST_OTHER_SCALE, TEST_PAYLOAD_DIGEST } from "../test-support/intent-fixtures";
 import { openLedgerTestDb, TEST_SCALE } from "../test-support/journal-fixtures";
 import {
   abandonDispatch,
   loadDispatch,
   loadExecutionAttempts,
+  loadOverspentAttempts,
   loadPendingDispatches,
+  loadUnresolvedAttempts,
   markDispatched,
   openExecutionAttempt,
   recordAttemptOutcome,
   EXECUTION_ATTEMPT_STATES,
 } from "./execution-store";
-import { recordApprovedIntent } from "./intent-store";
+import { loadApprovedIntent, recordApprovedIntent } from "./intent-store";
 import { postgresConstraintName, postgresErrorCode, PG_FOREIGN_KEY_VIOLATION, PG_RAISE_EXCEPTION } from "./pg-errors";
 
 // The defects this file kills:
@@ -41,7 +49,12 @@ import { postgresConstraintName, postgresErrorCode, PG_FOREIGN_KEY_VIOLATION, PG
 //   * a caller cutting the correlation thread between an intent and the
 //     attempt that consumes it;
 //   * a later event reassigning the venue order an attempt is associated
-//     with.
+//     with;
+//   * a restart able to find only the work whose outbox row never reached
+//     `dispatched`, leaving an order that was submitted and never
+//     acknowledged with nobody looking for it;
+//   * an overspend visible only in the instant it was recorded, so real
+//     exposure above an authorization cannot be enumerated afterwards.
 //
 // The real-infrastructure fact these claims need is a transaction and the
 // migrated schema: every one of them is about what survives a commit, or
@@ -930,5 +943,209 @@ describe("the dispatch outbox", () => {
 
     expect(postgresConstraintName(failure)).toBe("intent_dispatch_outbox_payload_immutable");
     expect((await loadDispatch(db, "intent-1", 1))?.payloadDigest).toBe(TEST_PAYLOAD_DIGEST);
+  });
+});
+
+/** The state every attempt is born in, so nothing has to be recorded to reach it. */
+const BORN_LIVE = "SUBMITTING";
+
+/** Approve a second (third, fourth) intent: one live attempt is allowed per intent. */
+async function approve(intentId: string): Promise<void> {
+  expect(await recordApprovedIntent(db, storeApprovedIntent(intentId))).toMatchObject({ outcome: "recorded" });
+}
+
+/** What `storeApprovedIntent` actually authorized, read back rather than restated here. */
+async function authorizedCeiling(intentId: string): Promise<bigint> {
+  const intent = await loadApprovedIntent(db, intentId);
+  if (intent === null) {
+    throw new Error(`intent ${intentId} was not recorded`);
+  }
+  return intent.input.maxSpendBase;
+}
+
+/** Drive one attempt to a state, supplying amounts only where the state asserts a fill. */
+async function drive(intentId: string, state: ExecutionAttemptStateValue, spentBase = 0n, receivedBase = 0n): Promise<void> {
+  expect(
+    await recordAttemptOutcome(db, {
+      intentId,
+      attempt: 1,
+      state,
+      spentBase,
+      receivedBase,
+      venueOrderId: `venue-order-${intentId}`,
+      stateChangedAt: "2026-01-02T03:12:00.000Z",
+      recordedAt: "2026-01-02T03:12:00.100Z",
+      reconciliation: null,
+    }),
+  ).toMatchObject({ outcome: "recorded", state });
+}
+
+describe("loadUnresolvedAttempts", () => {
+  it("returns an attempt left UNKNOWN behind a dispatch that already went out, which loadPendingDispatches structurally cannot see — catches a restart that can only find work whose payload never left, while the order it did send sits unreconciled at the venue", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+    await markDispatched(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      dispatcherInstanceId: "trading-instance-a",
+      fencingToken: 1n,
+      dispatchedAt: "2026-01-02T03:10:02.000Z",
+      recordedAt: "2026-01-02T03:10:02.100Z",
+    });
+    // The acknowledgement never came back: docs/resilience.md §3's canonical
+    // case, and the one the outbox has already stopped describing.
+    await drive("intent-1", "UNKNOWN");
+
+    expect((await loadDispatch(db, "intent-1", 1))?.state).toBe("dispatched");
+    expect(await loadPendingDispatches(db)).toEqual([]);
+
+    expect(
+      (await loadUnresolvedAttempts(db)).map((attempt) => [
+        attempt.intentId,
+        attempt.attempt,
+        attempt.state,
+        attempt.clientOrderId,
+      ]),
+    ).toEqual([["intent-1", 1, "UNKNOWN", "coid-intent-1-1"]]);
+  });
+
+  it("returns a live attempt whose dispatch was abandoned — catches a read that swaps one outbox state for another instead of reading the attempt, which leaves the same attempt invisible by a different route", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+    await abandonDispatch(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      dispatcherInstanceId: "trading-instance-a",
+      fencingToken: 1n,
+      reasonCode: "RESEARCH_EXPIRED",
+      recordedAt: "2026-01-02T03:11:00.000Z",
+    });
+
+    expect((await loadDispatch(db, "intent-1", 1))?.state).toBe("abandoned");
+    expect(await loadPendingDispatches(db)).toEqual([]);
+
+    // The dispatcher gave up; nothing recorded an outcome for the attempt.
+    expect((await loadUnresolvedAttempts(db)).map((attempt) => [attempt.intentId, attempt.state])).toEqual([
+      ["intent-1", BORN_LIVE],
+    ]);
+  });
+
+  it("returns an attempt in every state the schema counts as live, enumerated from LIVE_EXECUTION_ATTEMPT_STATES rather than from a list written out here — catches a predicate that omits one state, where every attempt in that state is simply invisible", async () => {
+    let index = 0;
+    for (const state of LIVE_EXECUTION_ATTEMPT_STATES) {
+      const intentId = `intent-live-${index}`;
+      index += 1;
+      await approve(intentId);
+      expect(await openExecutionAttempt(db, openAttempt(intentId, 1))).toMatchObject({ outcome: "opened" });
+      if (state !== BORN_LIVE) {
+        const fills = state === "PARTIALLY_FILLED";
+        await drive(intentId, state, fills ? 400_000n : 0n, fills ? 200_000_000n : 0n);
+      }
+    }
+
+    const states = (await loadUnresolvedAttempts(db)).map((attempt) => attempt.state);
+    expect([...states].sort()).toEqual([...LIVE_EXECUTION_ATTEMPT_STATES].sort());
+  });
+
+  it("omits every settled attempt while returning the live one beside it — catches a read that hands a driver orders the venue already resolved, and one so broad it returns all of durable history", async () => {
+    let index = 0;
+    for (const state of TERMINAL_EXECUTION_ATTEMPT_STATES) {
+      const intentId = `intent-settled-${index}`;
+      index += 1;
+      await approve(intentId);
+      expect(await openExecutionAttempt(db, openAttempt(intentId, 1))).toMatchObject({ outcome: "opened" });
+      const fills = state === "FILLED";
+      await drive(intentId, state, fills ? 900_000n : 0n, fills ? 480_000_000n : 0n);
+    }
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+
+    expect((await loadUnresolvedAttempts(db)).map((attempt) => [attempt.intentId, attempt.state])).toEqual([
+      ["intent-1", BORN_LIVE],
+    ]);
+  });
+
+  it("returns the oldest unresolved attempt first, and breaks a tie on attempt id rather than on whatever order the rows come back in — catches a driver working a backlog newest-first while the oldest ambiguity, the one whose money has been in doubt longest, keeps waiting; and catches an order that is only stable until two attempts are opened in the same millisecond, which is the ordinary case for a batch", async () => {
+    // Opened deliberately out of order, and `intent-tie-b` ahead of
+    // `intent-tie-a`: with no second sort key the two tied rows come back in
+    // whatever order the scan produces, which is this insertion order.
+    const opened = [
+      ["intent-late", "2026-01-02T03:30:00.000Z"],
+      ["intent-tie-b", "2026-01-02T03:20:00.000Z"],
+      ["intent-early", "2026-01-02T03:10:00.000Z"],
+      ["intent-tie-a", "2026-01-02T03:20:00.000Z"],
+    ] as const;
+
+    for (const [intentId, submittedAt] of opened) {
+      await approve(intentId);
+      expect(await openExecutionAttempt(db, openAttempt(intentId, 1, { submittedAt }))).toMatchObject({
+        outcome: "opened",
+      });
+    }
+
+    expect((await loadUnresolvedAttempts(db)).map((attempt) => attempt.intentId)).toEqual([
+      "intent-early",
+      "intent-tie-a",
+      "intent-tie-b",
+      "intent-late",
+    ]);
+  });
+});
+
+describe("loadOverspentAttempts", () => {
+  it("returns the attempt that spent one base unit more than it was authorized to and nothing else, leaving out the one that spent its ceiling exactly — catches a `>=` predicate, which reports every attempt that used its whole authorization as an overspend and buries the real ones among them", async () => {
+    const ceiling = await authorizedCeiling("intent-1");
+
+    // Exactly at the ceiling: this attempt spent what it was authorized to.
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+    await drive("intent-1", "FILLED", ceiling, 500_000_000n);
+
+    // One base unit past it: the smallest overspend this schema can express.
+    await approve("intent-over");
+    await openExecutionAttempt(db, openAttempt("intent-over", 1));
+    await drive("intent-over", "FILLED", ceiling + 1n, 500_000_000n);
+
+    await approve("intent-under");
+    await openExecutionAttempt(db, openAttempt("intent-under", 1));
+    await drive("intent-under", "FILLED", ceiling - 100_000n, 480_000_000n);
+
+    expect(
+      (await loadOverspentAttempts(db)).map((attempt) => [
+        attempt.intentId,
+        attempt.state,
+        attempt.spentBase,
+        attempt.maxSpendBase,
+        attempt.overspendBase,
+      ]),
+    ).toEqual([["intent-over", "FILLED", ceiling + 1n, ceiling, 1n]]);
+  });
+
+  it("returns an overspent attempt whose outcome is still open alongside a settled one — catches a read restricted to live attempts, which would report almost no overspend at all since an over-fill is terminal by the time anyone looks, and one restricted to settled attempts, which would hide exposure that is still growing", async () => {
+    const ceiling = await authorizedCeiling("intent-1");
+
+    // Both opened in the same millisecond, so the order below is this read's
+    // own tie-break on attempt id — `att-intent-1-1` before
+    // `att-intent-settled-1` — rather than the order the rows happen to be
+    // stored in. Without that second sort key two overspends recorded in one
+    // batch would come back in no particular order.
+    await openExecutionAttempt(db, openAttempt("intent-1", 1, { submittedAt: "2026-01-02T03:10:00.000Z" }));
+    await drive("intent-1", "PARTIALLY_FILLED", ceiling + 50n, 400_000_000n);
+
+    await approve("intent-settled");
+    await openExecutionAttempt(db, openAttempt("intent-settled", 1, { submittedAt: "2026-01-02T03:10:00.000Z" }));
+    await drive("intent-settled", "FILLED", ceiling + 1n, 500_000_000n);
+
+    expect(
+      (await loadOverspentAttempts(db)).map((attempt) => [attempt.intentId, attempt.state, attempt.overspendBase]),
+    ).toEqual([
+      ["intent-1", "PARTIALLY_FILLED", 50n],
+      ["intent-settled", "FILLED", 1n],
+    ]);
+  });
+
+  it("reports nothing while every attempt is inside its authorization, including one that has spent nothing at all — catches a read that treats an open attempt, or an untouched ceiling, as an overspend", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+    await approve("intent-filled");
+    await openExecutionAttempt(db, openAttempt("intent-filled", 1));
+    await drive("intent-filled", "FILLED", await authorizedCeiling("intent-filled"), 500_000_000n);
+
+    expect(await loadOverspentAttempts(db)).toEqual([]);
   });
 });
