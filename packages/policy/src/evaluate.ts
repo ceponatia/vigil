@@ -1,8 +1,9 @@
 import { z } from "zod";
-import { decimalStringSchema, isoUtcTimestampSchema } from "@vigil/contracts";
+import { isoUtcTimestampSchema } from "@vigil/contracts";
 import type { DecimalString } from "@vigil/contracts";
 
-import { policyConfigSchema, refusalForParseError } from "./config";
+import { policyConfigSchema, refusalForParseError, scaleBoundedDecimalSchema } from "./config";
+import { netEdgeCostsSchema } from "./costs";
 import type { PolicyRefusal } from "./diagnostics";
 import {
   checkAccountReconciled,
@@ -12,12 +13,11 @@ import {
   checkQuoteFreshness,
   entryZoneSchema,
   exposureCapSchema,
-  netEdgeCostsSchema,
   reconciliationStateSchema,
   type ExposureCap,
   type NetEdgeBreakdown,
 } from "./eligibility";
-import { sizeTrade, type SizedTrade } from "./sizing";
+import { sizeTrade, type SizedTrade, type SizingBreakdown } from "./sizing";
 
 /**
  * evaluate.ts — the composed gate: every eligibility check and the sizing
@@ -82,19 +82,19 @@ export const proposalEvaluationParamsSchema = z.strictObject({
   account: reconciliationStateSchema,
   quote: z.strictObject({
     quoteAcquiredAt: isoUtcTimestampSchema,
-    executablePrice: decimalStringSchema,
+    executablePrice: scaleBoundedDecimalSchema,
   }),
   entryZone: entryZoneSchema,
   /** One entry per cap that applies. An empty list is refused, not treated as unlimited. */
   exposureCaps: z.array(exposureCapSchema),
   capital: z.strictObject({
-    fundsAvailableQuote: decimalStringSchema,
-    executableLiquidityBase: decimalStringSchema,
-    adverseLossBudgetQuote: decimalStringSchema,
-    stopDistanceQuote: decimalStringSchema,
+    fundsAvailableQuote: scaleBoundedDecimalSchema,
+    executableLiquidityBase: scaleBoundedDecimalSchema,
+    adverseLossBudgetQuote: scaleBoundedDecimalSchema,
+    stopDistanceQuote: scaleBoundedDecimalSchema,
   }),
   edge: z.strictObject({
-    expectedGrossEdgePerUnitQuote: decimalStringSchema,
+    expectedGrossEdgePerUnitQuote: scaleBoundedDecimalSchema,
     costs: netEdgeCostsSchema,
   }),
 });
@@ -116,14 +116,34 @@ export type RefusedEvaluation = {
   /** Which gate refused. `null` only when the parameters themselves did not parse. */
   readonly stage: EvaluationStage | null;
   readonly refusal: PolicyRefusal;
+  /**
+   * The sizing breakdown, when sizing ran far enough to produce one; `null`
+   * on every gate that refused before it and on a MALFORMED_INPUT refusal
+   * whose inputs were too corrupt to bound anything.
+   *
+   * `sizeTrade` deliberately returns a non-null breakdown on its
+   * `MINIMUM_NOTIONAL` branch — the one refusal where "which bound bound the
+   * size" is most informative — and dropping it here would force the
+   * opportunity journal to re-run the lower-level check to recover the four
+   * evaluated bounds, the rounded quantity, and the precision metadata
+   * (PR #41 review, finding 4). Issue #27 covers the wider gap in what the
+   * journal retains about available capital and portfolio state; this only
+   * stops the composed path from discarding what it already computed.
+   */
+  readonly sizing: SizingBreakdown | null;
 };
 
 export type ProposalEvaluation = ApprovedEvaluation | RefusedEvaluation;
 
-const refusedAt = (stage: EvaluationStage | null, refusal: PolicyRefusal): RefusedEvaluation => ({
+const refusedAt = (
+  stage: EvaluationStage | null,
+  refusal: PolicyRefusal,
+  sizing: SizingBreakdown | null = null,
+): RefusedEvaluation => ({
   outcome: "refused",
   stage,
   refusal,
+  sizing,
 });
 
 /**
@@ -172,10 +192,11 @@ export function evaluateProposal(params: ProposalEvaluationParams): ProposalEval
       stopDistanceQuote: capital.stopDistanceQuote,
       executablePrice: quote.executablePrice,
     },
+    costs: edge.costs,
     config,
   });
   if (sized.outcome === "refused") {
-    return refusedAt("sizing", sized.refusal);
+    return refusedAt("sizing", sized.refusal, sized.breakdown);
   }
 
   const netEdge = checkNetEdge({
@@ -186,7 +207,10 @@ export function evaluateProposal(params: ProposalEvaluationParams): ProposalEval
     config,
   });
   if (!netEdge.eligible) {
-    return refusedAt("netEdge", netEdge.refusal);
+    // Net edge runs after sizing, so a refusal here still has a real size to
+    // explain — the journal keeps the bounds that produced the quantity the
+    // edge was judged at.
+    return refusedAt("netEdge", netEdge.refusal, sized.size.breakdown);
   }
 
   return {

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { compareDecimal } from "./scaled-decimal";
+import { addDecimal, compareDecimal, multiplyDecimal } from "./scaled-decimal";
 import { sizeTrade, SIZE_BOUNDS } from "./sizing";
 import type { SizingInputs } from "./sizing";
-import { dec, testConfig } from "./test-support/fixtures";
+import { dec, testConfig, testCosts, NO_COSTS } from "./test-support/fixtures";
 
 const config = testConfig();
 
@@ -25,8 +25,11 @@ const baseInputs: SizingInputs = {
   executablePrice: dec("100"),
 };
 
-const size = (overrides: Partial<SizingInputs> = {}, configOverrides: Readonly<Record<string, unknown>> = {}) =>
-  sizeTrade({ inputs: { ...baseInputs, ...overrides }, config: testConfig(configOverrides) });
+const size = (
+  overrides: Partial<SizingInputs> = {},
+  configOverrides: Readonly<Record<string, unknown>> = {},
+  costs = NO_COSTS,
+) => sizeTrade({ inputs: { ...baseInputs, ...overrides }, costs, config: testConfig(configOverrides) });
 
 // ---------------------------------------------------------------------------
 // The minimum of four bounds (docs/policy.md "Position sizing rule").
@@ -83,6 +86,108 @@ describe("sizeTrade — takes the minimum of the four bounds", () => {
     expect(result.outcome).toBe("sized");
     if (result.outcome === "sized") {
       expect(result.size.breakdown.bindingBounds).toEqual(["fundsAvailable", "executableLiquidity"]);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cost-aware bounds (PR #41 review, finding 1). `fundsAvailableQuote` bounds
+// the notional, but the cash that actually leaves is notional plus every
+// separately-charged cost — so a size computed on notional alone can exceed
+// the funds that exist, and a stop can consume the whole loss budget before
+// costs are added. checkNetEdge runs afterward and asks about profitability,
+// not solvency, so it restores neither bound.
+// ---------------------------------------------------------------------------
+describe("sizeTrade — separately-charged costs shrink the capital and loss bounds", () => {
+  it("reduces the size so the true cash out fits the funds available — a proportional fee on a naive size of 10 would spend 1010 against 1000 available", () => {
+    const rate = dec("0.01");
+    const result = size({}, {}, testCosts({ separatelyCharged: { proportionalFeeRate: rate } }));
+    expect(result.outcome).toBe("sized");
+    if (result.outcome === "sized") {
+      expect(result.size.quantityBase).toBe("9.9");
+      expect(result.size.breakdown.bindingBounds).toEqual(["fundsAvailable"]);
+
+      // The property, asserted rather than asserted-about: notional plus the
+      // fee is within the funds, and the size the old code produced was not.
+      const cashOut = (quantity: string) => {
+        const notional = multiplyDecimal(dec(quantity), dec("100"));
+        return addDecimal(notional, multiplyDecimal(notional, rate));
+      };
+      expect(compareDecimal(cashOut(result.size.quantityBase), dec("1000"))).toBeLessThanOrEqual(0);
+      expect(compareDecimal(cashOut("10"), dec("1000"))).toBe(1);
+    }
+  });
+
+  it("reduces the size so the planned adverse loss fits its budget — a per-unit cost on a naive size of 50 would plan a 300 loss against a 250 budget", () => {
+    const perUnit = dec("1");
+    const result = size(
+      { fundsAvailableQuote: dec("1000000") },
+      {},
+      testCosts({ separatelyCharged: { slippageAllowancePerUnitQuote: perUnit } }),
+    );
+    expect(result.outcome).toBe("sized");
+    if (result.outcome === "sized") {
+      expect(result.size.quantityBase).toBe("41.66");
+      expect(result.size.breakdown.bindingBounds).toEqual(["adverseLossBudget"]);
+
+      const plannedLoss = (quantity: string) =>
+        addDecimal(multiplyDecimal(dec(quantity), dec("5")), multiplyDecimal(dec(quantity), perUnit));
+      expect(compareDecimal(plannedLoss(result.size.quantityBase), dec("250"))).toBeLessThanOrEqual(0);
+      expect(compareDecimal(plannedLoss("50"), dec("250"))).toBe(1);
+    }
+  });
+
+  it("skips entirely when flat costs exceed the funds available — a budget that cannot cover the fixed charge funds no trade, and the bound clamps to zero rather than going negative", () => {
+    const result = size(
+      { fundsAvailableQuote: dec("1") },
+      {},
+      testCosts({ separatelyCharged: { fixedCostsQuote: dec("5") } }),
+    );
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.refusal.reason.code).toBe("MINIMUM_NOTIONAL");
+      expect(result.breakdown?.quantityBase).toBe("0");
+      expect(result.breakdown?.bindingBounds).toEqual(["fundsAvailable"]);
+    }
+  });
+
+  it("leaves the bounds untouched for an EMBEDDED cost of the same magnitude — it is already inside executablePrice, and deducting it again would charge it twice and under-size the trade", () => {
+    const magnitude = dec("50");
+    const embedded = size(
+      { adverseLossBudgetQuote: dec("100000") },
+      {},
+      testCosts({ embedded: { spreadCostPerUnitQuote: magnitude } }),
+    );
+    const separatelyCharged = size(
+      { adverseLossBudgetQuote: dec("100000") },
+      {},
+      testCosts({ separatelyCharged: { slippageAllowancePerUnitQuote: magnitude } }),
+    );
+
+    expect(embedded.outcome).toBe("sized");
+    expect(separatelyCharged.outcome).toBe("sized");
+    if (embedded.outcome === "sized" && separatelyCharged.outcome === "sized") {
+      // Identical to the zero-cost baseline: embedded costs are invisible here.
+      expect(embedded.size.quantityBase).toBe("10");
+      // The same number, charged on top, genuinely shrinks the size.
+      expect(separatelyCharged.size.quantityBase).toBe("6.66");
+    }
+  });
+
+  it("refuses a negative cost component, which would ENLARGE the capital bound rather than shrink it", () => {
+    const result = size({}, {}, testCosts({ separatelyCharged: { fixedCostsQuote: dec("-1000") } }));
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.refusal.reason.source).toBe("input");
+      expect(result.refusal.reason.code).toBe("NEGATIVE_COST_COMPONENT");
+    }
+  });
+
+  it("reproduces the pre-cost bounds exactly when nothing is charged, so the cost model added no drift to the baseline", () => {
+    const result = size();
+    expect(result.outcome).toBe("sized");
+    if (result.outcome === "sized") {
+      expect(result.size.breakdown.bounds.map((entry) => entry.maxQuantityBase)).toEqual(["10", "50", "80", "50"]);
     }
   });
 });
@@ -316,6 +421,7 @@ describe("sizeTrade — refuses corrupt inputs as diagnostics, not policy decisi
   it("refuses a malformed limit set as a config problem, distinguishable from a caller problem", () => {
     const result = sizeTrade({
       inputs: baseInputs,
+      costs: NO_COSTS,
       // PolicyConfig is an inferred type: it carries the field names but
       // not the sign refinements, so this object type-checks. That is
       // exactly why every check re-parses the config it is handed.

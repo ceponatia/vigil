@@ -7,7 +7,8 @@ import {
   checkNetEdge,
   checkQuoteFreshness,
 } from "./eligibility";
-import type { ExposureCap, NetEdgeCosts } from "./eligibility";
+import type { NetEdgeCosts } from "./costs";
+import type { ExposureCap } from "./eligibility";
 import type { DecimalString } from "@vigil/contracts";
 
 import { dec, testConfig, ts } from "./test-support/fixtures";
@@ -291,10 +292,12 @@ describe("checkExposure", () => {
 // ---------------------------------------------------------------------------
 describe("checkNetEdge", () => {
   const costs: NetEdgeCosts = {
-    proportionalFeeRate: dec("0.001"),
-    spreadCostPerUnitQuote: dec("0.5"),
-    slippageAllowancePerUnitQuote: dec("0.2"),
-    fixedCostsQuote: dec("2"),
+    embedded: { spreadCostPerUnitQuote: dec("0.5") },
+    separatelyCharged: {
+      proportionalFeeRate: dec("0.001"),
+      slippageAllowancePerUnitQuote: dec("0.2"),
+      fixedCostsQuote: dec("2"),
+    },
   };
   const base = {
     quantity: dec("10"),
@@ -341,7 +344,7 @@ describe("checkNetEdge", () => {
     const withoutFixed = checkNetEdge({
       ...base,
       expectedGrossEdgePerUnitQuote: dec("1.9"),
-      costs: { ...costs, fixedCostsQuote: dec("0") },
+      costs: { ...costs, separatelyCharged: { ...costs.separatelyCharged, fixedCostsQuote: dec("0") } },
     });
     const withFixed = checkNetEdge({ ...base, expectedGrossEdgePerUnitQuote: dec("1.9") });
     expect(withoutFixed.eligible).toBe(true);
@@ -356,7 +359,7 @@ describe("checkNetEdge", () => {
     const result = checkNetEdge({
       ...base,
       expectedGrossEdgePerUnitQuote: dec("1"),
-      costs: { ...costs, fixedCostsQuote: dec("-20") },
+      costs: { ...costs, separatelyCharged: { ...costs.separatelyCharged, fixedCostsQuote: dec("-20") } },
     });
     // Summed naively this is gross 10 less costs -12, i.e. net 22, which
     // would clear the minimum of 10 and authorize the trade.
@@ -369,10 +372,16 @@ describe("checkNetEdge", () => {
   });
 
   const negativeCostCases: readonly (readonly [string, NetEdgeCosts])[] = [
-    ["proportionalFeeRate", { ...costs, proportionalFeeRate: dec("-1") }],
-    ["spreadCostPerUnitQuote", { ...costs, spreadCostPerUnitQuote: dec("-1") }],
-    ["slippageAllowancePerUnitQuote", { ...costs, slippageAllowancePerUnitQuote: dec("-1") }],
-    ["fixedCostsQuote", { ...costs, fixedCostsQuote: dec("-1") }],
+    ["spreadCostPerUnitQuote", { ...costs, embedded: { spreadCostPerUnitQuote: dec("-1") } }],
+    [
+      "proportionalFeeRate",
+      { ...costs, separatelyCharged: { ...costs.separatelyCharged, proportionalFeeRate: dec("-1") } },
+    ],
+    [
+      "slippageAllowancePerUnitQuote",
+      { ...costs, separatelyCharged: { ...costs.separatelyCharged, slippageAllowancePerUnitQuote: dec("-1") } },
+    ],
+    ["fixedCostsQuote", { ...costs, separatelyCharged: { ...costs.separatelyCharged, fixedCostsQuote: dec("-1") } }],
   ];
 
   it.each(negativeCostCases)("refuses a negative %s, naming the component", (field, negativeCosts) => {

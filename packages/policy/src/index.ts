@@ -51,7 +51,6 @@ export {
   checkQuoteFreshness,
   entryZoneSchema,
   exposureCapSchema,
-  netEdgeCostsSchema,
   reconciliationStateSchema,
   EXPOSURE_SCOPES,
 } from "./eligibility";
@@ -67,11 +66,13 @@ export type {
   ExposureResult,
   ExposureScope,
   NetEdgeBreakdown,
-  NetEdgeCosts,
   NetEdgeResult,
   QuoteFreshnessResult,
   ReconciliationState,
 } from "./eligibility";
+
+export { negativeCostComponent, netEdgeCostsSchema } from "./costs";
+export type { NetEdgeCosts } from "./costs";
 
 export { sizeTrade, sizingInputsSchema, SIZE_BOUNDS } from "./sizing";
 export type {

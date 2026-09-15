@@ -83,18 +83,22 @@ export const scaleBoundedDecimalSchema = decimalStringSchema.refine(
  * call only trust-boundary-safe predicates, which are total over `string`
  * and cannot throw on an undecomposable value.
  *
+ * Both are built on `scaleBoundedDecimalSchema` rather than on
+ * `decimalStringSchema` directly, so a monetary limit is scale-bounded like
+ * every other money field in this package (PR #41 review, finding 2).
+ *
  * `isNegative` answers `false` for garbage, so `!isNegative(garbage)` is
  * `true` and this refine passes — which is fine and intended: the base
  * pattern has already rejected the value, so the object is refused either
  * way, and this refine adds no confusing second issue about the sign of
  * something that is not a number.
  */
-const nonNegativeDecimalSchema = decimalStringSchema.refine((value) => !isNegative(value), {
+const nonNegativeDecimalSchema = scaleBoundedDecimalSchema.refine((value) => !isNegative(value), {
   error: "must be zero or greater",
 });
 
 /** `isPositive` answers `false` for garbage, so this refine fails closed on it. */
-const positiveDecimalSchema = decimalStringSchema.refine((value) => isPositive(value), {
+const positiveDecimalSchema = scaleBoundedDecimalSchema.refine((value) => isPositive(value), {
   error: "must be strictly greater than zero",
 });
 

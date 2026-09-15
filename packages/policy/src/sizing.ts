@@ -1,9 +1,21 @@
 import { z } from "zod";
+import { decimalStringSchema } from "@vigil/contracts";
 import type { DecimalString } from "@vigil/contracts";
 
 import { policyConfigSchema, refusalForParseError, scaleBoundedDecimalSchema } from "./config";
+import { negativeCostComponent, netEdgeCostsSchema } from "./costs";
 import { inputRefusal, policyRefusal, type PolicyRefusal } from "./diagnostics";
-import { compareDecimal, divideFloor, floorToScale, isNegative, isPositive, minDecimal, multiplyDecimal } from "./scaled-decimal";
+import {
+  addDecimal,
+  compareDecimal,
+  divideFloor,
+  floorToScale,
+  isNegative,
+  isPositive,
+  minDecimal,
+  multiplyDecimal,
+  subtractDecimal,
+} from "./scaled-decimal";
 
 /**
  * sizing.ts — `docs/policy.md`'s position sizing rule, verbatim:
@@ -73,6 +85,16 @@ export type SizeBound = (typeof SIZE_BOUNDS)[number];
  */
 const WORKING_SCALE_GUARD_DIGITS = 12;
 
+/** `1`, for the `price * (1 + rate)` term in the capital bound. Parsed once rather than per call. */
+const ONE = decimalStringSchema.parse("1");
+const ZERO = decimalStringSchema.parse("0");
+
+/** `a - b`, floored at zero. Used where a negative remainder means "nothing is affordable", not "a negative bound". */
+function subtractOrZero(a: DecimalString, b: DecimalString): DecimalString {
+  const difference = subtractDecimal(a, b);
+  return isNegative(difference) ? ZERO : difference;
+}
+
 /**
  * The caller-supplied state the four bounds are derived from. Field names
  * carry the unit, and that is load-bearing: mixing a quote-currency amount
@@ -99,6 +121,12 @@ export type SizingInputs = z.infer<typeof sizingInputsSchema>;
 
 const sizingParamsSchema = z.strictObject({
   inputs: sizingInputsSchema,
+  /**
+   * Only `separatelyCharged` affects the bounds below; `embedded` is already
+   * inside `executablePrice`. See `costs.ts` for why the distinction is
+   * structural rather than a comment.
+   */
+  costs: netEdgeCostsSchema,
   config: policyConfigSchema,
 });
 
@@ -114,10 +142,32 @@ export type BoundQuantity = {
  * Everything needed to explain a size, whether it was approved or skipped.
  * Carried on both branches for exactly that reason.
  */
+/**
+ * Why a size is the number it is. Carried on both the sized and the refused
+ * branch, because "we bought less than proposed" is not an explanation.
+ *
+ * ## Precision contract for the explanatory fields
+ *
+ * `bindingBounds` and `precisionReduced` describe bounds compared at
+ * `quantityScale + 12` fractional digits, not at the full precision of the
+ * inputs (which `sizingInputsSchema` allows up to `MAX_QUANTITY_SCALE`).
+ * Two bounds differing by less than one unit in the last place of that
+ * working scale are therefore reported as tied, and `precisionReduced` can
+ * read `false` where a difference below that scale was in fact rounded away.
+ *
+ * This does not affect the size. Nested flooring is exact — flooring to the
+ * working scale and then to `quantityScale` equals flooring straight to
+ * `quantityScale` — so `quantityBase` is correct regardless. Only the
+ * explanatory metadata is coarse, and only below the 12th guard digit.
+ * Making it exact means carrying each bound as an unevaluated rational and
+ * comparing by cross-multiplication rather than as a decimal string; that is
+ * the known fix if the opportunity journal ever needs to discriminate
+ * bounds that agree to twelve-plus places (PR #41 review, finding 3).
+ */
 export type SizingBreakdown = {
   /** All four bounds, converted to base-asset quantities, in `SIZE_BOUNDS` order. */
   readonly bounds: readonly BoundQuantity[];
-  /** Every bound equal to the minimum. More than one on a tie; never empty. */
+  /** Every bound equal to the minimum *at the working scale*. More than one on a tie; never empty. */
   readonly bindingBounds: readonly SizeBound[];
   /** The minimum of the four, before venue precision is applied. */
   readonly unroundedQuantityBase: DecimalString;
@@ -160,7 +210,7 @@ export function sizeTrade(params: SizeTradeParams): SizingResult {
   if (!parsed.success) {
     return { outcome: "refused", refusal: refusalForParseError(parsed.error), breakdown: null };
   }
-  const { inputs, config } = parsed.data;
+  const { inputs, costs, config } = parsed.data;
 
   if (!isPositive(inputs.executablePrice)) {
     return {
@@ -225,15 +275,73 @@ export function sizeTrade(params: SizeTradeParams): SizingResult {
     };
   }
 
+  const negativeCost = negativeCostComponent(costs);
+  if (negativeCost !== undefined) {
+    return {
+      outcome: "refused",
+      refusal: inputRefusal(
+        "NEGATIVE_COST_COMPONENT",
+        `cost component "${negativeCost[0]}" is ${negativeCost[1]}; a negative cost enlarges the capital and adverse-loss bounds rather than shrinking them`,
+      ),
+      breakdown: null,
+    };
+  }
+
   const workingScale = config.quantityScale + WORKING_SCALE_GUARD_DIGITS;
 
-  // Each quote-currency bound becomes a maximum quantity by flooring
-  // division; executable liquidity is already a quantity and is taken as
-  // given, at whatever precision the venue reported it.
-  const fundsBound = divideFloor(inputs.fundsAvailableQuote, inputs.executablePrice, workingScale);
+  // Cost-aware bounds (PR #41 review, finding 1).
+  //
+  // `fundsAvailableQuote` bounds the *notional*, but the cash that actually
+  // leaves is the notional PLUS every separately-charged cost. Sizing on
+  // notional alone approves a trade that cannot be paid for. The same shape
+  // applies to the adverse-loss budget: a stop consumes the whole budget
+  // before costs are added, so the planned loss is understated by exactly
+  // the separately-charged component. `checkNetEdge` runs after sizing and
+  // asks about profitability, not solvency — it restores neither bound.
+  //
+  // On the apparent circularity: a proportional fee depends on the notional,
+  // which depends on the size being solved for. It resolves in closed form
+  // rather than by iteration, because every cost is affine in the quantity
+  // `q` — a term linear in `q` plus a constant — so `q` factors out exactly:
+  //
+  //   cash out(q)     = q*price + q*price*rate + q*perUnit + fixed
+  //                   = q*(price*(1 + rate) + perUnit) + fixed  <= funds
+  //   planned loss(q) = q*stopDistance + q*price*rate + q*perUnit + fixed
+  //                   = q*(stopDistance + price*rate + perUnit) + fixed <= budget
+  //
+  // Each solves to `q <= (budget - fixed) / perUnitDenominator`, exactly,
+  // with no fixed point to iterate toward. Embedded costs appear in neither
+  // denominator: they are already inside `executablePrice`, so charging them
+  // again here would under-size the trade.
+  const rate = costs.separatelyCharged.proportionalFeeRate;
+  const perUnitCharged = costs.separatelyCharged.slippageAllowancePerUnitQuote;
+  const fixedCharged = costs.separatelyCharged.fixedCostsQuote;
+
+  // price*(1 + rate) + perUnit. Strictly positive: price > 0 and both cost
+  // terms are non-negative, so `divideFloor`'s denominator precondition holds.
+  const cashPerUnit = addDecimal(multiplyDecimal(inputs.executablePrice, addDecimal(ONE, rate)), perUnitCharged);
+  // stopDistance + price*rate + perUnit. Strictly positive: stopDistance > 0.
+  const lossPerUnit = addDecimal(
+    addDecimal(inputs.stopDistanceQuote, multiplyDecimal(inputs.executablePrice, rate)),
+    perUnitCharged,
+  );
+
+  // Flat costs are paid whatever the size, so they come off the budget
+  // before anything is divided. A budget that cannot even cover them funds
+  // no trade at all — clamped to zero rather than allowed to go negative,
+  // which would both break `divideFloor`'s sign precondition and read as a
+  // bound rather than as "nothing is affordable".
+  const fundsForNotional = subtractOrZero(inputs.fundsAvailableQuote, fixedCharged);
+  const budgetForLoss = subtractOrZero(inputs.adverseLossBudgetQuote, fixedCharged);
+
+  const fundsBound = divideFloor(fundsForNotional, cashPerUnit, workingScale);
   const exposureBound = divideFloor(inputs.exposureHeadroomQuote, inputs.executablePrice, workingScale);
+  // Liquidity is already a quantity, taken as given at whatever precision
+  // the venue reported. Exposure is deliberately NOT cost-adjusted: a cap
+  // bounds economic exposure to the asset, which is the notional, and a fee
+  // paid to a venue is not exposure to the asset.
   const liquidityBound = inputs.executableLiquidityBase;
-  const lossBudgetBound = divideFloor(inputs.adverseLossBudgetQuote, inputs.stopDistanceQuote, workingScale);
+  const lossBudgetBound = divideFloor(budgetForLoss, lossPerUnit, workingScale);
 
   const bounds: readonly BoundQuantity[] = [
     { bound: "fundsAvailable", maxQuantityBase: fundsBound },

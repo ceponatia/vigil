@@ -29,10 +29,12 @@ const healthy = (): ProposalEvaluationParams => ({
   edge: {
     expectedGrossEdgePerUnitQuote: dec("5"),
     costs: {
-      proportionalFeeRate: dec("0.001"),
-      spreadCostPerUnitQuote: dec("0.5"),
-      slippageAllowancePerUnitQuote: dec("0.2"),
-      fixedCostsQuote: dec("2"),
+      embedded: { spreadCostPerUnitQuote: dec("0.5") },
+      separatelyCharged: {
+        proportionalFeeRate: dec("0.001"),
+        slippageAllowancePerUnitQuote: dec("0.2"),
+        fixedCostsQuote: dec("2"),
+      },
     },
   },
 });
@@ -215,6 +217,54 @@ describe("evaluateProposal — fail-closed ordering", () => {
   });
 });
 
+// PR #41 review, finding 4. evaluateProposal is the seam #35 calls, so if
+// the composed path drops the breakdown, nothing downstream can say which
+// bound bound the size on the one refusal where that is most informative.
+describe("evaluateProposal — refusals keep the sizing breakdown they computed", () => {
+  it("carries the four evaluated bounds and the precision metadata on a MINIMUM_NOTIONAL refusal, so the journal need not re-run sizeTrade to recover them", () => {
+    const params = healthy();
+    const result = evaluateProposal({
+      ...params,
+      capital: { ...params.capital, executableLiquidityBase: dec("0.01") },
+    });
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.stage).toBe("sizing");
+      expect(result.refusal.reason.code).toBe("MINIMUM_NOTIONAL");
+      expect(result.sizing).not.toBeNull();
+      expect(result.sizing?.bindingBounds).toEqual(["executableLiquidity"]);
+      expect(result.sizing?.quantityBase).toBe("0.01");
+      expect(result.sizing?.bounds).toHaveLength(4);
+    }
+  });
+
+  it("carries it on a net-edge refusal too — edge is judged at a real size, so that size is worth keeping", () => {
+    const params = healthy();
+    const result = evaluateProposal({
+      ...params,
+      edge: { ...params.edge, expectedGrossEdgePerUnitQuote: dec("1") },
+    });
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.stage).toBe("netEdge");
+      expect(result.sizing?.quantityBase).toBe("8");
+      expect(result.sizing?.bindingBounds).toEqual(["exposureLimit"]);
+    }
+  });
+
+  it("reports null for a gate that refused before sizing ever ran, rather than an empty breakdown that would read as 'no bounds applied'", () => {
+    const result = evaluateProposal({
+      ...healthy(),
+      account: { reconciledThrough: null, unresolvedDiscrepancyCount: 0 },
+    });
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.stage).toBe("reconciliation");
+      expect(result.sizing).toBeNull();
+    }
+  });
+});
+
 describe("evaluateProposal — malformed parameters", () => {
   it("refuses with a null stage when the parameters themselves do not parse, distinguishing 'could not ask' from 'asked and declined'", () => {
     const result = evaluateProposal({ nothing: "useful" } as unknown as ProposalEvaluationParams);
@@ -222,6 +272,20 @@ describe("evaluateProposal — malformed parameters", () => {
     if (result.outcome === "refused") {
       expect(result.stage).toBeNull();
       expect(result.refusal.reason.source).toBe("input");
+    }
+  });
+
+  it("refuses an over-precise price at parameter parse time, not later at the sizing stage — PR #41 review, finding 2: every money field at this boundary is scale-bounded, so the refusal names the parameters rather than a gate that ran on them", () => {
+    const params = healthy();
+    const result = evaluateProposal({
+      ...params,
+      quote: { ...params.quote, executablePrice: `0.${"0".repeat(200)}1` as unknown as typeof params.quote.executablePrice },
+    });
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.stage).toBeNull();
+      expect(result.refusal.reason.source).toBe("input");
+      expect(result.refusal.reason.code).toBe("MALFORMED_INPUT");
     }
   });
 

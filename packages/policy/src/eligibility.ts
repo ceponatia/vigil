@@ -1,8 +1,9 @@
 import { z } from "zod";
-import { ageMs, decimalStringSchema, isoUtcTimestampSchema } from "@vigil/contracts";
+import { ageMs, isoUtcTimestampSchema } from "@vigil/contracts";
 import type { DecimalString } from "@vigil/contracts";
 
-import { policyConfigSchema, refusalForParseError } from "./config";
+import { policyConfigSchema, refusalForParseError, scaleBoundedDecimalSchema } from "./config";
+import { negativeCostComponent, netEdgeCostsSchema } from "./costs";
 import { inputRefusal, policyRefusal, type PolicyRefusal } from "./diagnostics";
 import { addDecimal, compareDecimal, isDecomposable, isNegative, isPositive, multiplyDecimal, subtractDecimal } from "./scaled-decimal";
 
@@ -241,8 +242,8 @@ export function checkQuoteFreshness(params: CheckQuoteFreshnessParams): QuoteFre
 /** The approved entry zone a proposal already carries. This package never derives one. */
 export const entryZoneSchema = z
   .strictObject({
-    min: decimalStringSchema,
-    max: decimalStringSchema,
+    min: scaleBoundedDecimalSchema,
+    max: scaleBoundedDecimalSchema,
   })
   .refine(
     (zone) =>
@@ -261,7 +262,7 @@ export const entryZoneSchema = z
 export type EntryZone = z.infer<typeof entryZoneSchema>;
 
 const entryZoneParamsSchema = z.strictObject({
-  executablePrice: decimalStringSchema,
+  executablePrice: scaleBoundedDecimalSchema,
   entryZone: entryZoneSchema,
 });
 
@@ -328,9 +329,9 @@ export const exposureCapSchema = z.strictObject({
   /** Operator-facing name for the cap, e.g. the asset id or sector name. Never a credential or address. */
   label: z.string().min(1),
   /** Exposure already committed against this cap, including reserved-but-unfilled capital. */
-  currentExposureQuote: decimalStringSchema,
+  currentExposureQuote: scaleBoundedDecimalSchema,
   /** The cap itself, as an absolute quote-currency amount the caller derived from the owner's approved policy. */
-  capQuote: decimalStringSchema,
+  capQuote: scaleBoundedDecimalSchema,
 });
 
 export type ExposureCap = z.infer<typeof exposureCapSchema>;
@@ -430,39 +431,13 @@ export function checkExposure(params: CheckExposureParams): ExposureResult {
 // INSUFFICIENT_NET_EDGE
 // ---------------------------------------------------------------------------
 
-/**
- * Every cost that stands between gross expected advantage and net edge,
- * modeled explicitly. `docs/policy.md` defines `INSUFFICIENT_NET_EDGE` as
- * "expected advantage after all fees, spread, and costs", and a caller
- * handing in one pre-netted number is exactly how "all" quietly becomes
- * "the ones the caller remembered". Naming each component makes an omitted
- * cost a missing required field rather than an invisible optimism.
- *
- * Two shapes, because real costs come in both: a rate applied to notional
- * (venue taker fees), and an amount per unit of base asset (half-spread, a
- * slippage allowance), plus a flat amount per trade (gas, a transfer fee)
- * that does not scale at all. A model with only per-unit costs would make
- * gas vanish as size shrinks.
- */
-export const netEdgeCostsSchema = z.strictObject({
-  /** Venue fee as a fraction of notional, e.g. `"0.0026"` for 26 bps. */
-  proportionalFeeRate: decimalStringSchema,
-  /** Cost of crossing the spread, per unit of base asset. */
-  spreadCostPerUnitQuote: decimalStringSchema,
-  /** Budgeted slippage, per unit of base asset. */
-  slippageAllowancePerUnitQuote: decimalStringSchema,
-  /** Flat per-trade costs — gas, transfer, fixed fees — that do not scale with size. */
-  fixedCostsQuote: decimalStringSchema,
-});
-
-export type NetEdgeCosts = z.infer<typeof netEdgeCostsSchema>;
 
 const netEdgeParamsSchema = z.strictObject({
   /** The sized quantity these costs are evaluated at. Costs are size-dependent, so net edge is too. */
-  quantity: decimalStringSchema,
-  executablePrice: decimalStringSchema,
-  /** Expected favorable move per unit of base asset, before any cost. May be negative. */
-  expectedGrossEdgePerUnitQuote: decimalStringSchema,
+  quantity: scaleBoundedDecimalSchema,
+  executablePrice: scaleBoundedDecimalSchema,
+  /** Expected favorable move per unit of base asset, before ANY cost, embedded or separately charged. */
+  expectedGrossEdgePerUnitQuote: scaleBoundedDecimalSchema,
   costs: netEdgeCostsSchema,
   config: policyConfigSchema,
 });
@@ -526,14 +501,7 @@ export function checkNetEdge(params: CheckNetEdgeParams): NetEdgeResult {
     };
   }
 
-  const negativeCost = (
-    [
-      ["proportionalFeeRate", costs.proportionalFeeRate],
-      ["spreadCostPerUnitQuote", costs.spreadCostPerUnitQuote],
-      ["slippageAllowancePerUnitQuote", costs.slippageAllowancePerUnitQuote],
-      ["fixedCostsQuote", costs.fixedCostsQuote],
-    ] as const
-  ).find(([, value]) => isNegative(value));
+  const negativeCost = negativeCostComponent(costs);
 
   if (negativeCost !== undefined) {
     return {
@@ -549,11 +517,16 @@ export function checkNetEdge(params: CheckNetEdgeParams): NetEdgeResult {
 
   const notionalQuote = multiplyDecimal(quantity, executablePrice);
   const grossEdgeQuote = multiplyDecimal(expectedGrossEdgePerUnitQuote, quantity);
-  const proportionalFeeQuote = multiplyDecimal(notionalQuote, costs.proportionalFeeRate);
-  const spreadCostQuote = multiplyDecimal(costs.spreadCostPerUnitQuote, quantity);
-  const slippageAllowanceQuote = multiplyDecimal(costs.slippageAllowancePerUnitQuote, quantity);
+  const proportionalFeeQuote = multiplyDecimal(notionalQuote, costs.separatelyCharged.proportionalFeeRate);
+  const spreadCostQuote = multiplyDecimal(costs.embedded.spreadCostPerUnitQuote, quantity);
+  const slippageAllowanceQuote = multiplyDecimal(costs.separatelyCharged.slippageAllowancePerUnitQuote, quantity);
+  const fixedCostsQuote = costs.separatelyCharged.fixedCostsQuote;
 
-  const totalCostQuote = [spreadCostQuote, slippageAllowanceQuote, costs.fixedCostsQuote].reduce(
+  // Net edge subtracts BOTH groups, unlike the sizing bounds, which subtract
+  // only `separatelyCharged`. `expectedGrossEdgePerUnitQuote` is the move
+  // before any cost at all, so an embedded cost reduces edge exactly once
+  // here while correctly staying out of the capital bound (see `costs.ts`).
+  const totalCostQuote = [spreadCostQuote, slippageAllowanceQuote, fixedCostsQuote].reduce(
     (total, component) => addDecimal(total, component),
     proportionalFeeQuote,
   );
@@ -566,7 +539,7 @@ export function checkNetEdge(params: CheckNetEdgeParams): NetEdgeResult {
     proportionalFeeQuote,
     spreadCostQuote,
     slippageAllowanceQuote,
-    fixedCostsQuote: costs.fixedCostsQuote,
+    fixedCostsQuote,
     totalCostQuote,
     netEdgeQuote,
     minimumNetEdgeQuote: config.minimumNetEdgeQuote,
