@@ -29,6 +29,13 @@ Generated from `packages/db/src/schema/`:
   dropped (a partial unique index holds it) and the fill rule did not, which
   would have left the one money-safety invariant in this family with nothing
   behind it.
+- `0013_position_plan_terms` creates `position_plans`, the terms half of the
+  `decisions` family's staged plan: the entry zone and the thesis exit price
+  the pre-dispatch economic gate re-measures against, under the id
+  `approved_intents.position_plan_id` already names, beside the formation
+  midpoint that makes the exit price readable later. One new table and
+  nothing else — no existing table is altered and no row is reinterpreted.
+  It carries no foreign key from `approved_intents`; see below.
 - `0009_approved_intents_economics_attempts_and_outbox` creates the rest of
   the `intents` family — `approved_intents` with the executable-economics
   evidence that passed policy, `intent_cost_components`,
@@ -79,6 +86,16 @@ cannot derive a trigger from the schema:
   second dispatchable attempt on an intent whose capital had just been
   spent. The case is reproduced in
   `tests/fault-injection/concurrent-intent-consumption.int.test.ts`.
+- `0014_position_plan_append_only_guard` rejects every `UPDATE` and `DELETE`
+  against stored plan terms. `approved_intents` is already sealed for the
+  reason this table now is: an authorization that can be edited afterwards is
+  not an authorization, and leaving the terms mutable would move that hole
+  one table over — nobody rewrites the intent, they rewrite the entry zone it
+  is revalidated against, and the gate goes on reporting success while
+  judging a band nobody approved. Its own trigger function rather than
+  `vigil_candidate_append_only()`, whose message sends the reader to
+  `candidate_evaluations`; a position plan has no evaluations, and its
+  correction path is a new plan under a new id.
 - `0011_intent_lifecycle_guard_gaps` replaces the two execution-attempt
   trigger functions in place and seals the cost evidence. It refuses an
   exchange attempt on an intent that routes over a chain, since the Exchange
@@ -93,6 +110,15 @@ cannot derive a trigger from the schema:
   `intent_cost_components` against inserts from any transaction but the one
   that wrote the intent, using the `xmin` comparison
   `0005_journal_entry_sealed_guard` established.
+
+`approved_intents.position_plan_id` deliberately carries **no** foreign key
+into `position_plans` in this pair. It is the right shape — it would make
+"an authorization cannot name a plan nobody recorded" a database fact rather
+than an application one — but adding it would refuse intents that
+`tests/fault-injection/` records with no plan at all, and that suite lies
+outside the slice these migrations came from. Until it lands, the execution
+runtime fails closed instead: a dispatch whose plan is missing is refused
+with `UNKNOWN_POSITION_PLAN` before any capital is held.
 
 The `0009` and `0010` pair is the family's ordering rule in miniature: the
 composite foreign key from the outbox to `(intent_id, attempt)` makes the

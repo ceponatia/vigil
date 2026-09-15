@@ -123,15 +123,21 @@ export type ExecutableIntent = {
 /**
  * The thesis figure gross edge is measured against.
  *
- * It is an input rather than a field read back off the intent because the
- * stored record cannot supply it: `approved_intents` keeps
- * `expected_gross_base` — the total edge at the approval's own midpoint —
- * and neither the exit target nor that midpoint, so the per-unit figure
- * cannot be recovered and re-measured against a new one. The durable home is
- * the position plan the intent already names through `position_plan_id`,
- * which has no record family yet. Until it does, the caller supplies the
- * same value it supplied at approval, and a caller that supplies a different
- * one is changing the thesis rather than revalidating it.
+ * It is an input here because this module is pure: it reads no database and
+ * no clock. The value is durable all the same — `position_plans` stores it
+ * as `thesis_exit_price`, under the id the intent names through
+ * `position_plan_id`, and `dispatch.ts` reads it back with
+ * `loadPositionPlan` before calling this function. There is no field on
+ * `DispatchRequest` for it, so a caller cannot supply a different one, and a
+ * process that restarted since the approval reaches exactly the same figure
+ * as the process that approved it.
+ *
+ * What is stored is the **exit price**, never the per-unit edge the approval
+ * computed from it. `approved_intents.expected_gross_base` is that edge at
+ * the approval's own midpoint, and reading it back here instead would clear
+ * this intent's hurdle forever however far the market had since moved. The
+ * exit target is fixed by the thesis; the midpoint is not; measuring one
+ * against a fresh reading of the other is what makes a decayed edge fail.
  */
 export type ThesisTarget = {
   /**

@@ -19,7 +19,8 @@ import type {
 import { buildEntry, counterAccount, holdingsAccount } from "@vigil/ledger";
 import type { EntryKind, HoldingsState, JournalEntry, JournalLine } from "@vigil/ledger";
 
-import { attemptStateFor, type ExecutionRuntime, type Instrument, sideFor } from "./dispatch";
+import { attemptStateFor, type ExecutionRuntime, sideFor } from "./dispatch";
+import type { Instrument } from "./position-plan";
 import { executionRefusal, fromAdapterRefusal, type ExecutionRefusal } from "./diagnostics";
 import { unitsAt } from "./venue-economics";
 

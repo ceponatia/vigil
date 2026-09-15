@@ -8,6 +8,7 @@ import {
   candidateOutcomeEnum,
   candidates,
   candidateTranches,
+  positionPlans,
 } from "../schema/decisions";
 import { parseIsoInstant } from "./instants";
 import type { StoreProvenance } from "./journal-store";
@@ -73,6 +74,15 @@ export const DECISION_STORE_DIAGNOSTIC_CODES = [
    * and a code that said so would be evidence that lies.
    */
   "INVALID_PLAN",
+  /**
+   * A position plan id is already stored under different terms. Refused
+   * rather than reconciled: the entry zone and the exit price are what a
+   * later dispatch re-measures the economics against, so an intent approved
+   * under terms the stored plan does not carry would be revalidated against
+   * something other than what approved it — and whichever of the two won
+   * would be silent.
+   */
+  "PLAN_TERMS_CONFLICT",
   /**
    * The id is already stored under a *different* idempotency key, so this is
    * not the same delivery arriving twice — it is a second record claiming an
@@ -186,6 +196,49 @@ export type RecordEvaluationResult =
   | { readonly outcome: "recorded"; readonly evaluationId: string }
   /** This idempotency key is already stored; nothing new was written. */
   | { readonly outcome: "duplicate"; readonly evaluationId: string }
+  | { readonly outcome: "refused"; readonly code: DecisionStoreDiagnosticCode; readonly detail: string };
+
+/**
+ * The durable terms of a staged position plan, as they are written and read
+ * back (`position_plans`).
+ *
+ * Prices are decimal text, like every other amount in this family: nothing
+ * in this package adds them up, and text is what round-trips a price
+ * unchanged. The execution runtime parses them against
+ * `@vigil/contracts`' decimal schema at the point it uses them.
+ */
+export type StorePositionPlan = {
+  /** The id `approved_intents.position_plan_id` names. */
+  readonly positionPlanId: string;
+  readonly correlationId: string;
+  /** Canonical instrument id text: `baseAssetId/quoteAssetId`. */
+  readonly instrumentId: string;
+  readonly entryZoneMin: string;
+  readonly entryZoneMax: string;
+  /** The price the thesis expects the position to be worth. */
+  readonly thesisExitPrice: string;
+  /**
+   * The midpoint the terms above were set against — evidence that makes the
+   * exit price interpretable later, never an input to a dispatch-time
+   * calculation. Recorded by the write that first stores the plan: a later
+   * step of the same plan is approved at a different midpoint, which is that
+   * step's own figure and not a re-formation of these terms.
+   */
+  readonly formationReferenceMid: string;
+  /** ISO-8601 UTC; when the terms were set. */
+  readonly formedAt: string;
+  /** ISO-8601 UTC; must not precede `formedAt`. */
+  readonly recordedAt: string;
+  readonly provenance: StoreProvenance;
+};
+
+/** What a stored plan reads back as. Every field is written, so nothing is added. */
+export type StoredPositionPlan = StorePositionPlan;
+
+export type RecordPositionPlanResult =
+  | { readonly outcome: "recorded"; readonly positionPlanId: string }
+  /** This plan is already stored under these same terms; nothing new was written. */
+  | { readonly outcome: "duplicate"; readonly positionPlanId: string }
   | { readonly outcome: "refused"; readonly code: DecisionStoreDiagnosticCode; readonly detail: string };
 
 type DecisionRefusal = {
@@ -455,6 +508,224 @@ export async function recordCandidate(db: VigilDatabase, candidate: StoreCandida
 
     return { outcome: "recorded", candidateId: candidate.candidateId };
   });
+}
+
+/**
+ * The fields that make two writes the same plan.
+ *
+ * The terms only. A plan's identity is what a later gate will judge against
+ * — the instrument the prices are denominated in, the band an entry may be
+ * taken in, and the level the thesis is aiming at — so those four are
+ * compared and a difference in any of them is refused.
+ *
+ * `formationReferenceMid`, the timestamps, the correlation id and the
+ * provenance are deliberately not compared. They describe the write that
+ * first recorded the plan rather than the terms it recorded, and a second
+ * step of the same plan legitimately carries a different midpoint and a
+ * different instant. Refusing on those would refuse the ordinary case; the
+ * plan's formation figures are simply those of the write that formed it.
+ */
+function planTermsOf(plan: StorePositionPlan): ReadonlyArray<readonly [string, string]> {
+  return [
+    ["instrumentId", plan.instrumentId],
+    ["entryZoneMin", plan.entryZoneMin],
+    ["entryZoneMax", plan.entryZoneMax],
+    ["thesisExitPrice", plan.thesisExitPrice],
+  ];
+}
+
+/** Reject, before any write, everything the table would otherwise reject obscurely. */
+function preflightPositionPlan(
+  plan: StorePositionPlan,
+): { readonly outcome: "ok"; readonly formedAt: Date; readonly recordedAt: Date } | DecisionRefusal {
+  const blank = blankFields([
+    ["positionPlanId", plan.positionPlanId],
+    ["correlationId", plan.correlationId],
+  ]);
+  if (blank !== "") {
+    return refuse("EMPTY_IDENTITY", `a position plan names itself and its correlation thread; ${blank} is blank`);
+  }
+
+  const formedAt = parseIsoInstant(plan.formedAt);
+  const recordedAt = parseIsoInstant(plan.recordedAt);
+  if (formedAt === null || recordedAt === null) {
+    const named = namesOf([
+      ["formedAt", formedAt !== null],
+      ["recordedAt", recordedAt !== null],
+    ]);
+    return refuse(
+      "INVALID_TIMESTAMP",
+      `position plan ${plan.positionPlanId} carries ${named} that is not an ISO-8601 UTC instant on a real calendar day`,
+    );
+  }
+  if (recordedAt.getTime() < formedAt.getTime()) {
+    return refuse(
+      "INVALID_TIMESTAMP",
+      `position plan ${plan.positionPlanId} was recorded at ${plan.recordedAt}, before the ${plan.formedAt} its terms were set at`,
+    );
+  }
+
+  if (!isCanonicalInstrumentId(plan.instrumentId)) {
+    return refuse(
+      "INVALID_INSTRUMENT",
+      `position plan ${plan.positionPlanId} names instrument ${plan.instrumentId}, which is not two canonical asset ids joined by "/"`,
+    );
+  }
+
+  const amounts: ReadonlyArray<readonly [string, string]> = [
+    ["entryZoneMin", plan.entryZoneMin],
+    ["entryZoneMax", plan.entryZoneMax],
+    ["thesisExitPrice", plan.thesisExitPrice],
+    ["formationReferenceMid", plan.formationReferenceMid],
+  ];
+  const invalid = amounts.find(([, value]) => !isNonNegativeDecimal(value));
+  if (invalid !== undefined) {
+    return refuse(
+      "INVALID_DECIMAL",
+      `position plan ${plan.positionPlanId} carries ${invalid[0]} = ${invalid[1]}, which is not a non-negative decimal string`,
+    );
+  }
+
+  if (plan.provenance.policyVersion.trim() === "" || plan.provenance.strategyVersion.trim() === "") {
+    return refuse(
+      "MISSING_PROVENANCE",
+      `position plan ${plan.positionPlanId} does not name the policy and strategy versions that produced it`,
+    );
+  }
+
+  return { outcome: "ok", formedAt, recordedAt };
+}
+
+/**
+ * Record the terms a staged plan's steps are authorized and revalidated
+ * against, once, under the id an approved intent names.
+ *
+ * Record-once without a separate idempotency key: `position_plan_id` IS the
+ * plan's identity, and a second key that always equalled it would be a
+ * unique index guarding nothing. What a redelivery has to answer instead is
+ * whether the terms are the same ones — so the stored row is compared field
+ * by field, and a plan id arriving under different terms comes back as
+ * `PLAN_TERMS_CONFLICT` rather than being quietly accepted under whichever
+ * of the two the database happens to hold.
+ *
+ * That comparison cannot be a constraint. A check constraint sees one row,
+ * and the question here is about the row already there; the
+ * `position_plan_append_only_guard` trigger is the durable half — it makes
+ * the stored terms unrewritable by any writer, including this one — and this
+ * function is what turns an attempt to rewrite them into a reason code
+ * instead of a driver error.
+ */
+export async function recordPositionPlan(
+  db: VigilDatabase,
+  plan: StorePositionPlan,
+): Promise<RecordPositionPlanResult> {
+  const checked = preflightPositionPlan(plan);
+  if (checked.outcome === "refused") {
+    return checked;
+  }
+
+  const inserted = await db
+    .insert(positionPlans)
+    .values({
+      positionPlanId: plan.positionPlanId,
+      correlationId: plan.correlationId,
+      instrumentId: plan.instrumentId,
+      entryZoneMin: plan.entryZoneMin,
+      entryZoneMax: plan.entryZoneMax,
+      thesisExitPrice: plan.thesisExitPrice,
+      formationReferenceMid: plan.formationReferenceMid,
+      formedAt: checked.formedAt,
+      recordedAt: checked.recordedAt,
+      policyVersion: plan.provenance.policyVersion,
+      strategyVersion: plan.provenance.strategyVersion,
+      modelVersion: plan.provenance.modelVersion,
+      portfolioSnapshotVersion: plan.provenance.portfolioSnapshotVersion,
+      marketSnapshotVersion: plan.provenance.marketSnapshotVersion,
+    })
+    .onConflictDoNothing({ target: positionPlans.positionPlanId })
+    .returning({ positionPlanId: positionPlans.positionPlanId });
+
+  if (inserted.length > 0) {
+    return { outcome: "recorded", positionPlanId: plan.positionPlanId };
+  }
+
+  // The insert conflicted, so the id is taken. Read what it is taken by:
+  // under READ COMMITTED this statement takes a fresh snapshot, so a plan a
+  // concurrent transaction was still committing when the insert waited on it
+  // is visible here.
+  const stored = await loadPositionPlan(db, plan.positionPlanId);
+  if (stored === null) {
+    return refuse(
+      "DUPLICATE_RECORD",
+      `position plan id ${plan.positionPlanId} is taken by a row that cannot be read back; nothing was written`,
+    );
+  }
+
+  const storedTerms = planTermsOf(stored);
+  // Indexed against the same fixed field order both sides are built in, and
+  // mapped BEFORE filtering: filtering first would renumber the survivors and
+  // pair each difference with another field's stored value.
+  const differing = planTermsOf(plan)
+    .map(([name, value], index): string | null => {
+      const held = storedTerms[index];
+      return held !== undefined && held[1] === value
+        ? null
+        : `${name} ${value} against the stored ${held?.[1] ?? "nothing"}`;
+    })
+    .filter((message): message is string => message !== null);
+
+  if (differing.length > 0) {
+    return refuse(
+      "PLAN_TERMS_CONFLICT",
+      `position plan ${plan.positionPlanId} is already stored under different terms (${differing.join("; ")}); a plan's terms are what a later dispatch is revalidated against and are never rewritten`,
+    );
+  }
+
+  return { outcome: "duplicate", positionPlanId: stored.positionPlanId };
+}
+
+/**
+ * The terms one approved intent's dispatch must be revalidated against, read
+ * back from durable history; `null` when no plan is stored under that id.
+ *
+ * `null` is a real answer rather than an error: `approved_intents` carries no
+ * foreign key into this table yet, so an authorization can name a plan
+ * nobody recorded, and the execution runtime refuses such a dispatch rather
+ * than inventing terms for it.
+ */
+export async function loadPositionPlan(
+  db: VigilDatabase,
+  positionPlanId: string,
+): Promise<StoredPositionPlan | null> {
+  const rows = await db
+    .select()
+    .from(positionPlans)
+    .where(eq(positionPlans.positionPlanId, positionPlanId))
+    .limit(1);
+
+  const row = rows[0];
+  if (row === undefined) {
+    return null;
+  }
+
+  return {
+    positionPlanId: row.positionPlanId,
+    correlationId: row.correlationId,
+    instrumentId: row.instrumentId,
+    entryZoneMin: row.entryZoneMin,
+    entryZoneMax: row.entryZoneMax,
+    thesisExitPrice: row.thesisExitPrice,
+    formationReferenceMid: row.formationReferenceMid,
+    formedAt: row.formedAt.toISOString(),
+    recordedAt: row.recordedAt.toISOString(),
+    provenance: {
+      policyVersion: row.policyVersion,
+      strategyVersion: row.strategyVersion,
+      modelVersion: row.modelVersion,
+      portfolioSnapshotVersion: row.portfolioSnapshotVersion,
+      marketSnapshotVersion: row.marketSnapshotVersion,
+    },
+  };
 }
 
 /**

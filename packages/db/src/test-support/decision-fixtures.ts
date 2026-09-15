@@ -1,4 +1,4 @@
-import type { StoreCandidate, StoreCandidateEvaluation } from "../store/decision-store";
+import type { StoreCandidate, StoreCandidateEvaluation, StorePositionPlan } from "../store/decision-store";
 import type { StoreHeartbeat } from "../store/heartbeat-store";
 import { TEST_ASSET, TEST_OTHER_ASSET, TEST_PROVENANCE } from "./journal-fixtures";
 
@@ -54,6 +54,33 @@ export function storeCandidate(candidateId: string, overrides: Partial<StoreCand
       { index: 0, quantity: "1.5", triggerPrice: null },
       { index: 1, quantity: "2.5", triggerPrice: "99.00" },
     ],
+    ...overrides,
+  };
+}
+
+/**
+ * The durable terms of a staged plan.
+ *
+ * The entry zone brackets `storeCandidate`'s own, and the exit price sits
+ * above both, so a case that swapped the zone for the target — or read one
+ * price column into another — produces a plan that no longer describes an
+ * entry below a target, rather than one that still looks plausible.
+ */
+export function storePositionPlan(
+  positionPlanId: string,
+  overrides: Partial<StorePositionPlan> = {},
+): StorePositionPlan {
+  return {
+    positionPlanId,
+    correlationId: `corr-${positionPlanId}`,
+    instrumentId: TEST_INSTRUMENT,
+    entryZoneMin: "100.00",
+    entryZoneMax: "104.00",
+    thesisExitPrice: "118.00",
+    formationReferenceMid: "101.62",
+    formedAt: "2026-01-02T03:04:06.000Z",
+    recordedAt: "2026-01-02T03:04:06.250Z",
+    provenance: TEST_PROVENANCE,
     ...overrides,
   };
 }

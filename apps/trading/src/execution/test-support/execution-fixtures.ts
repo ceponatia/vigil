@@ -3,14 +3,15 @@ import type { AssetId, DecimalString, IsoUtcTimestamp } from "@vigil/contracts";
 import { createPaperExchange, PAPER_ADAPTER_CAPABILITY_VERSION } from "@vigil/adapter-paper";
 import type { PaperExchange, PaperExchangeConfig } from "@vigil/adapter-paper";
 import { createDbClient, postJournalEntry, recordCandidate } from "@vigil/db";
-import type { StoreCandidate, StoreEntry, VigilDatabase } from "@vigil/db";
+import type { StoreCandidate, StoredPositionPlan, StoreEntry, VigilDatabase } from "@vigil/db";
 import { quoteSnapshotSchema } from "@vigil/market";
 import type { QuoteSnapshot } from "@vigil/market";
 import { parsePolicyConfig } from "@vigil/policy";
 import type { ExposureCap, PolicyConfig, ReconciliationState } from "@vigil/policy";
 
 import type { CapitalState, TradeProposal } from "../authorize";
-import type { DispatchIdentities, ExecutionRuntime, Instrument, PositionPlanTerms } from "../dispatch";
+import type { DispatchIdentities, ExecutionRuntime } from "../dispatch";
+import type { Instrument, PositionPlanTerms } from "../position-plan";
 import type { PortfolioState } from "../revalidate";
 import type { SettlementIdentities } from "../settle";
 import { parseVenueExecutionConfig } from "../venue";
@@ -190,11 +191,53 @@ export function capital(overrides: Partial<CapitalState> = {}): CapitalState {
   };
 }
 
-/** The entry zone and thesis the intent record does not carry. */
+/**
+ * The plan terms a proposal is approved under.
+ *
+ * Supplied to `authorizeProposal` and to nothing else: the approval writes
+ * them to `position_plans`, and every dispatch reads them back from there.
+ * No fixture hands them to `dispatchAttempt`, because `DispatchRequest` has
+ * no field for them — which is the property #54 exists to establish.
+ */
 export function planTerms(overrides: Partial<PositionPlanTerms> = {}): PositionPlanTerms {
   return {
     entryZone: { min: money("200.00"), max: money("300.00") },
     thesis: { expectedExitPriceQuote: money("260.00") },
+    ...overrides,
+  };
+}
+
+/**
+ * A stored plan row, as `loadPositionPlan` hands one back.
+ *
+ * Only the pure `planTermsFor` cases build one directly. Every integration
+ * case gets its plan the way the application does — written by
+ * `authorizeProposal` — so no suite can pass against a plan shape the
+ * approval path does not actually produce.
+ */
+export function storedPlan(
+  label: string,
+  instrument: Instrument,
+  overrides: Partial<StoredPositionPlan> = {},
+): StoredPositionPlan {
+  const plan = planTerms();
+  return {
+    positionPlanId: `plan-${label}`,
+    correlationId: `corr-${label}`,
+    instrumentId: `${instrument.baseAssetId}/${instrument.quoteAssetId}`,
+    entryZoneMin: plan.entryZone.min,
+    entryZoneMax: plan.entryZone.max,
+    thesisExitPrice: plan.thesis.expectedExitPriceQuote,
+    formationReferenceMid: "250.05",
+    formedAt: QUOTE_ACQUIRED_AT,
+    recordedAt: QUOTE_ACQUIRED_AT,
+    provenance: {
+      policyVersion: "policy-test-0",
+      strategyVersion: "strategy-test-0",
+      modelVersion: null,
+      portfolioSnapshotVersion: "portfolio-snapshot-test-0",
+      marketSnapshotVersion: "market-snapshot-test-0",
+    },
     ...overrides,
   };
 }

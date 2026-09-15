@@ -2,16 +2,19 @@ import { REASON_CODES } from "@vigil/contracts";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { candidateEvaluations, candidates, candidateTranches } from "../schema/decisions";
+import { candidateEvaluations, candidates, candidateTranches, positionPlans } from "../schema/decisions";
 import {
   loadCandidates,
+  loadPositionPlan,
   recordCandidate,
   recordCandidateEvaluation,
+  recordPositionPlan,
   type StoreCandidateEvaluation,
+  type StorePositionPlan,
 } from "./decision-store";
 import { postgresErrorCode, PG_RAISE_EXCEPTION } from "./pg-errors";
-import { storeCandidate, storeEvaluation } from "../test-support/decision-fixtures";
-import { openLedgerTestDb, TEST_PROVENANCE } from "../test-support/journal-fixtures";
+import { storeCandidate, storeEvaluation, storePositionPlan } from "../test-support/decision-fixtures";
+import { openLedgerTestDb, TEST_ASSET, TEST_OTHER_ASSET, TEST_PROVENANCE } from "../test-support/journal-fixtures";
 
 // The defects this file kills, all of them about what the opportunity
 // journal still says once the outcome is known:
@@ -23,7 +26,11 @@ import { openLedgerTestDb, TEST_PROVENANCE } from "../test-support/journal-fixtu
 //   * a reason code or a price that never passed a registry or a decimal
 //     check landing in a durable decision record;
 //   * a candidate edited after the price moved, turning a missed entry into
-//     a BUY the application never actually made.
+//     a BUY the application never actually made;
+//   * a staged plan's terms — the entry zone and the exit price a later
+//     dispatch re-measures the economics against — recorded under one set of
+//     values and read back as another, or rewritten after an authorization
+//     was granted against them.
 //
 // The real-infrastructure facts required are the NOT NULL foreign key from
 // an evaluation to its candidate, the unique idempotency keys, the check
@@ -177,6 +184,121 @@ describe("recordCandidate", () => {
       expect(unattributable.code).toBe("MISSING_PROVENANCE");
     }
     expect(await loadCandidates(db)).toEqual([]);
+  });
+});
+
+describe("recordPositionPlan", () => {
+  it("reads every stored term back as the exact value the approval supplied — catches a price reformatted on the way through or two price columns crossed, either of which would hand a later dispatch a band or a target nobody approved, with nothing about the row looking wrong", async () => {
+    const plan = storePositionPlan("plan-roundtrip");
+
+    expect((await recordPositionPlan(db, plan)).outcome).toBe("recorded");
+
+    // Whole-record equality rather than field spot-checks: a crossed pair of
+    // price columns passes any assertion that only looks at one of them.
+    expect(await loadPositionPlan(db, "plan-roundtrip")).toEqual(plan);
+  });
+
+  it("returns null for a plan id that was never recorded, rather than an empty or partial plan — catches a read that answers with default terms, which the dispatch gate would judge against instead of refusing", async () => {
+    expect(await loadPositionPlan(db, "plan-never-written")).toBeNull();
+  });
+
+  it("records once when the same plan is supplied twice and reports it as already stored — catches a second tranche of one plan being refused as a conflict, or writing a second row, when it carries exactly the terms already agreed", async () => {
+    const plan = storePositionPlan("plan-twice");
+    expect((await recordPositionPlan(db, plan)).outcome).toBe("recorded");
+
+    // The formation midpoint and the instants deliberately DIFFER: a later
+    // step of one plan is approved at a later moment and a moved market, and
+    // treating either as part of the plan's identity would refuse the
+    // ordinary case.
+    const secondStep = await recordPositionPlan(
+      db,
+      storePositionPlan("plan-twice", {
+        formationReferenceMid: "103.00",
+        formedAt: "2026-01-02T05:00:00.000Z",
+        recordedAt: "2026-01-02T05:00:00.250Z",
+      }),
+    );
+
+    expect(secondStep.outcome).toBe("duplicate");
+    expect((await db.select().from(positionPlans)).length).toBe(1);
+    // The first write's formation figure stands: a plan is formed once.
+    expect((await loadPositionPlan(db, "plan-twice"))?.formationReferenceMid).toBe("101.62");
+  });
+
+  // A plain loop rather than `it.each`: the cases pair a field name with a
+  // partial record, and inferring that as one heterogeneous tuple is how a
+  // case ends up typed loosely enough to pass an override this store never
+  // sees.
+  const conflictingTerms: ReadonlyArray<readonly [string, Partial<StorePositionPlan>]> = [
+    ["entryZoneMin", { entryZoneMin: "90.00" }],
+    ["entryZoneMax", { entryZoneMax: "120.00" }],
+    ["thesisExitPrice", { thesisExitPrice: "130.00" }],
+    ["instrumentId", { instrumentId: `${TEST_ASSET}/${TEST_OTHER_ASSET}` }],
+  ];
+
+  for (const [field, override] of conflictingTerms) {
+    it(`refuses a plan id already stored under a different ${field}, leaving the stored terms untouched — catches the silent half of the defect: an intent approved against one entry zone and revalidated at dispatch against another, where whichever of the two wins is invisible`, async () => {
+      const plan = storePositionPlan("plan-conflict");
+      expect((await recordPositionPlan(db, plan)).outcome).toBe("recorded");
+
+      const conflicting = await recordPositionPlan(db, storePositionPlan("plan-conflict", override));
+
+      expect(conflicting.outcome).toBe("refused");
+      if (conflicting.outcome === "refused") {
+        expect(conflicting.code).toBe("PLAN_TERMS_CONFLICT");
+        expect(conflicting.detail).toContain(field);
+      }
+      expect(await loadPositionPlan(db, "plan-conflict")).toEqual(plan);
+    });
+  }
+
+  it("refuses a plan whose prices are not non-negative decimal strings and writes nothing — catches a float artifact or a negative price becoming the band a dispatch is judged against", async () => {
+    const refused = await recordPositionPlan(db, storePositionPlan("plan-float", { thesisExitPrice: "1.18e2" }));
+
+    expect(refused.outcome).toBe("refused");
+    if (refused.outcome === "refused") {
+      expect(refused.code).toBe("INVALID_DECIMAL");
+    }
+    expect(await loadPositionPlan(db, "plan-float")).toBeNull();
+  });
+
+  it("refuses an instrument id that is not two canonical asset ids and writes nothing — catches a ticker pair reaching the record a restarted process reads its entry zone out of, where two assets that display the same symbol supply each other's prices", async () => {
+    const refused = await recordPositionPlan(db, storePositionPlan("plan-ticker", { instrumentId: "BTC/USD" }));
+
+    expect(refused.outcome).toBe("refused");
+    if (refused.outcome === "refused") {
+      expect(refused.code).toBe("INVALID_INSTRUMENT");
+    }
+    expect(await loadPositionPlan(db, "plan-ticker")).toBeNull();
+  });
+
+  it("refuses terms recorded before the instant they were set at and writes nothing — catches a scrambled timestamp family, which is what makes a point-in-time replay disagree with the decision it replays", async () => {
+    const refused = await recordPositionPlan(
+      db,
+      storePositionPlan("plan-clock", { recordedAt: "2026-01-02T03:04:05.000Z" }),
+    );
+
+    expect(refused.outcome).toBe("refused");
+    if (refused.outcome === "refused") {
+      expect(refused.code).toBe("INVALID_TIMESTAMP");
+    }
+    expect(await loadPositionPlan(db, "plan-clock")).toBeNull();
+  });
+
+  it("rejects an UPDATE and a DELETE against stored plan terms, leaving them as written — catches the authorization rewritten through a column rather than through a new intent: nobody edits the approved intent, they move the entry zone it is revalidated against, and the gate goes on reporting success while judging a band nobody approved", async () => {
+    const plan = storePositionPlan("plan-sealed");
+    expect((await recordPositionPlan(db, plan)).outcome).toBe("recorded");
+
+    const updated = await errorFrom(() =>
+      db.execute(sql`update ${positionPlans} set thesis_exit_price = '999.00' where position_plan_id = 'plan-sealed'`),
+    );
+    const deleted = await errorFrom(() =>
+      db.execute(sql`delete from ${positionPlans} where position_plan_id = 'plan-sealed'`),
+    );
+
+    expect(postgresErrorCode(updated)).toBe(PG_RAISE_EXCEPTION);
+    expect(postgresErrorCode(deleted)).toBe(PG_RAISE_EXCEPTION);
+    expect(await loadPositionPlan(db, "plan-sealed")).toEqual(plan);
   });
 });
 

@@ -2,7 +2,7 @@ import { assetIdSchema } from "@vigil/contracts";
 import { sql } from "drizzle-orm";
 
 import { createDbClient, type VigilDatabase } from "../client";
-import { candidateEvaluations, candidates, candidateTranches } from "../schema/decisions";
+import { candidateEvaluations, candidates, candidateTranches, positionPlans } from "../schema/decisions";
 import {
   approvedIntents,
   executionAttempts,
@@ -114,11 +114,12 @@ export type LedgerTestDb = {
    * the only reason a suite can reset a journal, or a candidate, that the
    * application itself may never delete from
    * (`drizzle/0001_journal_append_only_guard.sql`,
-   * `drizzle/0008_candidate_append_only_guard.sql`).
+   * `drizzle/0008_candidate_append_only_guard.sql`,
+   * `drizzle/0014_position_plan_append_only_guard.sql`).
    *
    * The intents tables are listed children-first — outbox, attempts, then
-   * approved intents — and ahead of `candidates`, which an intent may point
-   * at. `cascade` would cover the ordering anyway; naming it correctly is
+   * approved intents — and ahead of `candidates` and `position_plans`, both
+   * of which an intent names. `cascade` would cover the ordering anyway; naming it correctly is
    * what keeps the list readable as the dependency order it actually is.
    *
    * `asset_scales` goes with the ledger tables: it is referenced by three of
@@ -147,7 +148,7 @@ export function openLedgerTestDb(applicationName: string): LedgerTestDb {
     close: client.close,
     reset: async () => {
       await client.db.execute(
-        sql`truncate table ${candidateEvaluations}, ${candidateTranches}, ${intentDispatchOutbox}, ${executionAttempts}, ${intentCostComponents}, ${approvedIntents}, ${candidates}, ${heartbeats}, ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances}, ${assetScales} restart identity cascade`,
+        sql`truncate table ${candidateEvaluations}, ${candidateTranches}, ${intentDispatchOutbox}, ${executionAttempts}, ${intentCostComponents}, ${approvedIntents}, ${candidates}, ${positionPlans}, ${heartbeats}, ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances}, ${assetScales} restart identity cascade`,
       );
     },
   };

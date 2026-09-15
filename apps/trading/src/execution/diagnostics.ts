@@ -41,6 +41,28 @@ export const EXECUTION_DIAGNOSTIC_CODES = [
   /** The intent's action authorizes no execution — a decision to do nothing is never turned into an order. */
   "NON_EXECUTABLE_ACTION",
   /**
+   * The authorization names a position plan that is not in durable history,
+   * so nothing can say what entry zone it was granted within or what exit
+   * price its edge is measured against. Refused rather than dispatched on
+   * terms invented at the gate: a value made up here would clear a band
+   * nobody approved.
+   */
+  "UNKNOWN_POSITION_PLAN",
+  /**
+   * The plan is stored but cannot supply this dispatch's terms — it prices
+   * another instrument, or a price in it is not a decimal this build can
+   * read. Separate from `UNKNOWN_POSITION_PLAN` because the plan is not
+   * missing: something already written is wrong, and an operator is owed
+   * that distinction.
+   */
+  "POSITION_PLAN_UNUSABLE",
+  /**
+   * The approval names a plan already stored under different terms. The
+   * authorization is not written: an intent approved against one entry zone
+   * and revalidated against another is approved by nothing.
+   */
+  "POSITION_PLAN_TERMS_CONFLICT",
+  /**
    * An earlier attempt on this authorization is still unresolved, so no
    * further attempt may be opened. **Reconcile, then retry** — distinct from
    * `INTENT_ALREADY_CONSUMED`, whose answer is never to retry at all.

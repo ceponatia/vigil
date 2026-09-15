@@ -4,7 +4,8 @@ import { loadApprovedIntent, loadDispatch, loadExecutionAttempts, loadJournalEnt
 import type { PaperOrder, VenueBehavior } from "@vigil/adapter-paper";
 
 import { authorizeProposal } from "./authorize";
-import { clientOrderIdFor, dispatchAttempt, type ExecutionRuntime, type Instrument } from "./dispatch";
+import { clientOrderIdFor, dispatchAttempt, type ExecutionRuntime } from "./dispatch";
+import type { Instrument } from "./position-plan";
 import { loadUnresolvedDispatches } from "./recover";
 import { cancelAttempt, pollAttempt, reconcileAttempt } from "./settle";
 import { decimalAt } from "./venue-economics";
@@ -19,7 +20,6 @@ import {
   openExecutionTestDb,
   paperExchange,
   parsedQuote,
-  planTerms,
   policyConfig,
   portfolio,
   proposal,
@@ -100,7 +100,6 @@ async function dispatch(scene: Scenario, label: string): Promise<PaperOrder> {
     intentId: scene.intentId,
     attempt: 1,
     instrument: scene.instrument,
-    plan: planTerms(),
     quote: rawQuote(scene.instrument),
     now: NOW,
     portfolio: portfolio(),
@@ -139,7 +138,6 @@ describe("crash after exchange acceptance but before local acknowledgement", () 
       intentId: scene.intentId,
       attempt: 2,
       instrument: scene.instrument,
-      plan: planTerms(),
       quote: rawQuote(scene.instrument),
       now: NOW,
       portfolio: portfolio(),
@@ -219,7 +217,6 @@ describe("a venue that refuses what the gate had already cleared", () => {
       intentId: authorized.intentId,
       attempt: 1,
       instrument,
-      plan: planTerms(),
       quote: rawQuote(instrument),
       now: NOW,
       portfolio: portfolio(),
