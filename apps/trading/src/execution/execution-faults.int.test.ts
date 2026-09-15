@@ -147,7 +147,13 @@ describe("crash after exchange acceptance but before local acknowledgement", () 
     expect(retry.outcome).toBe("refused");
     if (retry.outcome === "refused") {
       expect(retry.refusal.reason.source).toBe("execution");
-      expect(retry.refusal.reason.code).toBe("PERSISTENCE_REFUSED");
+      // Specifically ATTEMPT_ALREADY_LIVE, not the generic PERSISTENCE_REFUSED:
+      // #44's cancellation-chase driver has to tell "reconcile first, then
+      // retry" apart from INTENT_ALREADY_CONSUMED ("never retry") and from an
+      // ordinary write failure ("retry later"), and those three want opposite
+      // responses. Flattening them into one code would make that undecidable
+      // without parsing a detail string.
+      expect(retry.refusal.reason.code).toBe("ATTEMPT_ALREADY_LIVE");
     }
     expect(await loadExecutionAttempts(db, scene.intentId)).toHaveLength(1);
 
