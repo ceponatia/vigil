@@ -40,6 +40,17 @@ const ZERO = decimalStringSchema.parse("0");
 
 export type OrderExecution = {
   readonly executionId: string;
+  /** The venue's own id for the order this filled. */
+  readonly venueOrderId: string;
+  /**
+   * The intent's idempotency key — the single authorization this fill
+   * consumed. Carried on the execution itself, not only on the order,
+   * because `VenueReconciliationReport.executions` flattens fills from every
+   * order together: an execution read out of that list has no parent record
+   * to inherit an identity from, and a fill that cannot be tied back to the
+   * approval that authorized it is not an auditable economic record.
+   */
+  readonly clientOrderId: string;
   /**
    * When the venue reported this execution. In this simulation that is the
    * instant the caller polled or reconciled and the venue handed the
@@ -51,6 +62,8 @@ export type OrderExecution = {
   readonly price: DecimalString;
   readonly notional: DecimalString;
   readonly fee: DecimalString;
+  /** The approval that authorized this fill, for the same reason `clientOrderId` is here. */
+  readonly provenance: OrderProvenance;
 };
 
 export type OrderTransitionRecord = {
@@ -219,6 +232,8 @@ export function proposeOrder(params: ProposeOrderParams): ProposeOrderResult {
         correlationId: intent.correlationId,
         policyVersion: intent.policyVersion,
         strategyVersion: intent.strategyVersion,
+        modelVersion: intent.modelVersion,
+        portfolioSnapshotVersion: intent.portfolioSnapshotVersion,
         marketSnapshotVersion: intent.marketSnapshotVersion,
         feeSnapshotVersion: intent.feeSnapshotVersion,
       },

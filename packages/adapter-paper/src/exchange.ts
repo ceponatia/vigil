@@ -11,7 +11,7 @@ import { cumulativeFeeUnits, cumulativeNotionalUnits, worstCaseEconomics } from 
 import type { VenuePricing } from "./execution-economics";
 import { ACKNOWLEDGE_AND_FILL } from "./faults";
 import type { ExecutionBehavior, ReconciliationCoverage, RestingBehavior, VenueBehavior } from "./faults";
-import type { OrderSide } from "./intent";
+import type { OrderProvenance, OrderSide } from "./intent";
 import { applyOrderTransition } from "./order";
 import type { OrderExecution, PaperOrder } from "./order";
 import {
@@ -233,6 +233,8 @@ type PendingExecution = {
 type VenueOrderRecord = {
   readonly venueOrderId: string;
   readonly clientOrderId: string;
+  /** Stamped at acceptance so every execution the venue produces carries it. */
+  readonly provenance: OrderProvenance;
   readonly side: OrderSide;
   readonly quantityUnits: bigint;
   readonly pricing: VenuePricing;
@@ -447,6 +449,9 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
     return {
       execution: {
         executionId: `${record.venueOrderId}-E${String(sequence).padStart(2, "0")}`,
+        venueOrderId: record.venueOrderId,
+        clientOrderId: record.clientOrderId,
+        provenance: record.provenance,
         reportedAt: at,
         quantity: renderUnits(quantityUnits, quantityScale),
         price: record.pricing.executionPrice,
@@ -825,6 +830,7 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
       const record: VenueOrderRecord = {
         venueOrderId: nextVenueOrderId(),
         clientOrderId: order.clientOrderId,
+        provenance: order.provenance,
         side: order.side,
         quantityUnits,
         pricing: priced,
@@ -1044,6 +1050,34 @@ export function createPaperExchange(config: PaperExchangeConfig): PaperExchange 
         refusal: adapterRefusal(
           "RECONCILIATION_NOT_APPLICABLE",
           `only an UNKNOWN or CANCEL_PENDING order is awaiting reconciliation; this one is ${order.state}`,
+        ),
+      };
+    }
+
+    // A report can be authentic and still useless. One taken BEFORE this
+    // order was dispatched is a genuine `readVenueState` result, and its
+    // authoritative absence of the order means only "not dispatched yet" —
+    // never "the venue did not accept it". Accepting one here would let a
+    // caller satisfy "reconciliation precedes resubmission" with a read that
+    // predates the dispatch entirely, lift the guard, and retry blind: the
+    // exact sequence the guard exists to stop. The read has to cover the
+    // dispatch it is being asked about.
+    if (order.submittedAt === null) {
+      return {
+        outcome: "REFUSED",
+        refusal: adapterRefusal(
+          "RECONCILIATION_CONTRADICTION",
+          `an order in ${order.state} carries no submission time, so no read can be shown to cover its dispatch`,
+        ),
+      };
+    }
+    const dispatchCoverageMs = ageMs(order.submittedAt, report.asOf);
+    if (Number.isNaN(dispatchCoverageMs) || dispatchCoverageMs < 0) {
+      return {
+        outcome: "REFUSED",
+        refusal: adapterRefusal(
+          "RECONCILIATION_READ_PREDATES_DISPATCH",
+          `the read was taken at ${report.asOf}, before this order was dispatched at ${order.submittedAt}; it cannot confirm anything about a dispatch that had not happened`,
         ),
       };
     }

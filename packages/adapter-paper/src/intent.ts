@@ -77,6 +77,13 @@ export const approvedOrderIntentSchema = z.object({
   adapterCapabilityVersion: z.string().min(1),
   policyVersion: z.string().min(1),
   strategyVersion: z.string().min(1),
+  /**
+   * Null when no LLM was involved, per `ApprovedEconomicIntent`. Nullable
+   * rather than optional: "no model produced this" is a fact the record
+   * states, not a field it omits.
+   */
+  modelVersion: z.string().min(1).nullable(),
+  portfolioSnapshotVersion: z.string().min(1),
   marketSnapshotVersion: z.string().min(1),
   feeSnapshotVersion: z.string().min(1),
 });
@@ -86,7 +93,11 @@ export type ApprovedOrderIntent = z.infer<typeof approvedOrderIntentSchema>;
 /**
  * The provenance an order and every record derived from it carries, so a
  * fill can be traced back to the exact approval that authorized it without
- * the caller having to keep the intent alongside.
+ * the caller having to keep the intent alongside. The full set of versions
+ * that produced the decision travels with it — policy, strategy, model, and
+ * both snapshots — because `AGENTS.md` requires every economic record to
+ * carry them, and an execution lifted out of its order (as the reconciliation
+ * read does) has no parent left to inherit them from.
  */
 export type OrderProvenance = {
   readonly intentId: string;
@@ -95,6 +106,9 @@ export type OrderProvenance = {
   readonly correlationId: string;
   readonly policyVersion: string;
   readonly strategyVersion: string;
+  /** Null when no LLM was involved. */
+  readonly modelVersion: string | null;
+  readonly portfolioSnapshotVersion: string;
   readonly marketSnapshotVersion: string;
   readonly feeSnapshotVersion: string;
 };

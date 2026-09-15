@@ -94,6 +94,15 @@ execution or it does not exist.
   `netCapitalConsumed` equals `grossAtReferenceMid + totalIncrementalCost` and
   a sell's `netProceeds` equals `grossAtReferenceMid - totalIncrementalCost`,
   exactly, so double-charging is detectable rather than plausible.
+- **A fill is traceable on its own.** Every execution carries its client order
+  id, the venue's order id, and the full provenance of the approval behind it —
+  the policy, strategy, model and snapshot versions. `readVenueState` flattens
+  executions from every order into one list, so a fill read out of it has no
+  parent record to inherit an identity from.
+- **A reconciliation read has to cover the dispatch it resolves.** A report
+  taken before an order was dispatched is authentic and still says nothing
+  about it: its absence from that read means "not dispatched yet", never "the
+  venue did not accept it".
 - **The quote has to be a quote for this order.** An instrument id is exactly
   `baseAssetId/quoteAssetId`, so the order's own asset pair derives the id its
   quote must carry. A fresh, well-formed quote for another instrument is

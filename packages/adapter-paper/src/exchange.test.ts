@@ -21,6 +21,7 @@ import type { OrderState } from "./order-state";
 import { settlementOf } from "./order";
 import type { OrderSettlement, PaperOrder } from "./order";
 import {
+  AT_RESERVED,
   AT_SUBMITTED,
   SELL_INTENT,
   TEST_BASE_ASSET_ID,
@@ -635,6 +636,29 @@ describe("the venue's own terminal events on a resting order", () => {
   });
 });
 
+describe("a fill stays traceable to the approval that authorized it", () => {
+  it("carries its own identity and provenance into the flattened reconciliation read", () => {
+    const exchange = exchangeWith();
+    const order = polled(
+      exchange.pollOrder({ order: submitted(submitDefault(exchange), "ACKNOWLEDGED"), now: afterAcceptance(0) }),
+    );
+    const report = exchange.readVenueState({ now: afterAcceptance(0) });
+
+    // `report.executions` flattens fills from every order together, so an
+    // execution read out of it has no parent record to inherit from. If the
+    // execution does not carry its own identity, a persisted or replayed fill
+    // cannot be tied back to the approval that authorized it at all.
+    expect(report.executions).toHaveLength(1);
+    const execution = report.executions[0];
+    expect(execution?.clientOrderId).toBe(CLIENT_ORDER_ID);
+    expect(execution?.venueOrderId).toBe(order.venueOrderId);
+    expect(execution?.provenance).toEqual(order.provenance);
+    expect(execution?.provenance.correlationId).toBe("corr-0001");
+    expect(execution?.provenance.intentId).toBe("intent-0001");
+    expect(execution?.provenance.modelVersion).toBeNull();
+  });
+});
+
 describe("the capability stamp", () => {
   it("declares PAPER, no live endpoint, no credential, and no signing", () => {
     const capability = exchangeWith().capability;
@@ -816,6 +840,27 @@ describe("an intent already dispatched is not dispatched again without reconcili
       }),
     );
     expect(retry.reason.code).toBe("TRANSACTION_UNRESOLVED");
+  });
+
+  it("refuses a read taken before the dispatch it is asked to resolve, and keeps the guard up", () => {
+    // The read is entirely genuine — it came from `readVenueState` and was
+    // not edited — and it is still worthless here, because it was taken
+    // before this order was ever dispatched. Its authoritative absence of the
+    // order means "not dispatched yet", never "the venue did not accept it".
+    // Accepting it would satisfy "reconciliation precedes resubmission" with
+    // a read that predates the dispatch and let the retry through blind.
+    const exchange = exchangeWith(neverAccepted);
+    const beforeDispatch = exchange.readVenueState({ now: AT_RESERVED });
+    const order = submitted(submitDefault(exchange), "UNKNOWN");
+
+    const refused = exchange.reconcileOrder({ order, report: beforeDispatch, now: afterAcceptance(1_000) });
+    expect(refused.outcome).toBe("REFUSED");
+    if (refused.outcome === "REFUSED") {
+      expect(refused.refusal.reason.code).toBe("RECONCILIATION_READ_PREDATES_DISPATCH");
+    }
+
+    // The guard is still up: the stale read lifted nothing.
+    expect(submitRefusal(submitDefault(exchange, {}, 2)).reason.code).toBe("TRANSACTION_UNRESOLVED");
   });
 
   it("lifts the guard once an authoritative read confirms the venue holds nothing", () => {

@@ -66,6 +66,8 @@ export const PAPER_ADAPTER_DIAGNOSTIC_CODES = [
   "RECONCILIATION_INCOMPLETE",
   /** The reconciliation read was not one this exchange issued, so it authorizes nothing. */
   "RECONCILIATION_REPORT_UNRECOGNIZED",
+  /** The reconciliation read was taken before the dispatch it is being asked to resolve. */
+  "RECONCILIATION_READ_PREDATES_DISPATCH",
   /** The venue's confirmed state cannot follow the order's current state. */
   "RECONCILIATION_CONTRADICTION",
   /** The exchange has no record of an order the caller believes is live there. */

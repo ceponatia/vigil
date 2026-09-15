@@ -24,6 +24,11 @@ function propose(overrides: Record<string, unknown> = {}): ProposeOrderResult {
   return proposeOrder({ intent: rawIntent(overrides), at: AT_PROPOSED });
 }
 
+/** A well-formed intent with one field removed entirely, rather than nulled. */
+function withoutField(field: string): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(rawIntent()).filter(([key]) => key !== field));
+}
+
 /**
  * The defect this file kills: an adapter that takes whatever it is handed.
  * A ticker instead of a chain-aware asset id, an action that authorized no
@@ -114,6 +119,21 @@ describe("the caller's own three steps are guarded like every other transition",
     }
   });
 
+  it("keeps the model and portfolio snapshot that authorized the order", () => {
+    // AGENTS.md: every economic record carries the policy, strategy, model
+    // and snapshot versions that produced it. Stripping two of them at the
+    // schema meant every order and every fill this adapter produced had lost
+    // which model and which portfolio snapshot stood behind it.
+    expect(accepted(propose({ modelVersion: "model-0007" })).provenance.modelVersion).toBe("model-0007");
+    expect(accepted(propose()).provenance.portfolioSnapshotVersion).toBe("portfolio-0001");
+    // Nullable, not optional: "no LLM was involved" is a fact the record
+    // states, so an intent that omits the field altogether is malformed.
+    expect(refusalCode(proposeOrder({ intent: withoutField("modelVersion"), at: AT_PROPOSED }))).toBe("MALFORMED_INTENT");
+    expect(refusalCode(proposeOrder({ intent: withoutField("portfolioSnapshotVersion"), at: AT_PROPOSED }))).toBe(
+      "MALFORMED_INTENT",
+    );
+  });
+
   it("carries the intent's provenance and envelope onto the order unchanged", () => {
     const order = reservedOrder();
     expect(order.provenance).toEqual({
@@ -123,6 +143,8 @@ describe("the caller's own three steps are guarded like every other transition",
       correlationId: "corr-0001",
       policyVersion: "policy-0001",
       strategyVersion: "strategy-0001",
+      modelVersion: null,
+      portfolioSnapshotVersion: "portfolio-0001",
       marketSnapshotVersion: "market-0001",
       feeSnapshotVersion: "fee-0001",
     });

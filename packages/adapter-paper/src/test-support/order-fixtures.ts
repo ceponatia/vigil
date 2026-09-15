@@ -94,6 +94,10 @@ export function rawIntent(overrides: Record<string, unknown> = {}): Record<strin
     adapterCapabilityVersion: PAPER_ADAPTER_CAPABILITY_VERSION,
     policyVersion: "policy-0001",
     strategyVersion: "strategy-0001",
+    // Null is the ordinary case for this adapter's fixtures: a deterministic
+    // strategy produced them and no LLM was involved.
+    modelVersion: null,
+    portfolioSnapshotVersion: "portfolio-0001",
     marketSnapshotVersion: "market-0001",
     feeSnapshotVersion: "fee-0001",
     ...overrides,
