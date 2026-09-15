@@ -31,7 +31,16 @@ import { postgresConstraintName, postgresErrorCode, PG_FOREIGN_KEY_VIOLATION, PG
 //     when the enqueued digest is immutable and that payload can therefore
 //     never be dispatched;
 //   * a venue clock a few milliseconds behind ours discarding a confirmed
-//     fill.
+//     fill;
+//   * a FILLED attempt reporting no amounts, which settles out of the live
+//     index without entering the consumed one and leaves the authorization
+//     open to a second attempt;
+//   * an on-chain authorization acquiring an exchange lifecycle that cannot
+//     describe a broadcast;
+//   * a caller cutting the correlation thread between an intent and the
+//     attempt that consumes it;
+//   * a later event reassigning the venue order an attempt is associated
+//     with.
 //
 // The real-infrastructure fact these claims need is a transaction and the
 // migrated schema: every one of them is about what survives a commit, or
@@ -188,6 +197,52 @@ describe("openExecutionAttempt", () => {
     expect(changed).toMatchObject({ outcome: "refused", code: "PAYLOAD_MISMATCH" });
     expect(renamed).toMatchObject({ outcome: "refused", code: "PAYLOAD_MISMATCH" });
     expect(await countAttempts()).toBe(1);
+  });
+
+  it("threads the attempt and its dispatch under the intent's own correlation id — catches a caller cutting the thread docs/resilience.md §10 needs to tie an authorization to the attempt that consumed it", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+
+    const [attempt] = await loadExecutionAttempts(db, "intent-1");
+    const dispatch = await loadDispatch(db, "intent-1", 1);
+
+    // `corr-intent-1` is the fixture intent's correlation. There is no
+    // request field that could have supplied it, which is the point.
+    expect(attempt?.correlationId).toBe("corr-intent-1");
+    expect(dispatch?.correlationId).toBe("corr-intent-1");
+  });
+
+  it("refuses an attempt written directly under a correlation the intent is not threaded under — catches a reconciliation that can find the authorization and not the attempt that consumed it", async () => {
+    const failure = await errorFrom(() =>
+      db.execute(sql`
+        insert into ${executionAttempts}
+          (attempt_id, intent_id, attempt, client_order_id, correlation_id, input_asset_scale, output_asset_scale, submitted_at, state_changed_at, recorded_at)
+        values ('att-mis-thread', 'intent-1', 1, 'coid-mis-thread', 'corr-typo', ${TEST_SCALE}, ${TEST_OTHER_SCALE},
+          '2026-01-02T03:10:00Z', '2026-01-02T03:10:00Z', '2026-01-02T03:10:00.1Z')
+      `),
+    );
+
+    expect(postgresConstraintName(failure)).toBe("execution_attempts_correlation_matches_intent");
+    expect(await countAttempts()).toBe(0);
+  });
+
+  it("refuses to open an exchange attempt on an intent that routes over a chain, and writes nothing — catches a broadcast recorded as ACKNOWLEDGED and a reorganization as a cancellation, the collapse into one abstraction docs/architecture.md rejects", async () => {
+    const approved = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-chain", {
+        idempotencyKey: "idem-intent-chain",
+        correlationId: "corr-intent-chain",
+        economicActionId: "econ-intent-chain",
+        chainId: "1337",
+        chainValidation: { simulationId: "sim-1", passed: true },
+      }),
+    );
+    expect(approved.outcome).toBe("recorded");
+
+    const refused = await openExecutionAttempt(db, openAttempt("intent-chain", 1));
+
+    expect(refused).toMatchObject({ outcome: "refused", code: "CHAIN_LIFECYCLE_UNSUPPORTED" });
+    expect(await loadExecutionAttempts(db, "intent-chain")).toEqual([]);
+    expect(await loadDispatch(db, "intent-chain", 1)).toBeNull();
   });
 
 describe("a retry is a versioned attempt, never a second authorization", () => {
@@ -490,6 +545,108 @@ describe("an approved intent is consumable exactly once", () => {
     expect(shrunk).toMatchObject({ outcome: "refused", code: "OUTCOME_NOT_MONOTONIC" });
     const [attempt] = await loadExecutionAttempts(db, "intent-1");
     expect(attempt?.spentBase).toBe(400_000n);
+  });
+
+  it("refuses a FILLED outcome that confirms no amounts, and leaves the attempt live so the intent still cannot be retried — catches the gap between the two indexes: FILLED leaves the live index, a zero spend never enters the consumed one, and the authorization falls through", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+
+    const unquantified = await recordAttemptOutcome(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      state: "FILLED",
+      spentBase: 0n,
+      receivedBase: 0n,
+      venueOrderId: "venue-order-1",
+      stateChangedAt: "2026-01-02T03:15:00.000Z",
+      recordedAt: "2026-01-02T03:15:00.100Z",
+      reconciliation: null,
+    });
+
+    expect(unquantified).toMatchObject({ outcome: "refused", code: "FILL_WITHOUT_AMOUNTS" });
+
+    // Fails closed: the attempt is still live, so the intent is still not
+    // available for a second attempt while its fate is unresolved.
+    const [attempt] = await loadExecutionAttempts(db, "intent-1");
+    expect(attempt?.state).toBe("SUBMITTING");
+    expect(await openExecutionAttempt(db, openAttempt("intent-1", 2))).toMatchObject({
+      outcome: "refused",
+      code: "INTENT_ALREADY_LIVE",
+    });
+  });
+
+  it("refuses a zero-amount FILLED written directly, where no store check is involved — the lifecycle trigger is what holds when the writer is an adapter integration or a repair script", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+
+    const failure = await errorFrom(() =>
+      db.execute(
+        sql`update ${executionAttempts} set state = 'FILLED', state_changed_at = '2026-01-02T03:15:00Z' where intent_id = 'intent-1'`,
+      ),
+    );
+
+    expect(postgresConstraintName(failure)).toBe("execution_attempts_fill_confirms_amounts");
+    expect((await loadExecutionAttempts(db, "intent-1"))[0]?.state).toBe("SUBMITTING");
+  });
+
+  it("still settles a CANCELED attempt that confirmed no amounts — catches a rule so broad that an order canceled before it ever filled can never be recorded, which would strand every unfilled attempt", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+
+    const canceled = await recordAttemptOutcome(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      state: "CANCELED",
+      spentBase: 0n,
+      receivedBase: 0n,
+      venueOrderId: "venue-order-1",
+      stateChangedAt: "2026-01-02T03:15:00.000Z",
+      recordedAt: "2026-01-02T03:15:00.100Z",
+      reconciliation: null,
+    });
+
+    expect(canceled).toMatchObject({ outcome: "recorded", state: "CANCELED" });
+    // Nothing was spent, so the authorization genuinely is available again.
+    expect(await openExecutionAttempt(db, openAttempt("intent-1", 2))).toMatchObject({ outcome: "opened" });
+  });
+
+  it("keeps the venue order an attempt was first associated with — catches a later out-of-order or misassociated event pointing every subsequent reconciliation at a different order", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+    await recordAttemptOutcome(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      state: "ACKNOWLEDGED",
+      spentBase: 0n,
+      receivedBase: 0n,
+      venueOrderId: "venue-order-A",
+      stateChangedAt: "2026-01-02T03:12:00.000Z",
+      recordedAt: "2026-01-02T03:12:00.100Z",
+      reconciliation: null,
+    });
+
+    const reassigned = await recordAttemptOutcome(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      state: "PARTIALLY_FILLED",
+      spentBase: 400_000n,
+      receivedBase: 200_000_000n,
+      venueOrderId: "venue-order-B",
+      stateChangedAt: "2026-01-02T03:13:00.000Z",
+      recordedAt: "2026-01-02T03:13:00.100Z",
+      reconciliation: null,
+    });
+
+    expect(reassigned).toMatchObject({ outcome: "refused", code: "VENUE_ORDER_REASSIGNED" });
+    const [attempt] = await loadExecutionAttempts(db, "intent-1");
+    expect([attempt?.venueOrderId, attempt?.state]).toEqual(["venue-order-A", "ACKNOWLEDGED"]);
+  });
+
+  it("refuses a direct write that renames an attempt — catches the one identifier the immutability guard compared around and not itself, which nothing else references and so would have been renamed silently", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+
+    const failure = await errorFrom(() =>
+      db.execute(sql`update ${executionAttempts} set attempt_id = 'att-renamed' where intent_id = 'intent-1'`),
+    );
+
+    expect(postgresConstraintName(failure)).toBe("execution_attempts_identity_immutable");
+    expect((await loadExecutionAttempts(db, "intent-1"))[0]?.attemptId).toBe("att-intent-1-1");
   });
 
   it("refuses a DELETE against an attempt — catches an intent freed for reuse by removing the record of what was already spent against it", async () => {

@@ -171,7 +171,6 @@ export function openAttempt(
     intentId,
     attempt,
     clientOrderId: `coid-${intentId}-${attempt}`,
-    correlationId: `corr-${intentId}`,
     submittedAt: "2026-01-02T03:10:00.000Z",
     recordedAt: "2026-01-02T03:10:00.100Z",
     dispatch: {

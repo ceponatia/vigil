@@ -128,7 +128,10 @@ import { assetScales, BASE_UNIT_PRECISION, journalEntries, MAX_ASSET_SCALE } fro
  * arriving in different assets are never silently added: each component
  * carries its native amount *and* its value in the intent's numeraire, and
  * a check constraint requires a named `conversion_source` whenever those
- * two assets differ.
+ * two assets differ. The component set is sealed when the intent is written:
+ * a component may only be inserted by the transaction that inserted the
+ * intent, so evidence cannot acquire a line item after the approval it is
+ * evidence of.
  *
  * Two constraints make the hurdle itself durable rather than documentary:
  * `expected_net_edge_base = expected_gross_base - expected_total_cost_base`,
@@ -674,7 +677,9 @@ export const intentCostComponents = pgTable(
  * abstraction that document rejects. An intent may carry a `chain_id`
  * today, so until that family lands, an on-chain route has an authorization
  * and no lifecycle to attempt it in — which is the correct state of affairs
- * for a venue this application has not onboarded.
+ * for a venue this application has not onboarded, and which the
+ * `intent_lifecycle_guards` triggers enforce rather than merely describe:
+ * an attempt on an intent with a `chain_id` is refused.
  *
  * `UNKNOWN` is a state, not a failure (`docs/resilience.md` §3): a
  * submission or cancellation timeout lands here, and it is counted as live
@@ -725,6 +730,15 @@ const LIVE_STATES_SQL = LIVE_EXECUTION_ATTEMPT_STATES.map((state) => `'${state}'
  * collide at the venue — and it is a column rather than a derivation
  * because which shape a venue accepts is the adapter's business.
  *
+ * A state that asserts a fill must carry one: `FILLED` or
+ * `PARTIALLY_FILLED` with no confirmed amounts is refused. That is not
+ * tidiness — `FILLED` is terminal, so such a row would leave the
+ * one-live-attempt index, and a zero `spent_base` never enters the
+ * consumed index, so the authorization would fall through the gap between
+ * the two and be open to a second attempt. `CANCELED`, `REJECTED` and
+ * `EXPIRED` are deliberately exempt: those legitimately confirm nothing,
+ * and an intent nothing was spent against genuinely is available again.
+ *
  * Money only ever moves forward on an attempt: the guard trigger refuses an
  * `UPDATE` that lowers `spent_base` or `received_base`. A fill that has been
  * confirmed cannot be un-confirmed by a later write, so a reconciliation
@@ -740,9 +754,25 @@ export const executionAttempts = pgTable(
     attempt: integer("attempt").notNull(),
     /** The id the venue is given, so a resubmission is refused there too. */
     clientOrderId: text("client_order_id").notNull(),
+    /**
+     * The intent's own correlation id, copied rather than supplied.
+     * `docs/resilience.md` §10 makes this the thread tying an authorization
+     * to its attempts and its outcome, and a caller able to pass its own
+     * could cut that thread with a typo — leaving a reconciliation able to
+     * find the intent and not the attempt that consumed it. The store reads
+     * it from the intent; the guard trigger refuses a row where the two
+     * disagree.
+     */
     correlationId: text("correlation_id").notNull(),
     state: executionAttemptStateEnum("state").notNull().default("SUBMITTING"),
-    /** What the venue called this order; null until it acknowledges one. */
+    /**
+     * What the venue called this order; null until it acknowledges one, and
+     * assigned exactly once thereafter. A later event naming a different
+     * order is news about a different order, not a correction to this one,
+     * and the guard trigger refuses it — otherwise every subsequent
+     * reconciliation would follow the newer id and the original venue
+     * identity would be gone.
+     */
     venueOrderId: text("venue_order_id"),
     inputAssetScale: smallint("input_asset_scale").notNull(),
     outputAssetScale: smallint("output_asset_scale").notNull(),

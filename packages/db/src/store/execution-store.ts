@@ -14,6 +14,7 @@ import {
   describeIntentDriverRefusal,
   refuseIntentWrite,
   type IntentRefusal,
+  type IntentStoreDiagnosticCode,
 } from "./intent-store";
 import { parseIsoInstant } from "./instants";
 
@@ -62,6 +63,14 @@ function blank(value: string): boolean {
  *
  * `payloadDigest` is a digest of the payload, never the payload: nothing in
  * this family stores a credential, a key, or signing material.
+ *
+ * There is deliberately no `correlationId` here. `docs/resilience.md` §10
+ * makes the correlation id the thread tying an intent, its attempts and its
+ * outcome together, and a caller that could supply its own could cut that
+ * thread with a typo — leaving a reconciliation able to find the
+ * authorization and not the attempt that consumed it. It is read from the
+ * approved intent instead, so there is no argument that could disagree with
+ * it, the same way the asset scales are.
  */
 export type OpenAttemptRequest = {
   readonly attemptId: string;
@@ -70,7 +79,6 @@ export type OpenAttemptRequest = {
   readonly attempt: number;
   /** The id the venue is given for this attempt. */
   readonly clientOrderId: string;
-  readonly correlationId: string;
   /** ISO-8601 UTC; when the attempt was opened, before anything was submitted. */
   readonly submittedAt: string;
   /** ISO-8601 UTC. */
@@ -261,7 +269,6 @@ function checkOpenRequest(request: OpenAttemptRequest): IntentRefusal | null {
     ["attemptId", request.attemptId],
     ["intentId", request.intentId],
     ["clientOrderId", request.clientOrderId],
-    ["correlationId", request.correlationId],
     ["dispatch.dispatchId", request.dispatch.dispatchId],
     ["dispatch.dispatcherInstanceId", request.dispatch.dispatcherInstanceId],
   ];
@@ -305,18 +312,21 @@ function checkOpenRequest(request: OpenAttemptRequest): IntentRefusal | null {
 }
 
 /**
- * Thrown inside the transaction so the whole thing rolls back when the
- * authorization is missing, and translated to `UNKNOWN_INTENT` outside it.
- * The attempt's foreign key would refuse the row anyway; reading the intent
- * first is what lets the scales be copied from it rather than trusted.
+ * Thrown inside the transaction so the whole thing rolls back, and turned
+ * into a reason code outside it. Reading the intent before writing is what
+ * lets its scales and its correlation id be copied rather than trusted, and
+ * what lets an on-chain authorization be refused here instead of acquiring
+ * an exchange lifecycle that cannot describe it.
  */
-class UnknownIntent extends Error {
-  public readonly intentId: string;
+class OpenAttemptRefused extends Error {
+  public readonly code: IntentStoreDiagnosticCode;
+  public readonly detail: string;
 
-  public constructor(intentId: string) {
-    super(`intent ${intentId} is not in durable history`);
-    this.name = "UnknownIntent";
-    this.intentId = intentId;
+  public constructor(code: IntentStoreDiagnosticCode, detail: string) {
+    super(detail);
+    this.name = "OpenAttemptRefused";
+    this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -362,6 +372,8 @@ export async function openExecutionAttempt(
         .select({
           inputAssetScale: approvedIntents.inputAssetScale,
           outputAssetScale: approvedIntents.outputAssetScale,
+          correlationId: approvedIntents.correlationId,
+          chainId: approvedIntents.chainId,
         })
         .from(approvedIntents)
         .where(eq(approvedIntents.intentId, request.intentId))
@@ -369,7 +381,21 @@ export async function openExecutionAttempt(
 
       const intent = intentRows[0];
       if (intent === undefined) {
-        throw new UnknownIntent(request.intentId);
+        throw new OpenAttemptRefused(
+          "UNKNOWN_INTENT",
+          `intent ${request.intentId} is not in durable history; nothing authorizes this attempt`,
+        );
+      }
+
+      // `execution_attempt_state` is the Exchange lifecycle and only that
+      // one. An on-chain authorization has no lifecycle to be attempted in
+      // until the `transactions` record family lands, and giving it this one
+      // would record a broadcast as ACKNOWLEDGED.
+      if (intent.chainId !== null) {
+        throw new OpenAttemptRefused(
+          "CHAIN_LIFECYCLE_UNSUPPORTED",
+          `intent ${request.intentId} routes over chain ${intent.chainId}; the exchange attempt lifecycle cannot describe a broadcast, and the transactions record family is not built`,
+        );
       }
 
       await tx.insert(executionAttempts).values({
@@ -377,7 +403,7 @@ export async function openExecutionAttempt(
         intentId: request.intentId,
         attempt: request.attempt,
         clientOrderId: request.clientOrderId,
-        correlationId: request.correlationId,
+        correlationId: intent.correlationId,
         state: "SUBMITTING",
         venueOrderId: null,
         inputAssetScale: intent.inputAssetScale,
@@ -395,7 +421,7 @@ export async function openExecutionAttempt(
         dispatchId: request.dispatch.dispatchId,
         intentId: request.intentId,
         attempt: request.attempt,
-        correlationId: request.correlationId,
+        correlationId: intent.correlationId,
         state: "pending",
         payloadDigest: request.dispatch.payloadDigest,
         dispatcherInstanceId: request.dispatch.dispatcherInstanceId,
@@ -407,8 +433,8 @@ export async function openExecutionAttempt(
       });
     });
   } catch (error) {
-    if (error instanceof UnknownIntent) {
-      return refuseIntentWrite("UNKNOWN_INTENT", `intent ${error.intentId} is not in durable history; nothing authorizes this attempt`);
+    if (error instanceof OpenAttemptRefused) {
+      return refuseIntentWrite(error.code, error.detail);
     }
 
     const driver = describeIntentDriverRefusal(error);
@@ -467,6 +493,22 @@ export async function recordAttemptOutcome(
     );
   }
 
+  // FILLED with nothing confirmed is the gap between the two indexes: the
+  // attempt leaves the live index because FILLED is terminal, never enters
+  // the consumed index because nothing was spent, and the authorization is
+  // open to a second attempt. Refusing leaves the attempt in whatever live
+  // state it already holds — still blocking a retry, still resolvable by
+  // reconciliation — which is the direction that fails closed.
+  if (
+    (outcome.state === "FILLED" || outcome.state === "PARTIALLY_FILLED") &&
+    (outcome.spentBase <= 0n || outcome.receivedBase <= 0n)
+  ) {
+    return refuseIntentWrite(
+      "FILL_WITHOUT_AMOUNTS",
+      `attempt ${outcome.attempt} on intent ${outcome.intentId} reports ${outcome.state} having spent ${outcome.spentBase.toString()} and received ${outcome.receivedBase.toString()}; a fill nobody can quantify would settle the attempt without consuming the intent`,
+    );
+  }
+
   if (outcome.receivedBase > 0n && outcome.spentBase === 0n) {
     return refuseIntentWrite(
       "CONSTRAINT_VIOLATION",
@@ -500,7 +542,9 @@ export async function recordAttemptOutcome(
         receivedBase: outcome.receivedBase,
         // Null leaves whatever the venue already told us: an update that
         // reports no order id is one this application made before the venue
-        // acknowledged, not an instruction to forget the id it later did.
+        // acknowledged, not an instruction to forget the id it later did. A
+        // *different* non-null id is not an update to this attempt's order
+        // but news about another one, and the lifecycle guard refuses it.
         venueOrderId: sql`coalesce(${outcome.venueOrderId}::text, ${executionAttempts.venueOrderId})`,
         stateChangedAt,
         recordedAt,

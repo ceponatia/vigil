@@ -78,6 +78,13 @@
       "when": 1789481682823,
       "tag": "0010_intent_lifecycle_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1789487346567,
+      "tag": "0011_intent_lifecycle_guard_gaps",
+      "breakpoints": true
     }
   ]
 }

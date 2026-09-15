@@ -70,6 +70,20 @@ cannot derive a trigger from the schema:
   second dispatchable attempt on an intent whose capital had just been
   spent. The case is reproduced in
   `tests/fault-injection/concurrent-intent-consumption.int.test.ts`.
+- `0011_intent_lifecycle_guard_gaps` replaces the two execution-attempt
+  trigger functions in place and seals the cost evidence. It refuses an
+  exchange attempt on an intent that routes over a chain, since the Exchange
+  lifecycle cannot describe a broadcast; refuses an attempt threaded under a
+  correlation id its intent is not threaded under; adds `attempt_id` to the
+  immutable identity list, which previously compared every column around it
+  and not itself; assigns the venue order identifier exactly once, so a later
+  misassociated event cannot redirect reconciliation; refuses `FILLED` or
+  `PARTIALLY_FILLED` with no confirmed amounts, which would otherwise settle
+  an attempt out of the live index without entering the consumed one and
+  leave the authorization open to a second attempt; and seals
+  `intent_cost_components` against inserts from any transaction but the one
+  that wrote the intent, using the `xmin` comparison
+  `0005_journal_entry_sealed_guard` established.
 
 The `0009` and `0010` pair is the family's ordering rule in miniature: the
 composite foreign key from the outbox to `(intent_id, attempt)` makes the

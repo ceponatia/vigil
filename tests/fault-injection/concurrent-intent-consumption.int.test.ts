@@ -118,7 +118,6 @@ function attemptRequest(attempt: number): OpenAttemptRequest {
     intentId: "intent-contended",
     attempt,
     clientOrderId: `coid-contended-${attempt}`,
-    correlationId: "corr-intent-contended",
     submittedAt: "2026-04-01T00:10:00.000Z",
     recordedAt: "2026-04-01T00:10:00.100Z",
     dispatch: {

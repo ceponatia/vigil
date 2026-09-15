@@ -31,7 +31,8 @@ import { postgresConstraintName, postgresErrorCode, PG_RAISE_EXCEPTION } from ".
 //     hurdle — the point-in-time evidence gone, or present and not adding
 //     up, which is worse;
 //   * a cost breakdown that double-counts an embedded cost, or silently
-//     adds amounts denominated in different assets;
+//     adds amounts denominated in different assets, or acquires a line item
+//     after the approval it is supposed to be evidence of;
 //   * persistence moving a marginal decision across its own threshold;
 //   * a base-unit amount that does not survive the round trip exactly,
 //     which is how a float reaches a spending limit.
@@ -458,18 +459,50 @@ describe("the economics that passed policy", () => {
     expect(await countIntents()).toBe(0);
   });
 
-  it("refuses an unbalanced breakdown written directly, at commit — the deferred constraint trigger is what holds when the writer is a backfill rather than this store", async () => {
-    await recordApprovedIntent(db, storeApprovedIntent("intent-direct"));
+  it("refuses a cost component added after the intent was approved — catches evidence that is supposed to be frozen at approval acquiring a line item afterwards, which is how an intent that missed its hurdle acquires a reason it cleared one", async () => {
+    await recordApprovedIntent(db, storeApprovedIntent("intent-sealed"));
 
+    // The numeraire amount is zero on purpose. That is the case the deferred
+    // total cannot catch — the sum still balances — so it is the case that
+    // proves the seal is doing the work rather than the sum. The native
+    // amount is a real cost in another asset, appearing from nowhere.
     const failure = await errorFrom(() =>
       db.execute(sql`
         insert into ${intentCostComponents}
           (intent_id, kind, charge_basis, native_asset_id, native_asset_scale, native_amount_base,
            numeraire_asset_id, numeraire_asset_scale, numeraire_amount_base, conversion_source)
-        values ('intent-direct', 'fixed-costs', 'separately-charged', ${TEST_ASSET}, ${TEST_SCALE}, 7,
-          ${TEST_ASSET}, ${TEST_SCALE}, 7, null)
+        values ('intent-sealed', 'fixed-costs', 'separately-charged', ${TEST_OTHER_ASSET}, ${TEST_OTHER_SCALE}, 500000,
+          ${TEST_ASSET}, ${TEST_SCALE}, 0, 'invented later')
       `),
     );
+
+    expect(postgresConstraintName(failure)).toBe("intent_cost_components_sealed");
+    expect((await loadApprovedIntent(db, "intent-sealed"))?.economics.costComponents).toHaveLength(1);
+  });
+
+  // The seal above fires before the deferred total gets a chance to, so
+  // proving the total still holds for a writer that is not this store means
+  // standing the seal down for the length of one case — the same device the
+  // consumed-index test uses, and for the same reason: a guard that is only
+  // ever reached second is a guard nothing asserts.
+  it("refuses an unbalanced breakdown written directly, at commit, even with the seal stood down — catches a components list that decorates a total no component supports", async () => {
+    await recordApprovedIntent(db, storeApprovedIntent("intent-direct"));
+
+    let failure: unknown = null;
+    await db.execute(sql`alter table ${intentCostComponents} disable trigger intent_cost_components_sealed`);
+    try {
+      failure = await errorFrom(() =>
+        db.execute(sql`
+          insert into ${intentCostComponents}
+            (intent_id, kind, charge_basis, native_asset_id, native_asset_scale, native_amount_base,
+             numeraire_asset_id, numeraire_asset_scale, numeraire_amount_base, conversion_source)
+          values ('intent-direct', 'fixed-costs', 'separately-charged', ${TEST_ASSET}, ${TEST_SCALE}, 7,
+            ${TEST_ASSET}, ${TEST_SCALE}, 7, null)
+        `),
+      );
+    } finally {
+      await db.execute(sql`alter table ${intentCostComponents} enable trigger intent_cost_components_sealed`);
+    }
 
     expect(postgresConstraintName(failure)).toBe("intent_cost_components_itemised");
     expect((await loadApprovedIntent(db, "intent-direct"))?.economics.costComponents).toHaveLength(1);

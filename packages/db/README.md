@@ -82,7 +82,14 @@ as later slices need to.
   is the one that stays mutable. Its lifecycle lives on `execution_attempts`
   instead: one row per attempt number, at most one live attempt per intent
   (with `UNKNOWN` counted as live, so reconciliation precedes resubmission),
-  and at most one attempt per intent that ever spends anything. A remainder
+  and at most one attempt per intent that ever spends anything. A state that
+  asserts a fill must carry confirmed amounts: `FILLED` with nothing spent is
+  terminal enough to leave the live index and not positive enough to enter
+  the consumed one, which would drop the authorization through the gap
+  between them. An attempt inherits its correlation id and asset scales from
+  its intent rather than accepting them, and an intent that routes over a
+  chain gets no exchange attempt at all — that lifecycle waits for the
+  `transactions` family. A remainder
   after a partial fill is a new intent, not a further attempt on the old one.
 - **An approved intent carries the economics that passed policy.** The
   quote it was decided on and when that quote was acquired, the cost-model
@@ -98,7 +105,11 @@ as later slices need to.
   `conversion_source` whenever those assets differ — no total here is ever a
   sum of amounts in different assets. `minimum_net_edge_base` is null
   exactly when `net_edge_basis` says the decision was exempt, which is what a
-  protective unwind is.
+  protective unwind is. The component set is sealed when the intent is
+  written — only the transaction that inserted the intent may insert
+  components — so evidence cannot acquire a line item after the approval it
+  is evidence of, including a zero-numeraire one the deferred total would
+  not notice.
 - **A dispatch is durable before it happens.** An outbox row is enqueued
   `pending` — the trigger refuses an insert in any other state — and it
   points at an attempt, which points at an approved intent, so a dispatch

@@ -128,6 +128,23 @@ export const INTENT_STORE_DIAGNOSTIC_CODES = [
   /** One intent names the same cost kind twice, which would double-count it. */
   "DUPLICATE_COST_COMPONENT",
   /**
+   * The intent routes over a chain, and the exchange attempt lifecycle
+   * cannot describe a broadcast. Not a defect in the caller so much as a
+   * capability this application does not have yet: the `transactions`
+   * record family is where an on-chain action gets a lifecycle.
+   */
+  "CHAIN_LIFECYCLE_UNSUPPORTED",
+  /**
+   * A state that asserts a fill reports no confirmed amounts. Refused
+   * rather than stored, because a settled attempt that consumed nothing
+   * leaves its authorization open to a second attempt.
+   */
+  "FILL_WITHOUT_AMOUNTS",
+  /** The attempt is already associated with a different venue order. */
+  "VENUE_ORDER_REASSIGNED",
+  /** The intent's cost evidence was sealed when the intent was approved. */
+  "COST_EVIDENCE_SEALED",
+  /**
    * The request names an attempt or dispatch that exists under different
    * terms. Distinct from `DUPLICATE_RECORD`: a redelivery of the same work
    * is a duplicate, while a retry carrying a different payload is a caller
@@ -240,6 +257,26 @@ export function describeIntentDriverRefusal(
       intent_cost_components_non_negative: {
         code: "INVALID_ECONOMICS",
         detail: "a negative cost would inflate net edge rather than reduce it",
+      },
+      intent_cost_components_sealed: {
+        code: "COST_EVIDENCE_SEALED",
+        detail: "this intent's cost evidence was sealed when it was approved; a cost discovered later is a new intent",
+      },
+      execution_attempts_exchange_intents_only: {
+        code: "CHAIN_LIFECYCLE_UNSUPPORTED",
+        detail: "this intent routes over a chain, and the exchange attempt lifecycle cannot describe a broadcast",
+      },
+      execution_attempts_correlation_matches_intent: {
+        code: "CONSTRAINT_VIOLATION",
+        detail: "the attempt is threaded under a different correlation id than the intent it consumes",
+      },
+      execution_attempts_fill_confirms_amounts: {
+        code: "FILL_WITHOUT_AMOUNTS",
+        detail: "a fill with no confirmed amounts would settle the attempt without consuming the intent",
+      },
+      execution_attempts_venue_order_assigned_once: {
+        code: "VENUE_ORDER_REASSIGNED",
+        detail: "the attempt is already associated with a different venue order",
       },
     };
     const match = named[constraint];
