@@ -9,11 +9,19 @@ Cross-package suites and synthetic fixtures that don't belong to any single
   never containing personal holdings, real wallet/exchange addresses, or
   keys of any kind.
 - **`replay/`** — deterministic, full-lifecycle replays that drive a
-  scenario end to end through the paper adapter (research/candidate through
-  journal entry), asserting on the final state rather than on each step.
+  scenario end to end through real repository seams (research/candidate
+  through journal entry), asserting on the final state rather than on each
+  step. Suites here may not import an `adapter-*` package — only
+  `apps/trading` may — so a replay that must drive the paper adapter lives
+  beside the owning `apps/*` code instead, as an `*.int.test.ts`; see
+  `tests/replay/README.md`.
 - **`fault-injection/`** — the fault scenario matrix described in
   `docs/testing.md` (crash mid-write, duplicate delivery, stale data,
-  partial fill, and similar cases the system must fail closed on).
+  partial fill, and similar cases the system must fail closed on), for
+  scenarios drivable against `@vigil/contracts`, `@vigil/db`,
+  `@vigil/ledger`, and `@vigil/market` alone. A scenario that needs a real
+  adapter lives beside its owning `apps/*` code instead, as an
+  `*.int.test.ts`; see `tests/fault-injection/README.md`.
 - **`seams/`** — claims about two packages agreeing, where neither package
   can import the other to make the agreement a type. Pure suites: a seam
   test that needed a running service would belong to the layer that owns the
