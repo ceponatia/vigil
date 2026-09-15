@@ -153,6 +153,7 @@ describe("money and quantity columns", () => {
       expect.arrayContaining([
         "approved_intents",
         "execution_attempts",
+        "intent_cost_components",
         "intent_dispatch_outbox",
         "journal_entries",
         "journal_lines",

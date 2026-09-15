@@ -1,5 +1,5 @@
 import type { OpenAttemptRequest } from "../store/execution-store";
-import type { StoreApprovedIntent } from "../store/intent-store";
+import type { IntentEconomics, StoreApprovedIntent } from "../store/intent-store";
 import { TEST_ASSET, TEST_OTHER_ASSET, TEST_SCALE } from "./journal-fixtures";
 
 /**
@@ -29,6 +29,89 @@ export const TEST_OTHER_SCALE = 8;
  * shape and nothing else.
  */
 export const TEST_PAYLOAD_DIGEST = "5f0e".repeat(16);
+
+/**
+ * The economics of an ordinary, comfortably profitable intent: two cost
+ * components — one embedded, one separately charged — summing exactly to
+ * the claimed total, settled in the asset being spent.
+ *
+ * Both bases are represented on purpose. A fixture with only separately
+ * charged costs would let an evaluation that double-counts an embedded cost
+ * pass every assertion in this package.
+ */
+export function storeIntentEconomics(overrides: Partial<IntentEconomics> = {}): IntentEconomics {
+  return {
+    quoteId: "quote-synthetic-0",
+    quoteAcquiredAt: "2026-01-02T02:59:59.000Z",
+    costModelVersion: "cost-model-test-0",
+    numeraireAssetId: TEST_ASSET,
+    numeraireScale: TEST_SCALE,
+    notionalBase: 1_000_000n,
+    expectedGrossBase: 5_100n,
+    expectedTotalCostBase: 2_600n,
+    expectedNetEdgeBase: 2_500n,
+    netEdgeBasis: "hurdle",
+    minimumNetEdgeBase: 1_000n,
+    costComponents: [
+      {
+        kind: "proportional-fee",
+        chargeBasis: "separately-charged",
+        nativeAssetId: TEST_ASSET,
+        nativeScale: TEST_SCALE,
+        nativeAmountBase: 2_600n,
+        numeraireAmountBase: 2_600n,
+        conversionSource: null,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+/**
+ * The rounding case #34 asks for: a small notional whose expected net edge
+ * clears the configured minimum by exactly one base unit — the smallest
+ * amount this schema can represent.
+ *
+ * `clears: false` produces the same case one unit the other way. The pair
+ * is the claim: persistence must not move the decision in either direction,
+ * and a store that rounded, widened, or narrowed anywhere between the
+ * caller and the column would fail one of the two.
+ */
+export function marginalNetEdgeEconomics(clears: boolean, overrides: Partial<IntentEconomics> = {}): IntentEconomics {
+  const minimumNetEdgeBase = 1_000n;
+  const expectedNetEdgeBase = clears ? minimumNetEdgeBase + 1n : minimumNetEdgeBase - 1n;
+  const expectedTotalCostBase = 37n;
+
+  return storeIntentEconomics({
+    quoteId: "quote-marginal-0",
+    notionalBase: 12_345n,
+    expectedGrossBase: expectedNetEdgeBase + expectedTotalCostBase,
+    expectedTotalCostBase,
+    expectedNetEdgeBase,
+    minimumNetEdgeBase,
+    costComponents: [
+      {
+        kind: "proportional-fee",
+        chargeBasis: "separately-charged",
+        nativeAssetId: TEST_ASSET,
+        nativeScale: TEST_SCALE,
+        nativeAmountBase: 31n,
+        numeraireAmountBase: 31n,
+        conversionSource: null,
+      },
+      {
+        kind: "spread",
+        chargeBasis: "embedded",
+        nativeAssetId: TEST_ASSET,
+        nativeScale: TEST_SCALE,
+        nativeAmountBase: 6n,
+        numeraireAmountBase: 6n,
+        conversionSource: null,
+      },
+    ],
+    ...overrides,
+  });
+}
 
 export function storeApprovedIntent(intentId: string, overrides: Partial<StoreApprovedIntent> = {}): StoreApprovedIntent {
   return {
@@ -73,6 +156,7 @@ export function storeApprovedIntent(intentId: string, overrides: Partial<StoreAp
       marketSnapshotVersion: "market-test-0",
       feeSnapshotVersion: "fee-test-0",
     },
+    economics: storeIntentEconomics(),
     ...overrides,
   };
 }

@@ -84,6 +84,21 @@ as later slices need to.
   (with `UNKNOWN` counted as live, so reconciliation precedes resubmission),
   and at most one attempt per intent that ever spends anything. A remainder
   after a partial fill is a new intent, not a further attempt on the old one.
+- **An approved intent carries the economics that passed policy.** The
+  quote it was decided on and when that quote was acquired, the cost-model
+  version, the numeraire, the notional, the expected gross, the expected
+  total cost, the expected net edge and the minimum it had to reach are
+  `NOT NULL` columns on the intent — not a 1:1 side table, which could be
+  absent. Check constraints hold net edge to gross less cost and refuse an
+  intent that does not reach its own hurdle; a deferred constraint trigger
+  requires the named cost components to sum to that total. Each component
+  records whether it is embedded in the execution price or charged
+  separately, so a later evaluation cannot count an embedded cost twice, and
+  carries both its native amount and its value in the numeraire with a named
+  `conversion_source` whenever those assets differ — no total here is ever a
+  sum of amounts in different assets. `minimum_net_edge_base` is null
+  exactly when `net_edge_basis` says the decision was exempt, which is what a
+  protective unwind is.
 - **A dispatch is durable before it happens.** An outbox row is enqueued
   `pending` — the trigger refuses an insert in any other state — and it
   points at an attempt, which points at an approved intent, so a dispatch
@@ -155,8 +170,9 @@ as later slices need to.
 ## Built modules
 
 - `journal` — journal entries, postings, and the balance projection.
-- `intents` — reservations, approved intents, the versioned execution
-  attempts that consume them, and the dispatch outbox. An attempt carries no
+- `intents` — reservations, approved intents with their
+  `intent_cost_components` breakdown, the versioned execution attempts that
+  consume them, and the dispatch outbox. An attempt carries no
   asset ids and no provenance of its own: both are the intent's, reached
   through a `NOT NULL` foreign key that cannot be absent, and a second copy
   would be a second answer that can disagree with the authorization. It does

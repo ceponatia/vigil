@@ -34,10 +34,14 @@ export type {
 
 export {
   approvedIntents,
+  costChargeBasisEnum,
+  costComponentKindEnum,
   dispatchStateEnum,
   executionAttempts,
   executionAttemptStateEnum,
+  intentCostComponents,
   intentDispatchOutbox,
+  netEdgeBasisEnum,
   reservations,
   reservationStateEnum,
   LIVE_EXECUTION_ATTEMPT_STATES,
@@ -45,8 +49,11 @@ export {
 } from "./schema/intents";
 export type {
   ApprovedIntentRow,
+  CostChargeBasisValue,
+  CostComponentKindValue,
   DispatchStateValue,
   ExecutionAttemptStateValue,
+  NetEdgeBasisValue,
   ReservationStateValue,
 } from "./schema/intents";
 
@@ -85,9 +92,14 @@ export {
   loadApprovedIntent,
   loadApprovedIntentsByCorrelation,
   recordApprovedIntent,
+  COST_CHARGE_BASES,
+  COST_COMPONENT_KINDS,
   INTENT_STORE_DIAGNOSTIC_CODES,
+  NET_EDGE_BASES,
 } from "./store/intent-store";
 export type {
+  IntentCostComponent,
+  IntentEconomics,
   IntentInputSide,
   IntentOutputSide,
   IntentProvenance,

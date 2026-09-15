@@ -3,7 +3,13 @@ import { sql } from "drizzle-orm";
 
 import { createDbClient, type VigilDatabase } from "../client";
 import { candidateEvaluations, candidates, candidateTranches } from "../schema/decisions";
-import { approvedIntents, executionAttempts, intentDispatchOutbox, reservations } from "../schema/intents";
+import {
+  approvedIntents,
+  executionAttempts,
+  intentCostComponents,
+  intentDispatchOutbox,
+  reservations,
+} from "../schema/intents";
 import { heartbeats } from "../schema/ops";
 import {
   assetScales,
@@ -141,7 +147,7 @@ export function openLedgerTestDb(applicationName: string): LedgerTestDb {
     close: client.close,
     reset: async () => {
       await client.db.execute(
-        sql`truncate table ${candidateEvaluations}, ${candidateTranches}, ${intentDispatchOutbox}, ${executionAttempts}, ${approvedIntents}, ${candidates}, ${heartbeats}, ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances}, ${assetScales} restart identity cascade`,
+        sql`truncate table ${candidateEvaluations}, ${candidateTranches}, ${intentDispatchOutbox}, ${executionAttempts}, ${intentCostComponents}, ${approvedIntents}, ${candidates}, ${heartbeats}, ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances}, ${assetScales} restart identity cascade`,
       );
     },
   };

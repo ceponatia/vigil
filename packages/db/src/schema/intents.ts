@@ -9,6 +9,7 @@ import {
   numeric,
   pgEnum,
   pgTable,
+  primaryKey,
   smallint,
   text,
   timestamp,
@@ -58,6 +59,14 @@ import { assetScales, BASE_UNIT_PRECISION, journalEntries, MAX_ASSET_SCALE } fro
  *   dispatch from happening at all rather than merely being unrecordable
  *   after the fact.
  *
+ * Worth knowing the asymmetry between those two: consume-once survives its
+ * trigger being dropped or disabled, because the partial unique index holds
+ * on its own. Immutability does not — it is trigger-only, and no index can
+ * back it up, because "this row may not change" is not a uniqueness claim.
+ * A migration role that can `DROP TRIGGER` and a runtime role that cannot
+ * should therefore be different roles before anything real runs; nothing in
+ * this schema can make that true on its own.
+ *
  * A remainder after a partial fill is therefore a **new intent**, not a
  * further attempt on this one. That follows from the contract's own words:
  * spending more against an authorization that has already been consumed is
@@ -98,6 +107,49 @@ import { assetScales, BASE_UNIT_PRECISION, journalEntries, MAX_ASSET_SCALE } fro
  * inserted already `dispatched` would be a dispatch that was never durable
  * beforehand, which is the failure §9 exists to prevent.
  *
+ * ## The economics that passed policy
+ *
+ * An approved intent carries the point-in-time evidence that it was worth
+ * doing, because `docs/evaluation.md`'s point-in-time integrity cannot be
+ * reconstructed afterwards: the quote and the cost assumptions that were
+ * true at approval are gone by the time the fill is judged. Persisting only
+ * the action and the quantity would leave nobody able to say whether the
+ * intent ever cleared its cost hurdle, which is the difference between
+ * measuring execution quality and measuring luck.
+ *
+ * The derived figures are **columns on the intent**, not a separate record,
+ * and `NOT NULL`: a 1:1 side table can be absent, and an approved intent
+ * whose economics is missing is exactly the hole this evidence exists to
+ * close. The cost *components* are a child table rather than four named
+ * columns, for the reason `candidate_tranches` is a child table — every
+ * amount stays reachable by a constraint, a fifth cost kind is a row rather
+ * than a migration, and "embedded" versus "separately charged" is a column
+ * a later evaluation can group by instead of a fact it has to know. Costs
+ * arriving in different assets are never silently added: each component
+ * carries its native amount *and* its value in the intent's numeraire, and
+ * a check constraint requires a named `conversion_source` whenever those
+ * two assets differ.
+ *
+ * Two constraints make the hurdle itself durable rather than documentary:
+ * `expected_net_edge_base = expected_gross_base - expected_total_cost_base`,
+ * and a deferred constraint trigger requiring the components to sum to
+ * `expected_total_cost_base`. `minimum_net_edge_base` is nullable only
+ * because a protective unwind is not gated on edge at all — and that is
+ * recorded as data rather than inferred from a null, through
+ * `net_edge_basis`: `hurdle` demands a minimum and refuses an intent that
+ * does not reach it, `protective-exempt` declares that no minimum applied.
+ * A schema that demanded a fabricated hurdle before an exit could be
+ * authorized would be a schema that blocks protection
+ * (`docs/resilience.md` §2).
+ *
+ * Deliberately **not** enforced here: re-deriving quote freshness from
+ * `approved_at - quote_acquired_at` against `required_freshness_ms`. The
+ * freshness decision is `@vigil/policy`'s, made at its own injected `now`;
+ * re-litigating it in SQL from a different instant would refuse, at the
+ * boundary, a decision policy legitimately made. The evidence to check it
+ * is all stored, so a later reader computes the age rather than being told
+ * it was fine.
+ *
  * ## What this family deliberately does not carry
  *
  * - **No credential, key, seed, or signing material**, in any column, ever
@@ -118,6 +170,11 @@ import { assetScales, BASE_UNIT_PRECISION, journalEntries, MAX_ASSET_SCALE } fro
  *   an authorization policy refused. A refusal is a `candidate_evaluations`
  *   row with a `BLOCKED` outcome and a reason code from `docs/policy.md`,
  *   in the `decisions` family that already owns decisions-including-refusals.
+ * - **No market payload.** `quote_id` and `quote_acquired_at` reference the
+ *   quote or snapshot the decision was made on; the order book behind it
+ *   belongs under `data/` (`docs/architecture.md`), and copying it here
+ *   would duplicate a large payload to say something the reference already
+ *   says.
  * - **No `reserved_assets` column.** The contract's `reservedAssets` array
  *   is the `reservations` rows that name this `intent_id`; a second copy on
  *   the intent would be a list that can disagree with the holds actually
@@ -223,6 +280,20 @@ export const reservations = pgTable(
 export type ReservationStateValue = (typeof reservationStateEnum.enumValues)[number];
 
 /**
+ * Which decision rule the expected net edge was judged against.
+ *
+ * `hurdle` is the ordinary path: a configured minimum applied, and the
+ * check constraint below refuses an intent that does not reach it, so
+ * "approved but under its own hurdle" is unrepresentable.
+ * `protective-exempt` says no minimum applied — a protective unwind is
+ * taken because the thesis invalidated, not because there is edge in it,
+ * and `docs/resilience.md` §2 forbids blocking one. Recording the exemption
+ * as a value rather than inferring it from a null `minimum_net_edge_base`
+ * is what lets a later reader *find* every intent that skipped the hurdle.
+ */
+export const netEdgeBasisEnum = pgEnum("net_edge_basis", ["hurdle", "protective-exempt"]);
+
+/**
  * The durable `ApprovedEconomicIntent`: what policy authorized, frozen at
  * the moment it authorized it.
  *
@@ -321,6 +392,50 @@ export const approvedIntents = pgTable(
      * an authorization that assumed the old ones.
      */
     adapterCapabilityVersion: text("adapter_capability_version").notNull(),
+    /**
+     * The settlement numeraire every figure below is denominated in: one
+     * asset, named explicitly, so nothing has to infer whether a cost was
+     * quoted in what was spent or what was acquired.
+     */
+    numeraireAssetId: text("numeraire_asset_id").notNull(),
+    numeraireAssetScale: smallint("numeraire_asset_scale").notNull(),
+    /** The quote or market snapshot the decision was made on. */
+    quoteId: text("quote_id").notNull(),
+    /** When that quote was acquired — the age a later reader judges it by. */
+    quoteAcquiredAt: timestamp("quote_acquired_at", { withTimezone: true, precision: 3, mode: "date" }).notNull(),
+    /** The venue-economics / cost-model version that priced the costs below. */
+    costModelVersion: text("cost_model_version").notNull(),
+    /** Intended notional, in numeraire base units. */
+    notionalBase: numeric("notional_base", { precision: BASE_UNIT_PRECISION, scale: 0, mode: "bigint" }).notNull(),
+    /**
+     * Expected gross advantage before any cost. Signed: a protective unwind
+     * expects to realize a loss, and a column that could not hold that would
+     * force the one case that most needs recording to be written as a lie.
+     */
+    expectedGrossBase: numeric("expected_gross_base", {
+      precision: BASE_UNIT_PRECISION,
+      scale: 0,
+      mode: "bigint",
+    }).notNull(),
+    /** Expected total incremental cost; the components must sum to exactly this. */
+    expectedTotalCostBase: numeric("expected_total_cost_base", {
+      precision: BASE_UNIT_PRECISION,
+      scale: 0,
+      mode: "bigint",
+    }).notNull(),
+    /** Gross less total cost. Signed, for the same reason gross is. */
+    expectedNetEdgeBase: numeric("expected_net_edge_base", {
+      precision: BASE_UNIT_PRECISION,
+      scale: 0,
+      mode: "bigint",
+    }).notNull(),
+    netEdgeBasis: netEdgeBasisEnum("net_edge_basis").notNull(),
+    /** The configured minimum this had to reach; null exactly when exempt. */
+    minimumNetEdgeBase: numeric("minimum_net_edge_base", {
+      precision: BASE_UNIT_PRECISION,
+      scale: 0,
+      mode: "bigint",
+    }),
     /** The simulation that cleared an on-chain route; null off-chain. */
     chainSimulationId: text("chain_simulation_id"),
     chainSimulationPassed: boolean("chain_simulation_passed"),
@@ -364,6 +479,16 @@ export const approvedIntents = pgTable(
       foreignColumns: [assetScales.assetId, assetScales.assetScale],
       name: "approved_intents_output_asset_scale_fk",
     }),
+    foreignKey({
+      columns: [table.numeraireAssetId, table.numeraireAssetScale],
+      foreignColumns: [assetScales.assetId, assetScales.assetScale],
+      name: "approved_intents_numeraire_asset_scale_fk",
+    }),
+    // Trivially unique given the primary key, and declared for one reason:
+    // it is what `intent_cost_components` points its composite foreign key
+    // at, so a component cannot be denominated in a numeraire its own intent
+    // never declared.
+    unique("approved_intents_numeraire_key").on(table.intentId, table.numeraireAssetId, table.numeraireAssetScale),
     check(
       "approved_intents_identity_present",
       sql`length(btrim(intent_id)) > 0 and length(btrim(idempotency_key)) > 0 and length(btrim(correlation_id)) > 0 and length(btrim(economic_action_id)) > 0`,
@@ -372,7 +497,32 @@ export const approvedIntents = pgTable(
       "approved_intents_amounts_authorize_something",
       sql`quantity_base > 0 and max_spend_base > 0 and min_acceptable_receipt_base >= 0 and permitted_residual_base >= 0 and permitted_residual_base <= max_spend_base`,
     ),
-    check("approved_intents_scale_range", sql.raw(`input_asset_scale between 0 and ${MAX_ASSET_SCALE} and output_asset_scale between 0 and ${MAX_ASSET_SCALE}`)),
+    check(
+      "approved_intents_scale_range",
+      sql.raw(
+        `input_asset_scale between 0 and ${MAX_ASSET_SCALE} and output_asset_scale between 0 and ${MAX_ASSET_SCALE} and numeraire_asset_scale between 0 and ${MAX_ASSET_SCALE}`,
+      ),
+    ),
+    // The identity `@vigil/policy` computes when it decides net edge. A
+    // stored triple that does not add up is evidence that cannot be checked,
+    // which is worse than no evidence at all.
+    check(
+      "approved_intents_net_edge_derived",
+      sql`expected_net_edge_base = expected_gross_base - expected_total_cost_base`,
+    ),
+    check("approved_intents_economics_sane", sql`expected_total_cost_base >= 0 and notional_base > 0`),
+    // An approved intent cleared its own hurdle, or declared that no hurdle
+    // applied. There is no third state.
+    check(
+      "approved_intents_net_edge_hurdle",
+      sql`(net_edge_basis = 'hurdle') = (minimum_net_edge_base is not null) and (minimum_net_edge_base is null or expected_net_edge_base >= minimum_net_edge_base)`,
+    ),
+    // Nothing is approved on a quote from after the approval.
+    check("approved_intents_quote_precedes_approval", sql`quote_acquired_at <= approved_at`),
+    check(
+      "approved_intents_economics_provenance_present",
+      sql`length(btrim(quote_id)) > 0 and length(btrim(cost_model_version)) > 0`,
+    ),
     check("approved_intents_window", sql`valid_until > approved_at`),
     check("approved_intents_freshness_positive", sql`required_freshness_ms > 0`),
     // A simulation id without a verdict, or a verdict without the
@@ -390,9 +540,141 @@ export const approvedIntents = pgTable(
 );
 
 /**
+ * Whether a cost is taken out of the execution price itself or billed
+ * alongside it. Persisted rather than derived from the kind, and for a
+ * concrete reason: a later evaluation that compares an expected cost with a
+ * realized fill must not count an embedded cost twice — once inside the
+ * price it already paid, and again as a line item. A venue that charges
+ * commission where another embeds a spread produces the same `kind` with a
+ * different basis, so the basis is data.
+ */
+export const costChargeBasisEnum = pgEnum("cost_charge_basis", ["embedded", "separately-charged"]);
+
+/**
+ * The cost kinds `@vigil/policy` models today: a rate on notional, two
+ * per-unit costs, and a flat per-trade amount. A Postgres enum rather than
+ * free text for the reason `candidate_horizon` is one — a column that could
+ * hold a fifth kind nobody defined is a column a later comparison cannot
+ * group by, and a typo would silently become a cost category of its own.
+ * A genuinely new cost kind is a migration, which is the right amount of
+ * friction for a change that alters what every stored total means.
+ */
+export const costComponentKindEnum = pgEnum("cost_component_kind", [
+  "proportional-fee",
+  "spread",
+  "slippage-allowance",
+  "fixed-costs",
+]);
+
+/**
+ * One named cost standing between expected gross advantage and net edge.
+ *
+ * A child table rather than four columns on the intent: each amount stays
+ * somewhere a check constraint can reach, a fifth cost kind is a row rather
+ * than a migration on the intent itself, and the embedded/separately-charged
+ * distinction is a column to group by. The same reasoning
+ * `candidate_tranches` already carries — a JSON blob would put every cost
+ * beyond the reach of any constraint.
+ *
+ * `(intent_id, kind)` is the primary key, so one intent cannot carry the
+ * same cost twice. That is not tidiness: a duplicated component is a
+ * double-counted cost, and double-counting is precisely what the persisted
+ * breakdown exists to prevent.
+ *
+ * Every row carries both its **native** amount — the asset the venue
+ * actually charges in — and its value in the intent's **numeraire**, which
+ * is the only figure that is ever summed. `conversion_source` names what
+ * converted between them, and the check below makes it required exactly
+ * when the two assets differ, so no total in this family is ever the sum of
+ * amounts in different assets with nothing saying how they were compared.
+ *
+ * The single composite foreign key does two jobs: a component cannot exist
+ * without its intent, and it cannot claim a numeraire its intent did not
+ * declare. A separate `intent_id` key would be redundant with it.
+ */
+export const intentCostComponents = pgTable(
+  "intent_cost_components",
+  {
+    intentId: text("intent_id").notNull(),
+    kind: costComponentKindEnum("kind").notNull(),
+    chargeBasis: costChargeBasisEnum("charge_basis").notNull(),
+    /** The asset the venue charges this in. */
+    nativeAssetId: text("native_asset_id").notNull(),
+    nativeAssetScale: smallint("native_asset_scale").notNull(),
+    nativeAmountBase: numeric("native_amount_base", {
+      precision: BASE_UNIT_PRECISION,
+      scale: 0,
+      mode: "bigint",
+    }).notNull(),
+    numeraireAssetId: text("numeraire_asset_id").notNull(),
+    numeraireAssetScale: smallint("numeraire_asset_scale").notNull(),
+    /** The same cost in the intent's numeraire; the only figure ever summed. */
+    numeraireAmountBase: numeric("numeraire_amount_base", {
+      precision: BASE_UNIT_PRECISION,
+      scale: 0,
+      mode: "bigint",
+    }).notNull(),
+    /** What converted native into numeraire; null exactly when they are the same asset. */
+    conversionSource: text("conversion_source"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.intentId, table.kind] }),
+    foreignKey({
+      columns: [table.intentId, table.numeraireAssetId, table.numeraireAssetScale],
+      foreignColumns: [approvedIntents.intentId, approvedIntents.numeraireAssetId, approvedIntents.numeraireAssetScale],
+      name: "intent_cost_components_intent_numeraire_fk",
+    }),
+    foreignKey({
+      columns: [table.nativeAssetId, table.nativeAssetScale],
+      foreignColumns: [assetScales.assetId, assetScales.assetScale],
+      name: "intent_cost_components_native_asset_scale_fk",
+    }),
+    // `@vigil/policy` refuses a negative cost outright, because one would
+    // inflate net edge rather than reduce it. This is the durable half.
+    check(
+      "intent_cost_components_non_negative",
+      sql`native_amount_base >= 0 and numeraire_amount_base >= 0`,
+    ),
+    check(
+      "intent_cost_components_scale_range",
+      sql.raw(
+        `native_asset_scale between 0 and ${MAX_ASSET_SCALE} and numeraire_asset_scale between 0 and ${MAX_ASSET_SCALE}`,
+      ),
+    ),
+    // Two assets, or one. Crossing assets demands a named source; staying in
+    // one asset forbids inventing a conversion that did not happen.
+    check(
+      "intent_cost_components_conversion_declared",
+      sql`(native_asset_id = numeraire_asset_id) = (conversion_source is null)`,
+    ),
+    check(
+      "intent_cost_components_conversion_source_present",
+      sql`conversion_source is null or length(btrim(conversion_source)) > 0`,
+    ),
+    // A cost already in the numeraire converts to itself. Anything else is
+    // an arithmetic error wearing a conversion's clothes.
+    check(
+      "intent_cost_components_identity_conversion",
+      sql`native_asset_id <> numeraire_asset_id or native_amount_base = numeraire_amount_base`,
+    ),
+  ],
+);
+
+/**
  * The Exchange lifecycle from `docs/architecture.md` "Execution
  * lifecycles", as the states one attempt can be in. Spelled exactly as that
  * document spells them, so a reader can hold the two side by side.
+ *
+ * This is the **Exchange** lifecycle and only that one. The on-chain half —
+ * SIGNING, BROADCAST, PENDING, INCLUDED, FINALIZED — arrives with the
+ * `transactions` record family, which is not built: `docs/architecture.md`
+ * keeps the two machines separate precisely because no chain's notion of
+ * finality, nonce, or safe cancellation matches an exchange's, and forcing a
+ * broadcast to be recorded as `ACKNOWLEDGED` is the collapse into one
+ * abstraction that document rejects. An intent may carry a `chain_id`
+ * today, so until that family lands, an on-chain route has an authorization
+ * and no lifecycle to attempt it in — which is the correct state of affairs
+ * for a venue this application has not onboarded.
  *
  * `UNKNOWN` is a state, not a failure (`docs/resilience.md` §3): a
  * submission or cancellation timeout lands here, and it is counted as live
@@ -474,7 +756,12 @@ export const executionAttempts = pgTable(
       .default(sql`0`),
     /** When the attempt was opened — written before anything is submitted. */
     submittedAt: timestamp("submitted_at", { withTimezone: true, precision: 3, mode: "date" }).notNull(),
-    /** When the current state was observed at the venue. */
+    /**
+     * When the current state was observed — by whichever clock observed it.
+     * A venue event carries the venue's; an attempt just opened, or one this
+     * application expired itself, carries ours. That is why nothing compares
+     * two of these values, or one of them with `submitted_at`.
+     */
     stateChangedAt: timestamp("state_changed_at", { withTimezone: true, precision: 3, mode: "date" }).notNull(),
     /** When this application wrote the current state down. */
     recordedAt: timestamp("recorded_at", { withTimezone: true, precision: 3, mode: "date" }).notNull(),
@@ -522,9 +809,26 @@ export const executionAttempts = pgTable(
       sql.raw(`input_asset_scale between 0 and ${MAX_ASSET_SCALE} and output_asset_scale between 0 and ${MAX_ASSET_SCALE}`),
     ),
     check("execution_attempts_reconciliation_paired", sql`(reconciled_at is null) = (reconciliation_id is null)`),
+    // Deliberately NOT `state_changed_at >= submitted_at`. `submitted_at` is
+    // this application's clock and `state_changed_at` is usually the
+    // venue's, and exchange clocks differ from ours by tens to hundreds of
+    // milliseconds in either direction. A FILLED event stamped fractionally
+    // before the local open instant is a fill that happened, and refusing to
+    // persist it would leave the attempt sitting at SUBMITTING while the
+    // venue has the money — the same blindness this family refuses to create
+    // for `max_spend_base`.
+    //
+    // No comparison between two `state_changed_at` values is enforced
+    // either, for the same reason one level down: the column is seeded from
+    // `submitted_at` when the attempt is opened, so the first venue-observed
+    // transition would still be compared against our clock. The guard that
+    // survives is `outcome_monotonic` in the `intent_lifecycle_guards`
+    // migration, which reads no clock and protects the money rather than the
+    // ordering. `reconciled_at` is ours, so comparing it to `submitted_at`
+    // compares like with like.
     check(
       "execution_attempts_instants_ordered",
-      sql`state_changed_at >= submitted_at and (reconciled_at is null or reconciled_at >= submitted_at)`,
+      sql`reconciled_at is null or reconciled_at >= submitted_at`,
     ),
     check("execution_attempts_identity_present", sql`length(btrim(client_order_id)) > 0 and length(btrim(correlation_id)) > 0`),
   ],
@@ -626,5 +930,8 @@ export const intentDispatchOutbox = pgTable(
 );
 
 export type ApprovedIntentRow = typeof approvedIntents.$inferSelect;
+export type NetEdgeBasisValue = (typeof netEdgeBasisEnum.enumValues)[number];
+export type CostChargeBasisValue = (typeof costChargeBasisEnum.enumValues)[number];
+export type CostComponentKindValue = (typeof costComponentKindEnum.enumValues)[number];
 export type ExecutionAttemptStateValue = (typeof executionAttemptStateEnum.enumValues)[number];
 export type DispatchStateValue = (typeof dispatchStateEnum.enumValues)[number];

@@ -25,7 +25,13 @@ import { postgresConstraintName, postgresErrorCode, PG_FOREIGN_KEY_VIOLATION, PG
 //     still UNKNOWN, which is the case that can spend the money twice;
 //   * an UNKNOWN attempt resolved by assumption instead of by reconciliation;
 //   * an intent consumed twice;
-//   * a fenced writer still able to mark a dispatch it no longer owns.
+//   * a fenced writer still able to mark a dispatch it no longer owns, or
+//     told it succeeded while the live leader is told the work is done;
+//   * a retry carrying a different payload reported as already enqueued,
+//     when the enqueued digest is immutable and that payload can therefore
+//     never be dispatched;
+//   * a venue clock a few milliseconds behind ours discarding a confirmed
+//     fill.
 //
 // The real-infrastructure fact these claims need is a transaction and the
 // migrated schema: every one of them is about what survives a commit, or
@@ -143,6 +149,41 @@ describe("openExecutionAttempt", () => {
     expect(await countAttempts()).toBe(0);
   });
 });
+
+  it("records a venue event stamped before the local instant the attempt was opened at — catches a cross-clock comparison discarding a confirmed fill because the exchange's clock runs a few milliseconds behind ours, leaving the attempt at SUBMITTING while the venue has the money", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+
+    const skewed = await recordAttemptOutcome(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      state: "ACKNOWLEDGED",
+      spentBase: 0n,
+      receivedBase: 0n,
+      venueOrderId: "venue-order-1",
+      // 250ms before `submittedAt`, which is this application's clock.
+      stateChangedAt: "2026-01-02T03:09:59.750Z",
+      recordedAt: "2026-01-02T03:10:01.000Z",
+      reconciliation: null,
+    });
+
+    expect(skewed).toMatchObject({ outcome: "recorded", state: "ACKNOWLEDGED" });
+    expect((await loadExecutionAttempts(db, "intent-1"))[0]?.state).toBe("ACKNOWLEDGED");
+  });
+
+  it("refuses a retry of the same attempt carrying a different payload rather than calling it a duplicate — catches a caller told its dispatch is enqueued when the immutable digest on that row belongs to a payload it does not hold", async () => {
+    await openExecutionAttempt(db, openAttempt("intent-1", 1));
+    const request = openAttempt("intent-1", 1);
+
+    const changed = await openExecutionAttempt(db, {
+      ...request,
+      dispatch: { ...request.dispatch, payloadDigest: "ab".repeat(32) },
+    });
+    const renamed = await openExecutionAttempt(db, { ...request, clientOrderId: "coid-different" });
+
+    expect(changed).toMatchObject({ outcome: "refused", code: "PAYLOAD_MISMATCH" });
+    expect(renamed).toMatchObject({ outcome: "refused", code: "PAYLOAD_MISMATCH" });
+    expect(await countAttempts()).toBe(1);
+  });
 
 describe("a retry is a versioned attempt, never a second authorization", () => {
   it("refuses a second attempt while the first is still live — catches the defect (intent_id, attempt) uniqueness alone leaves open: nothing in it requires the previous attempt to be finished", async () => {
@@ -270,6 +311,51 @@ describe("UNKNOWN is a state, and resolves only through reconciliation", () => {
     expect(attempt?.reconciliation).toEqual({ reconciliationId: "recon-1", reconciledAt: "2026-01-02T03:14:00.000Z" });
   });
 
+  it("resolves UNKNOWN on a reconciliation with a new id at the very same instant — catches a rule keyed on the reconciliation's timestamp, where a millisecond-precision column strands an attempt in UNKNOWN because two genuine reconciliations landed in the same millisecond", async () => {
+    const reconciledAt = "2026-01-02T03:14:00.000Z";
+    await recordAttemptOutcome(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      state: "ACKNOWLEDGED",
+      spentBase: 0n,
+      receivedBase: 0n,
+      venueOrderId: "venue-order-1",
+      stateChangedAt: reconciledAt,
+      recordedAt: "2026-01-02T03:14:00.100Z",
+      reconciliation: { reconciliationId: "recon-1", reconciledAt },
+    });
+    await recordAttemptOutcome(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      state: "UNKNOWN",
+      spentBase: 0n,
+      receivedBase: 0n,
+      venueOrderId: null,
+      stateChangedAt: "2026-01-02T03:15:00.000Z",
+      recordedAt: "2026-01-02T03:15:00.100Z",
+      reconciliation: null,
+    });
+
+    const resolved = await recordAttemptOutcome(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      state: "CANCELED",
+      spentBase: 0n,
+      receivedBase: 0n,
+      venueOrderId: null,
+      stateChangedAt: "2026-01-02T03:16:00.000Z",
+      recordedAt: "2026-01-02T03:16:00.100Z",
+      // A different reconciliation, at the instant the first one carried.
+      reconciliation: { reconciliationId: "recon-2", reconciledAt },
+    });
+
+    expect(resolved).toMatchObject({ outcome: "recorded", state: "CANCELED" });
+    expect((await loadExecutionAttempts(db, "intent-1"))[0]?.reconciliation).toEqual({
+      reconciliationId: "recon-2",
+      reconciledAt,
+    });
+  });
+
   it("demands a new reconciliation the second time an attempt goes UNKNOWN — catches an attempt leaving UNKNOWN on the strength of the reconciliation that settled it an hour earlier", async () => {
     await recordAttemptOutcome(db, {
       intentId: "intent-1",
@@ -303,7 +389,10 @@ describe("UNKNOWN is a state, and resolves only through reconciliation", () => {
       venueOrderId: null,
       stateChangedAt: "2026-01-02T03:17:00.000Z",
       recordedAt: "2026-01-02T03:17:00.100Z",
-      reconciliation: { reconciliationId: "recon-1", reconciledAt: "2026-01-02T03:14:00.000Z" },
+      // The same reconciliation, re-sent with a later clock reading. A rule
+      // keyed on the instant would accept this; the identity of a
+      // reconciliation is its id.
+      reconciliation: { reconciliationId: "recon-1", reconciledAt: "2026-01-02T03:18:00.000Z" },
     });
 
     expect(stale).toMatchObject({ outcome: "refused", code: "UNRECONCILED_UNKNOWN" });
@@ -497,6 +586,61 @@ describe("the dispatch outbox", () => {
 
     expect(fenced).toMatchObject({ outcome: "refused", code: "WRITER_FENCED" });
     expect((await loadDispatch(db, "intent-1", 1))?.state).toBe("pending");
+  });
+
+  it("refuses a fenced writer before deciding the work was already done, so the live leader is not handed a success it never made — catches an ordering where the stale leader settles first and the incoming one is told the dispatch is complete", async () => {
+    const request = openAttempt("intent-1", 1);
+    await openExecutionAttempt(db, { ...request, dispatch: { ...request.dispatch, fencingToken: 9n } });
+
+    const stale = await markDispatched(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      dispatcherInstanceId: "trading-instance-fenced",
+      fencingToken: 7n,
+      dispatchedAt: "2026-01-02T03:10:02.000Z",
+      recordedAt: "2026-01-02T03:10:02.100Z",
+    });
+
+    expect(stale).toMatchObject({ outcome: "refused", code: "WRITER_FENCED" });
+
+    const live = await markDispatched(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      dispatcherInstanceId: "trading-instance-b",
+      fencingToken: 11n,
+      dispatchedAt: "2026-01-02T03:10:03.000Z",
+      recordedAt: "2026-01-02T03:10:03.100Z",
+    });
+
+    expect(live).toEqual({ outcome: "recorded", dispatchId: "disp-intent-1-1" });
+    expect(await loadDispatch(db, "intent-1", 1)).toMatchObject({
+      dispatcherInstanceId: "trading-instance-b",
+      fencingToken: 11n,
+    });
+  });
+
+  it("refuses a fenced writer even when the row already carries the state it is asking for — catches the duplicate short-circuit answering before the token is compared, which hands a fenced process a success", async () => {
+    const request = openAttempt("intent-1", 1);
+    await openExecutionAttempt(db, { ...request, dispatch: { ...request.dispatch, fencingToken: 9n } });
+    await markDispatched(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      dispatcherInstanceId: "trading-instance-b",
+      fencingToken: 11n,
+      dispatchedAt: "2026-01-02T03:10:03.000Z",
+      recordedAt: "2026-01-02T03:10:03.100Z",
+    });
+
+    const stale = await markDispatched(db, {
+      intentId: "intent-1",
+      attempt: 1,
+      dispatcherInstanceId: "trading-instance-fenced",
+      fencingToken: 7n,
+      dispatchedAt: "2026-01-02T03:10:04.000Z",
+      recordedAt: "2026-01-02T03:10:04.100Z",
+    });
+
+    expect(stale).toMatchObject({ outcome: "refused", code: "WRITER_FENCED" });
   });
 
   it("refuses any further write once a dispatch is settled — catches a second hand-off of one attempt's payload", async () => {

@@ -1,13 +1,15 @@
 -- Lifecycle guards for the intents record family.
 --
--- Three rules this schema exists to hold cannot be written as a column
--- constraint, because each of them compares a row to its own past, or to
--- the authorization it belongs to:
+-- Four rules this schema exists to hold cannot be written as a column
+-- constraint, because each of them compares a row to its own past, to the
+-- authorization it belongs to, or to a set of sibling rows:
 --
---   1. an approved intent is immutable;
---   2. an attempt is opened before it acts, is versioned rather than
+--   1. an approved intent, and the cost evidence that justified it, are
+--      immutable;
+--   2. the persisted cost components sum to the total the intent claims;
+--   3. an attempt is opened before it acts, is versioned rather than
 --      re-authorized, and leaves UNKNOWN only through reconciliation;
---   3. a dispatch record exists, pending, before anything is dispatched,
+--   4. a dispatch record exists, pending, before anything is dispatched,
 --      and a fenced writer cannot mark one.
 --
 -- Row-level triggers do not fire for TRUNCATE, so an integration suite can
@@ -21,7 +23,7 @@
 -- (docs/resilience.md §4). The flat append-only refusals keep P0001, as
 -- the journal and candidate guards already do.
 
--- 1. An approved intent is immutable once approved.
+-- 1. An approved intent, and its cost evidence, are immutable once approved.
 --
 -- `ApprovedEconomicIntent` is "immutable once approved, consumable exactly
 -- once economically" (docs/architecture.md "Contracts"). This is the
@@ -33,14 +35,22 @@
 -- consumption lives on `execution_attempts`, whose whole purpose is to
 -- change state.
 --
--- The consumable-once half is the partial unique index
--- `execution_attempts_intent_id_consumed_key` plus rule 2's refusal to open
--- a new attempt on an intent some earlier attempt already consumed.
+-- `intent_cost_components` is guarded with its parent, for the reason
+-- `candidate_tranches` is guarded with `candidates`: evidence whose line
+-- items can be rewritten after the fact is not evidence. Editing a cost
+-- component after approval would make an intent that missed its hurdle look
+-- as though it cleared one.
+--
+-- Note the asymmetry with consume-once, which survives its trigger being
+-- dropped because the partial unique index holds on its own. Immutability
+-- has no such backstop — "this row may not change" is not a uniqueness
+-- claim — so the role that runs migrations and the role that runs the
+-- application should differ before anything real runs.
 CREATE FUNCTION vigil_approved_intent_append_only() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
   RAISE EXCEPTION
-    'an approved economic intent is immutable: a changed authorization is a new intent, and a retry is a versioned execution attempt (attempted % on %)',
+    'an approved economic intent and its cost evidence are immutable: a changed authorization is a new intent, and a retry is a versioned execution attempt (attempted % on %)',
     TG_OP, TG_TABLE_NAME
     USING ERRCODE = 'P0001';
 END;
@@ -50,8 +60,75 @@ CREATE TRIGGER approved_intents_append_only
   BEFORE UPDATE OR DELETE ON "approved_intents"
   FOR EACH ROW EXECUTE FUNCTION vigil_approved_intent_append_only();
 --> statement-breakpoint
+CREATE TRIGGER intent_cost_components_append_only
+  BEFORE UPDATE OR DELETE ON "intent_cost_components"
+  FOR EACH ROW EXECUTE FUNCTION vigil_approved_intent_append_only();
+--> statement-breakpoint
 
--- 2a. An attempt is opened before it acts, on an authorization that is
+-- 2. The cost components sum to the total the intent claims.
+--
+-- `expected_total_cost_base` is the figure `expected_net_edge_base` is
+-- derived from, and therefore the figure the hurdle was judged against. If
+-- the named components do not add up to it, the breakdown is decoration:
+-- a later evaluation comparing expected against realized cost would be
+-- comparing against a number no component supports.
+--
+-- Only the numeraire amounts are summed, and the check constraint on
+-- `intent_cost_components` has already refused any row whose native asset
+-- differs from the numeraire without naming a conversion source — so this
+-- sum is never an addition of amounts in different assets.
+--
+-- Deferred to commit, and attached to both tables, for the reason
+-- `journal_entries_balanced` is: the components of one intent arrive as
+-- separate rows after the parent, so an immediate check would fire on the
+-- intent insert and reject every intent that has any costs at all. An
+-- intent with no components is legal and must have a zero total, which
+-- `coalesce` gives it.
+CREATE FUNCTION vigil_intent_cost_components_total() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  target_intent text;
+  claimed numeric;
+  itemised numeric;
+BEGIN
+  target_intent := NEW.intent_id;
+
+  SELECT intent.expected_total_cost_base INTO claimed
+    FROM approved_intents intent
+   WHERE intent.intent_id = target_intent;
+
+  -- Gone, or never there: the foreign key has its own, better complaint.
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT coalesce(sum(component.numeraire_amount_base), 0) INTO itemised
+    FROM intent_cost_components component
+   WHERE component.intent_id = target_intent;
+
+  IF itemised <> claimed THEN
+    RAISE EXCEPTION
+      'intent % claims a total incremental cost of % but its components sum to %; the breakdown must account for the figure net edge was derived from',
+      target_intent, claimed, itemised
+      USING ERRCODE = '23514', CONSTRAINT = TG_NAME;
+  END IF;
+
+  RETURN NULL;
+END;
+$$;
+--> statement-breakpoint
+CREATE CONSTRAINT TRIGGER approved_intents_costs_itemised
+  AFTER INSERT ON "approved_intents"
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION vigil_intent_cost_components_total();
+--> statement-breakpoint
+CREATE CONSTRAINT TRIGGER intent_cost_components_itemised
+  AFTER INSERT ON "intent_cost_components"
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION vigil_intent_cost_components_total();
+--> statement-breakpoint
+
+-- 3a. An attempt is opened before it acts, on an authorization that is
 --     still valid and not already consumed.
 --
 -- Persistence before action (docs/resilience.md §9) is only half enforced
@@ -66,12 +143,33 @@ CREATE TRIGGER approved_intents_append_only
 -- first attempt filled and went terminal would leave the one-live-attempt
 -- index free, a second attempt could be opened and dispatched, and the
 -- database would only refuse the row that records the spend — after the
--- money had already moved. Two concurrent inserts are serialised by that
--- same index, since both are born SUBMITTING and only one may be live.
+-- money had already moved.
+--
+-- The row lock below is not decoration, and the case it closes was
+-- reproduced against Postgres 18 before it was written. Under READ
+-- COMMITTED, a transaction that has recorded a fill but not committed is
+-- invisible to this trigger's snapshot: the check saw `spent_base = 0`,
+-- passed, and the insert then waited on `execution_attempts_intent_id_live_key`
+-- because attempt 1 was still live. When the filling transaction committed,
+-- attempt 1 left that partial index, the wait resolved, and the insert
+-- succeeded — leaving attempt 2 open and dispatchable on an intent that had
+-- just been economically consumed. The trigger does not run again at that
+-- point, so nothing re-checked it. Taking the lock first makes the two
+-- orders mutually exclusive: a filling transaction already holds the row
+-- lock on the attempt it updates, so this statement waits for it, and the
+-- consumed check that follows runs on a fresh snapshot that sees the
+-- committed spend. `ORDER BY attempt` keeps the lock order deterministic,
+-- so two openers cannot deadlock against each other.
+--
+-- Locking the attempts rather than the parent intent is deliberate: any
+-- writer that records a fill takes those row locks automatically, whether
+-- or not it went through this package, while a lock on `approved_intents`
+-- would only work for writers that remembered to take it.
 CREATE FUNCTION vigil_execution_attempt_opened() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   intent approved_intents%ROWTYPE;
+  consumed boolean;
 BEGIN
   SELECT * INTO intent FROM approved_intents WHERE intent_id = NEW.intent_id;
 
@@ -110,7 +208,18 @@ BEGIN
       USING ERRCODE = '23514', CONSTRAINT = 'execution_attempts_within_intent_window';
   END IF;
 
-  IF EXISTS (SELECT 1 FROM execution_attempts prior WHERE prior.intent_id = NEW.intent_id AND prior.spent_base > 0) THEN
+  -- Wait for any in-flight write to this intent's attempts, then look.
+  PERFORM 1 FROM execution_attempts prior
+    WHERE prior.intent_id = NEW.intent_id
+    ORDER BY prior.attempt
+    FOR UPDATE;
+
+  SELECT EXISTS (
+    SELECT 1 FROM execution_attempts prior
+     WHERE prior.intent_id = NEW.intent_id AND prior.spent_base > 0
+  ) INTO consumed;
+
+  IF consumed THEN
     RAISE EXCEPTION
       'intent % has already been economically consumed; a remainder is a new authorization, not a further attempt on this one',
       intent.intent_id
@@ -126,22 +235,47 @@ CREATE TRIGGER execution_attempts_opened
   FOR EACH ROW EXECUTE FUNCTION vigil_execution_attempt_opened();
 --> statement-breakpoint
 
--- 2b. An attempt moves forward only, and leaves UNKNOWN only through
+-- 3b. An attempt moves forward only, and leaves UNKNOWN only through
 --     reconciliation.
 --
 -- UNKNOWN is a state, not a failure (docs/resilience.md §3): it resolves
 -- "only through reconciliation against the venue's or chain's own confirmed
 -- state". A plain `update … set state = 'FILLED'` against an UNKNOWN
 -- attempt is precisely the assumption that rule forbids, so leaving UNKNOWN
--- requires a reconciliation recorded in the same statement — and a *new*
--- one: `reconciled_at` must differ from the value already on the row, so an
--- attempt that went UNKNOWN a second time cannot be resolved by the
--- reconciliation that settled it the first time.
+-- requires a reconciliation recorded in the same statement — and a
+-- *different* one from whatever already settled this attempt.
+--
+-- The rule keys on `reconciliation_id`, not on `reconciled_at`, because the
+-- identity of a reconciliation is its id. Keying on the instant fails in
+-- both directions: `reconciled_at` is timestamp(3), so a genuinely new
+-- reconciliation landing in the same millisecond would be refused and the
+-- attempt stranded in UNKNOWN; and re-sending the same reconciliation with
+-- a bumped clock reading would be accepted, which is the assumption the
+-- rule exists to prevent wearing a fresh timestamp.
 --
 -- A terminal attempt is history and takes no further writes. The
 -- consequence is deliberate: a reconciliation that disagrees with a settled
 -- attempt is an incident to record, never an edit that erases what this
 -- application already believed.
+--
+-- Deliberately NOT enforced here: that `state_changed_at` moves forward.
+-- The obvious version of that rule compares the venue's clock with this
+-- application's and refuses a fill stamped fractionally early — the attempt
+-- would sit at SUBMITTING while the venue had the money. The subtler
+-- version, comparing each `state_changed_at` with the previous one, has the
+-- same defect in two places: an attempt is opened with `state_changed_at`
+-- seeded from `submitted_at`, which is OUR clock, so the first venue-observed
+-- transition is a cross-clock comparison however the rule is phrased; and a
+-- locally-decided EXPIRED following a venue ACKNOWLEDGED crosses back the
+-- other way. This column holds whichever clock observed the state, so no
+-- comparison between two of its values is safe.
+--
+-- What is left is a guard that cannot refuse a real event, because it reads
+-- no clock at all: `outcome_monotonic` below. Money already recorded cannot
+-- be un-recorded, whatever any timestamp says — and that, not the ordering
+-- of observations, is the invariant that protects capital. An out-of-order
+-- poll can still rewrite state; a reader takes the newest record, and the
+-- terminal and UNKNOWN rules bound what it can rewrite state to.
 --
 -- Deliberately NOT enforced here: a cap of `spent_base` at the intent's
 -- `max_spend_base`. A fill that exceeds the authorization has already
@@ -181,11 +315,11 @@ BEGIN
   END IF;
 
   IF OLD.state = 'UNKNOWN' AND NEW.state <> 'UNKNOWN'
-     AND (NEW.reconciled_at IS NULL
-          OR NEW.reconciliation_id IS NULL
-          OR NEW.reconciled_at IS NOT DISTINCT FROM OLD.reconciled_at) THEN
+     AND (NEW.reconciliation_id IS NULL
+          OR NEW.reconciled_at IS NULL
+          OR NEW.reconciliation_id IS NOT DISTINCT FROM OLD.reconciliation_id) THEN
     RAISE EXCEPTION
-      'execution attempt % is UNKNOWN and resolves only through reconciliation against the venue''s confirmed state, recorded in the same write',
+      'execution attempt % is UNKNOWN and resolves only through a reconciliation against the venue''s confirmed state, named in the same write and not the one that settled it before',
       OLD.attempt_id
       USING ERRCODE = '23514', CONSTRAINT = 'execution_attempts_unknown_needs_reconciliation';
   END IF;
@@ -197,13 +331,6 @@ BEGIN
       USING ERRCODE = '23514', CONSTRAINT = 'execution_attempts_outcome_monotonic';
   END IF;
 
-  IF NEW.state IS DISTINCT FROM OLD.state AND NEW.state_changed_at < OLD.state_changed_at THEN
-    RAISE EXCEPTION
-      'execution attempt % changed state at %, before the state it is leaving was observed at %',
-      OLD.attempt_id, NEW.state_changed_at, OLD.state_changed_at
-      USING ERRCODE = '23514', CONSTRAINT = 'execution_attempts_states_ordered';
-  END IF;
-
   RETURN NEW;
 END;
 $$;
@@ -213,7 +340,7 @@ CREATE TRIGGER execution_attempts_transition
   FOR EACH ROW EXECUTE FUNCTION vigil_execution_attempt_transition();
 --> statement-breakpoint
 
--- 3a. A dispatch record is written, pending, before anything is dispatched.
+-- 4a. A dispatch record is written, pending, before anything is dispatched.
 --
 -- "Dispatch goes through a durable outbox. If a durable record cannot be
 -- written, no new economic action proceeds" (docs/resilience.md §9). A row
@@ -241,7 +368,7 @@ CREATE TRIGGER intent_dispatch_outbox_enqueued
   FOR EACH ROW EXECUTE FUNCTION vigil_intent_dispatch_enqueued();
 --> statement-breakpoint
 
--- 3b. One effective writer, fenced; and what was dispatched is what was
+-- 4b. One effective writer, fenced; and what was dispatched is what was
 --     authorized.
 --
 -- docs/resilience.md §7 requires exactly one process to hold dispatch
@@ -249,11 +376,16 @@ CREATE TRIGGER intent_dispatch_outbox_enqueued
 -- writer before the incoming one acts. `fencing_token` is the schema's part
 -- of that: a writer carrying a token lower than the row's is a writer that
 -- has been fenced, and its write is refused here rather than by whichever
--- process happens to notice. That is necessary and not sufficient, and §7
--- says so — fencing must remove the outgoing writer's real capability at
--- the venue, which no column can do. This trigger stops a stale process
--- from rewriting the record of a dispatch; it cannot stop it from holding
--- an open socket.
+-- process happens to notice.
+--
+-- Two things this cannot do, both named so nobody mistakes the token for
+-- more than it is. It cannot remove the outgoing writer's real capability
+-- at the venue, which is what §7 actually demands — this stops a stale
+-- process from rewriting the record of a dispatch, not from holding an open
+-- socket. And it cannot fence a writer carrying a token *equal* to the
+-- row's, which today includes the writer that enqueued the row: no exported
+-- path raises the token on a pending row, so a claim step that does is owed
+-- by the slice that runs dispatchers.
 --
 -- `payload_digest` is immutable for the same reason the intent is: a digest
 -- that can be rewritten after the row is committed proves nothing about

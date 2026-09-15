@@ -187,13 +187,21 @@ function wholeAttempt(attempt: number): boolean {
   return Number.isSafeInteger(attempt) && attempt >= 1;
 }
 
-async function findAttempt(
-  db: VigilDatabase,
-  intentId: string,
-  attempt: number,
-): Promise<{ readonly attemptId: string; readonly dispatchId: string | null } | null> {
+type StoredOpenAttempt = {
+  readonly attemptId: string;
+  readonly clientOrderId: string;
+  readonly dispatchId: string | null;
+  readonly payloadDigest: string | null;
+};
+
+async function findAttempt(db: VigilDatabase, intentId: string, attempt: number): Promise<StoredOpenAttempt | null> {
   const rows = await db
-    .select({ attemptId: executionAttempts.attemptId, dispatchId: intentDispatchOutbox.dispatchId })
+    .select({
+      attemptId: executionAttempts.attemptId,
+      clientOrderId: executionAttempts.clientOrderId,
+      dispatchId: intentDispatchOutbox.dispatchId,
+      payloadDigest: intentDispatchOutbox.payloadDigest,
+    })
     .from(executionAttempts)
     .leftJoin(
       intentDispatchOutbox,
@@ -205,8 +213,37 @@ async function findAttempt(
     .where(and(eq(executionAttempts.intentId, intentId), eq(executionAttempts.attempt, attempt)))
     .limit(1);
 
-  const row = rows[0];
-  return row === undefined ? null : { attemptId: row.attemptId, dispatchId: row.dispatchId };
+  return rows[0] ?? null;
+}
+
+/**
+ * Whether a retry is the same work as what is already stored.
+ *
+ * Returning `duplicate` for a request that differs from the stored row is
+ * the quiet failure this exists to prevent: the caller is told its dispatch
+ * is enqueued, the payload digest on that row belongs to a *different*
+ * payload, and because the digest is immutable the payload the caller
+ * actually holds can never be enqueued at all. A dispatcher that then reads
+ * the outbox digest to prove "what I am about to send is what was
+ * authorized" — the entire purpose of that column — finds a mismatch with
+ * nothing to explain it.
+ *
+ * `dispatchId` is deliberately not compared: which row won is the store's
+ * answer to give, and it is returned to the caller either way. What must
+ * match is the work — the attempt, the id the venue will see, and the
+ * payload.
+ */
+function describeAttemptMismatch(stored: StoredOpenAttempt, request: OpenAttemptRequest): string | null {
+  if (stored.attemptId !== request.attemptId) {
+    return `attempt ${request.attempt} on intent ${request.intentId} is already open as ${stored.attemptId}, not ${request.attemptId}`;
+  }
+  if (stored.clientOrderId !== request.clientOrderId) {
+    return `attempt ${request.attempt} on intent ${request.intentId} is already open under client order id ${stored.clientOrderId}, not ${request.clientOrderId}`;
+  }
+  if (stored.payloadDigest !== null && stored.payloadDigest !== request.dispatch.payloadDigest) {
+    return `attempt ${request.attempt} on intent ${request.intentId} already has a dispatch enqueued for a different payload; the enqueued digest is immutable, so this payload can never be dispatched under this attempt`;
+  }
+  return null;
 }
 
 async function findDispatch(db: VigilDatabase, intentId: string, attempt: number): Promise<StoredDispatch | null> {
@@ -309,8 +346,14 @@ export async function openExecutionAttempt(
   }
 
   const existing = await findAttempt(db, request.intentId, request.attempt);
-  if (existing !== null && existing.dispatchId !== null) {
-    return { outcome: "duplicate", attemptId: existing.attemptId, dispatchId: existing.dispatchId };
+  if (existing !== null) {
+    const mismatch = describeAttemptMismatch(existing, request);
+    if (mismatch !== null) {
+      return refuseIntentWrite("PAYLOAD_MISMATCH", mismatch);
+    }
+    if (existing.dispatchId !== null) {
+      return { outcome: "duplicate", attemptId: existing.attemptId, dispatchId: existing.dispatchId };
+    }
   }
 
   try {
@@ -373,10 +416,20 @@ export async function openExecutionAttempt(
       throw error;
     }
 
+    // A duplicate here is the same attempt arriving twice concurrently: the
+    // lookup above found nothing because the winner had not committed yet.
+    // The winner still has to be the same work, or this is a retry carrying
+    // a payload that can never be enqueued.
     if (driver.code === "DUPLICATE_RECORD") {
       const duplicate = await findAttempt(db, request.intentId, request.attempt);
-      if (duplicate !== null && duplicate.dispatchId !== null) {
-        return { outcome: "duplicate", attemptId: duplicate.attemptId, dispatchId: duplicate.dispatchId };
+      if (duplicate !== null) {
+        const mismatch = describeAttemptMismatch(duplicate, request);
+        if (mismatch !== null) {
+          return refuseIntentWrite("PAYLOAD_MISMATCH", mismatch);
+        }
+        if (duplicate.dispatchId !== null) {
+          return { outcome: "duplicate", attemptId: duplicate.attemptId, dispatchId: duplicate.dispatchId };
+        }
       }
     }
 
@@ -509,6 +562,20 @@ async function settleDispatch(
       `no dispatch is enqueued for attempt ${claim.attempt} on intent ${claim.intentId}`,
     );
   }
+  // Fencing is checked BEFORE the duplicate short-circuit, and the order is
+  // the whole point. A fenced leader that still holds a stale token would
+  // otherwise settle the row first — the trigger refuses only a strictly
+  // lower token, and the enqueuing writer's token equals the row's — and
+  // the live leader arriving afterwards would be handed a success-shaped
+  // `duplicate` for work it never did. Refusing the stale writer here means
+  // the answer a fenced process gets is that it has been fenced.
+  if (claim.fencingToken < current.fencingToken) {
+    return refuseIntentWrite(
+      "WRITER_FENCED",
+      `dispatch ${current.dispatchId} is held at fencing token ${current.fencingToken.toString()}; this writer carries ${claim.fencingToken.toString()} and has been fenced`,
+    );
+  }
+
   // A redelivery of the settlement this row already carries is not a
   // refusal: the work is done, and the writer needs to know that rather
   // than to see the terminal-state guard as a failure.

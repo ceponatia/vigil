@@ -1,9 +1,14 @@
 import { sql, type SQL } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { approvedIntents } from "../schema/intents";
+import { approvedIntents, intentCostComponents } from "../schema/intents";
 import { storeCandidate } from "../test-support/decision-fixtures";
-import { storeApprovedIntent, TEST_OTHER_SCALE } from "../test-support/intent-fixtures";
+import {
+  marginalNetEdgeEconomics,
+  storeApprovedIntent,
+  storeIntentEconomics,
+  TEST_OTHER_SCALE,
+} from "../test-support/intent-fixtures";
 import { openLedgerTestDb, TEST_ASSET, TEST_OTHER_ASSET, TEST_SCALE } from "../test-support/journal-fixtures";
 import { recordCandidate } from "./decision-store";
 import {
@@ -12,7 +17,7 @@ import {
   recordApprovedIntent,
   type IntentProvenance,
 } from "./intent-store";
-import { postgresErrorCode, PG_RAISE_EXCEPTION } from "./pg-errors";
+import { postgresConstraintName, postgresErrorCode, PG_RAISE_EXCEPTION } from "./pg-errors";
 
 // The defects this file kills:
 //   * the same approved proposal, delivered twice by an at-least-once
@@ -22,6 +27,12 @@ import { postgresErrorCode, PG_RAISE_EXCEPTION } from "./pg-errors";
 //     `ApprovedEconomicIntent` contract says must never happen;
 //   * an authorization that outlives its window, names a candidate nobody
 //     journaled, or routes over a chain with no simulation that passed;
+//   * an approved spend that cannot later be shown to have cleared its cost
+//     hurdle — the point-in-time evidence gone, or present and not adding
+//     up, which is worse;
+//   * a cost breakdown that double-counts an embedded cost, or silently
+//     adds amounts denominated in different assets;
+//   * persistence moving a marginal decision across its own threshold;
 //   * a base-unit amount that does not survive the round trip exactly,
 //     which is how a float reaches a spending limit.
 //
@@ -199,6 +210,236 @@ describe("recordApprovedIntent", () => {
 
     expect(refused).toMatchObject({ outcome: "refused", code: "INVALID_AMOUNT" });
     expect(await countIntents()).toBe(0);
+  });
+});
+
+describe("the economics that passed policy", () => {
+  it("round-trips every figure and both cost bases exactly — catches the evidence being stored as a summary, after which no later evaluation can separate execution quality from luck", async () => {
+    const economics = storeIntentEconomics({
+      expectedGrossBase: 5_100n,
+      expectedTotalCostBase: 2_600n,
+      expectedNetEdgeBase: 2_500n,
+      costComponents: [
+        {
+          kind: "proportional-fee",
+          chargeBasis: "separately-charged",
+          nativeAssetId: TEST_ASSET,
+          nativeScale: TEST_SCALE,
+          nativeAmountBase: 1_600n,
+          numeraireAmountBase: 1_600n,
+          conversionSource: null,
+        },
+        {
+          kind: "spread",
+          chargeBasis: "embedded",
+          nativeAssetId: TEST_ASSET,
+          nativeScale: TEST_SCALE,
+          nativeAmountBase: 1_000n,
+          numeraireAmountBase: 1_000n,
+          conversionSource: null,
+        },
+      ],
+    });
+
+    const recorded = await recordApprovedIntent(db, storeApprovedIntent("intent-econ-round-trip", { economics }));
+    expect(recorded).toEqual({ outcome: "recorded", intentId: "intent-econ-round-trip" });
+
+    const stored = await loadApprovedIntent(db, "intent-econ-round-trip");
+    expect(stored?.economics).toEqual(economics);
+    expect(stored?.economics.costComponents.map((component) => component.chargeBasis).sort()).toEqual([
+      "embedded",
+      "separately-charged",
+    ]);
+  });
+
+  it("records a decision that clears its minimum by one base unit, and refuses the same case one unit short — catches persistence moving a marginal decision across the threshold policy judged it against", async () => {
+    const clears = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-marginal-clears", { economics: marginalNetEdgeEconomics(true) }),
+    );
+    const misses = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-marginal-misses", { economics: marginalNetEdgeEconomics(false) }),
+    );
+
+    expect(clears).toEqual({ outcome: "recorded", intentId: "intent-marginal-clears" });
+    expect(misses).toMatchObject({ outcome: "refused", code: "NET_EDGE_BELOW_MINIMUM" });
+
+    const stored = await loadApprovedIntent(db, "intent-marginal-clears");
+    expect(stored?.economics).toEqual(marginalNetEdgeEconomics(true));
+    expect(stored?.economics.expectedNetEdgeBase).toBe((stored?.economics.minimumNetEdgeBase ?? 0n) + 1n);
+    expect(await countIntents()).toBe(1);
+  });
+
+  it("refuses a breakdown that does not sum to the total the net edge was derived from, and writes nothing — catches a components list that decorates a total no component supports", async () => {
+    const refused = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-unbalanced", {
+        economics: storeIntentEconomics({ expectedTotalCostBase: 2_600n, expectedGrossBase: 5_100n, expectedNetEdgeBase: 2_500n,
+          costComponents: [
+            {
+              kind: "proportional-fee",
+              chargeBasis: "separately-charged",
+              nativeAssetId: TEST_ASSET,
+              nativeScale: TEST_SCALE,
+              nativeAmountBase: 2_599n,
+              numeraireAmountBase: 2_599n,
+              conversionSource: null,
+            },
+          ],
+        }),
+      }),
+    );
+
+    expect(refused).toMatchObject({ outcome: "refused", code: "COST_COMPONENTS_UNBALANCED" });
+    expect(await countIntents()).toBe(0);
+  });
+
+  it("refuses a net edge that is not gross less cost — catches a stored triple that does not add up, which is evidence nobody can check", async () => {
+    const refused = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-bad-identity", {
+        economics: storeIntentEconomics({ expectedNetEdgeBase: 9_999n }),
+      }),
+    );
+
+    expect(refused).toMatchObject({ outcome: "refused", code: "INVALID_ECONOMICS" });
+    expect(await countIntents()).toBe(0);
+  });
+
+  it("refuses a cost charged in another asset with nothing saying how it was converted, and records the same cost once a source is named — catches a total that silently adds amounts in two different assets", async () => {
+    const crossAsset = (conversionSource: string | null) =>
+      storeIntentEconomics({
+        expectedGrossBase: 5_100n,
+        expectedTotalCostBase: 2_600n,
+        expectedNetEdgeBase: 2_500n,
+        costComponents: [
+          {
+            kind: "fixed-costs",
+            chargeBasis: "separately-charged",
+            nativeAssetId: TEST_OTHER_ASSET,
+            nativeScale: TEST_OTHER_SCALE,
+            nativeAmountBase: 130_000n,
+            numeraireAmountBase: 2_600n,
+            conversionSource,
+          },
+        ],
+      });
+
+    const undeclared = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-cross-asset-bare", { economics: crossAsset(null) }),
+    );
+    const declared = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-cross-asset", { economics: crossAsset("quote-synthetic-0 mid") }),
+    );
+
+    expect(undeclared).toMatchObject({ outcome: "refused", code: "MISSING_CONVERSION_SOURCE" });
+    expect(declared).toEqual({ outcome: "recorded", intentId: "intent-cross-asset" });
+    const stored = await loadApprovedIntent(db, "intent-cross-asset");
+    expect(stored?.economics.costComponents[0]).toMatchObject({
+      nativeAmountBase: 130_000n,
+      numeraireAmountBase: 2_600n,
+      conversionSource: "quote-synthetic-0 mid",
+    });
+  });
+
+  it("refuses one cost kind named twice — catches a breakdown that counts the same fee twice and still sums to a total that looks right", async () => {
+    const component = {
+      kind: "proportional-fee",
+      chargeBasis: "separately-charged",
+      nativeAssetId: TEST_ASSET,
+      nativeScale: TEST_SCALE,
+      nativeAmountBase: 1_300n,
+      numeraireAmountBase: 1_300n,
+      conversionSource: null,
+    } as const;
+
+    const refused = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-double-counted", {
+        economics: storeIntentEconomics({
+          expectedGrossBase: 5_100n,
+          expectedTotalCostBase: 2_600n,
+          expectedNetEdgeBase: 2_500n,
+          costComponents: [component, component],
+        }),
+      }),
+    );
+
+    expect(refused).toMatchObject({ outcome: "refused", code: "DUPLICATE_COST_COMPONENT" });
+    expect(await countIntents()).toBe(0);
+  });
+
+  it("records a protective unwind that expects a loss and was judged against no hurdle, and refuses one that claims an exemption and a minimum at once — catches a schema that would block protection for want of a fabricated hurdle", async () => {
+    const protective = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-protective", {
+        remainingInventoryTreatment: "LIQUIDATE",
+        economics: storeIntentEconomics({
+          expectedGrossBase: -250_000n,
+          expectedTotalCostBase: 2_600n,
+          expectedNetEdgeBase: -252_600n,
+          netEdgeBasis: "protective-exempt",
+          minimumNetEdgeBase: null,
+        }),
+      }),
+    );
+    const contradictory = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-contradictory", {
+        economics: storeIntentEconomics({ netEdgeBasis: "protective-exempt" }),
+      }),
+    );
+
+    expect(protective).toEqual({ outcome: "recorded", intentId: "intent-protective" });
+    expect((await loadApprovedIntent(db, "intent-protective"))?.economics.expectedNetEdgeBase).toBe(-252_600n);
+    expect(contradictory).toMatchObject({ outcome: "refused", code: "INVALID_ECONOMICS" });
+  });
+
+  it("refuses an authorization decided on a quote acquired after the decision — catches a record whose point-in-time evidence post-dates the point in time", async () => {
+    const refused = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-future-quote", {
+        economics: storeIntentEconomics({ quoteAcquiredAt: "2026-01-02T03:30:00.000Z" }),
+      }),
+    );
+
+    expect(refused).toMatchObject({ outcome: "refused", code: "INVALID_ECONOMICS" });
+    expect(await countIntents()).toBe(0);
+  });
+
+  it("refuses an unbalanced breakdown written directly, at commit — the deferred constraint trigger is what holds when the writer is a backfill rather than this store", async () => {
+    await recordApprovedIntent(db, storeApprovedIntent("intent-direct"));
+
+    const failure = await errorFrom(() =>
+      db.execute(sql`
+        insert into ${intentCostComponents}
+          (intent_id, kind, charge_basis, native_asset_id, native_asset_scale, native_amount_base,
+           numeraire_asset_id, numeraire_asset_scale, numeraire_amount_base, conversion_source)
+        values ('intent-direct', 'fixed-costs', 'separately-charged', ${TEST_ASSET}, ${TEST_SCALE}, 7,
+          ${TEST_ASSET}, ${TEST_SCALE}, 7, null)
+      `),
+    );
+
+    expect(postgresConstraintName(failure)).toBe("intent_cost_components_itemised");
+    expect((await loadApprovedIntent(db, "intent-direct"))?.economics.costComponents).toHaveLength(1);
+  });
+
+  it("rejects an UPDATE against a stored cost component — catches an intent that missed its hurdle being made to look as though it cleared one", async () => {
+    await recordApprovedIntent(db, storeApprovedIntent("intent-frozen-costs"));
+
+    const failure = await errorFrom(() =>
+      db.execute(
+        sql`update ${intentCostComponents} set numeraire_amount_base = 1 where intent_id = 'intent-frozen-costs'`,
+      ),
+    );
+
+    expect(postgresErrorCode(failure)).toBe(PG_RAISE_EXCEPTION);
+    expect((await loadApprovedIntent(db, "intent-frozen-costs"))?.economics.costComponents[0]?.numeraireAmountBase).toBe(
+      2_600n,
+    );
   });
 });
 

@@ -68,14 +68,14 @@
     {
       "idx": 9,
       "version": "7",
-      "when": 1789480807359,
-      "tag": "0009_approved_intents_attempts_and_outbox",
+      "when": 1789481650670,
+      "tag": "0009_approved_intents_economics_attempts_and_outbox",
       "breakpoints": true
     },
     {
       "idx": 10,
       "version": "7",
-      "when": 1789480832756,
+      "when": 1789481682823,
       "tag": "0010_intent_lifecycle_guards",
       "breakpoints": true
     }

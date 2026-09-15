@@ -1,5 +1,8 @@
+CREATE TYPE "public"."cost_charge_basis" AS ENUM('embedded', 'separately-charged');--> statement-breakpoint
+CREATE TYPE "public"."cost_component_kind" AS ENUM('proportional-fee', 'spread', 'slippage-allowance', 'fixed-costs');--> statement-breakpoint
 CREATE TYPE "public"."dispatch_state" AS ENUM('pending', 'dispatched', 'abandoned');--> statement-breakpoint
 CREATE TYPE "public"."execution_attempt_state" AS ENUM('SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'CANCEL_PENDING', 'UNKNOWN', 'FILLED', 'CANCELED', 'REJECTED', 'EXPIRED');--> statement-breakpoint
+CREATE TYPE "public"."net_edge_basis" AS ENUM('hurdle', 'protective-exempt');--> statement-breakpoint
 CREATE TABLE "approved_intents" (
 	"intent_id" text PRIMARY KEY NOT NULL,
 	"idempotency_key" text NOT NULL,
@@ -27,6 +30,17 @@ CREATE TABLE "approved_intents" (
 	"benchmark_id" text,
 	"approval_reason" text,
 	"adapter_capability_version" text NOT NULL,
+	"numeraire_asset_id" text NOT NULL,
+	"numeraire_asset_scale" smallint NOT NULL,
+	"quote_id" text NOT NULL,
+	"quote_acquired_at" timestamp (3) with time zone NOT NULL,
+	"cost_model_version" text NOT NULL,
+	"notional_base" numeric(78, 0) NOT NULL,
+	"expected_gross_base" numeric(78, 0) NOT NULL,
+	"expected_total_cost_base" numeric(78, 0) NOT NULL,
+	"expected_net_edge_base" numeric(78, 0) NOT NULL,
+	"net_edge_basis" "net_edge_basis" NOT NULL,
+	"minimum_net_edge_base" numeric(78, 0),
 	"chain_simulation_id" text,
 	"chain_simulation_passed" boolean,
 	"approved_at" timestamp (3) with time zone NOT NULL,
@@ -37,9 +51,15 @@ CREATE TABLE "approved_intents" (
 	"portfolio_snapshot_version" text NOT NULL,
 	"market_snapshot_version" text NOT NULL,
 	"fee_snapshot_version" text NOT NULL,
+	CONSTRAINT "approved_intents_numeraire_key" UNIQUE("intent_id","numeraire_asset_id","numeraire_asset_scale"),
 	CONSTRAINT "approved_intents_identity_present" CHECK (length(btrim(intent_id)) > 0 and length(btrim(idempotency_key)) > 0 and length(btrim(correlation_id)) > 0 and length(btrim(economic_action_id)) > 0),
 	CONSTRAINT "approved_intents_amounts_authorize_something" CHECK (quantity_base > 0 and max_spend_base > 0 and min_acceptable_receipt_base >= 0 and permitted_residual_base >= 0 and permitted_residual_base <= max_spend_base),
-	CONSTRAINT "approved_intents_scale_range" CHECK (input_asset_scale between 0 and 36 and output_asset_scale between 0 and 36),
+	CONSTRAINT "approved_intents_scale_range" CHECK (input_asset_scale between 0 and 36 and output_asset_scale between 0 and 36 and numeraire_asset_scale between 0 and 36),
+	CONSTRAINT "approved_intents_net_edge_derived" CHECK (expected_net_edge_base = expected_gross_base - expected_total_cost_base),
+	CONSTRAINT "approved_intents_economics_sane" CHECK (expected_total_cost_base >= 0 and notional_base > 0),
+	CONSTRAINT "approved_intents_net_edge_hurdle" CHECK ((net_edge_basis = 'hurdle') = (minimum_net_edge_base is not null) and (minimum_net_edge_base is null or expected_net_edge_base >= minimum_net_edge_base)),
+	CONSTRAINT "approved_intents_quote_precedes_approval" CHECK (quote_acquired_at <= approved_at),
+	CONSTRAINT "approved_intents_economics_provenance_present" CHECK (length(btrim(quote_id)) > 0 and length(btrim(cost_model_version)) > 0),
 	CONSTRAINT "approved_intents_window" CHECK (valid_until > approved_at),
 	CONSTRAINT "approved_intents_freshness_positive" CHECK (required_freshness_ms > 0),
 	CONSTRAINT "approved_intents_chain_validation_paired" CHECK ((chain_simulation_id is null) = (chain_simulation_passed is null)),
@@ -70,8 +90,27 @@ CREATE TABLE "execution_attempts" (
 	CONSTRAINT "execution_attempts_received_implies_spent" CHECK (received_base = 0 or spent_base > 0),
 	CONSTRAINT "execution_attempts_scale_range" CHECK (input_asset_scale between 0 and 36 and output_asset_scale between 0 and 36),
 	CONSTRAINT "execution_attempts_reconciliation_paired" CHECK ((reconciled_at is null) = (reconciliation_id is null)),
-	CONSTRAINT "execution_attempts_instants_ordered" CHECK (state_changed_at >= submitted_at and (reconciled_at is null or reconciled_at >= submitted_at)),
+	CONSTRAINT "execution_attempts_instants_ordered" CHECK (reconciled_at is null or reconciled_at >= submitted_at),
 	CONSTRAINT "execution_attempts_identity_present" CHECK (length(btrim(client_order_id)) > 0 and length(btrim(correlation_id)) > 0)
+);
+--> statement-breakpoint
+CREATE TABLE "intent_cost_components" (
+	"intent_id" text NOT NULL,
+	"kind" "cost_component_kind" NOT NULL,
+	"charge_basis" "cost_charge_basis" NOT NULL,
+	"native_asset_id" text NOT NULL,
+	"native_asset_scale" smallint NOT NULL,
+	"native_amount_base" numeric(78, 0) NOT NULL,
+	"numeraire_asset_id" text NOT NULL,
+	"numeraire_asset_scale" smallint NOT NULL,
+	"numeraire_amount_base" numeric(78, 0) NOT NULL,
+	"conversion_source" text,
+	CONSTRAINT "intent_cost_components_intent_id_kind_pk" PRIMARY KEY("intent_id","kind"),
+	CONSTRAINT "intent_cost_components_non_negative" CHECK (native_amount_base >= 0 and numeraire_amount_base >= 0),
+	CONSTRAINT "intent_cost_components_scale_range" CHECK (native_asset_scale between 0 and 36 and numeraire_asset_scale between 0 and 36),
+	CONSTRAINT "intent_cost_components_conversion_declared" CHECK ((native_asset_id = numeraire_asset_id) = (conversion_source is null)),
+	CONSTRAINT "intent_cost_components_conversion_source_present" CHECK (conversion_source is null or length(btrim(conversion_source)) > 0),
+	CONSTRAINT "intent_cost_components_identity_conversion" CHECK (native_asset_id <> numeraire_asset_id or native_amount_base = numeraire_amount_base)
 );
 --> statement-breakpoint
 CREATE TABLE "intent_dispatch_outbox" (
@@ -99,7 +138,10 @@ CREATE TABLE "intent_dispatch_outbox" (
 ALTER TABLE "approved_intents" ADD CONSTRAINT "approved_intents_candidate_id_fk" FOREIGN KEY ("candidate_id") REFERENCES "public"."candidates"("candidate_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "approved_intents" ADD CONSTRAINT "approved_intents_input_asset_scale_fk" FOREIGN KEY ("input_asset_id","input_asset_scale") REFERENCES "public"."asset_scales"("asset_id","asset_scale") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "approved_intents" ADD CONSTRAINT "approved_intents_output_asset_scale_fk" FOREIGN KEY ("output_asset_id","output_asset_scale") REFERENCES "public"."asset_scales"("asset_id","asset_scale") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "approved_intents" ADD CONSTRAINT "approved_intents_numeraire_asset_scale_fk" FOREIGN KEY ("numeraire_asset_id","numeraire_asset_scale") REFERENCES "public"."asset_scales"("asset_id","asset_scale") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "execution_attempts" ADD CONSTRAINT "execution_attempts_intent_id_fk" FOREIGN KEY ("intent_id") REFERENCES "public"."approved_intents"("intent_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "intent_cost_components" ADD CONSTRAINT "intent_cost_components_intent_numeraire_fk" FOREIGN KEY ("intent_id","numeraire_asset_id","numeraire_asset_scale") REFERENCES "public"."approved_intents"("intent_id","numeraire_asset_id","numeraire_asset_scale") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "intent_cost_components" ADD CONSTRAINT "intent_cost_components_native_asset_scale_fk" FOREIGN KEY ("native_asset_id","native_asset_scale") REFERENCES "public"."asset_scales"("asset_id","asset_scale") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "intent_dispatch_outbox" ADD CONSTRAINT "intent_dispatch_outbox_attempt_fk" FOREIGN KEY ("intent_id","attempt") REFERENCES "public"."execution_attempts"("intent_id","attempt") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "approved_intents_idempotency_key_key" ON "approved_intents" USING btree ("idempotency_key");--> statement-breakpoint
 CREATE UNIQUE INDEX "approved_intents_economic_action_id_key" ON "approved_intents" USING btree ("economic_action_id");--> statement-breakpoint

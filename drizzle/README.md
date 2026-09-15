@@ -15,17 +15,21 @@ Generated from `packages/db/src/schema/`:
   `NOT NULL` columns are added without a default, which requires the tables
   to be empty — they are in every environment, since nothing is deployed and
   CI migrates from zero.
-- `0009_approved_intents_attempts_and_outbox` creates the rest of the
-  `intents` family — `approved_intents`, `execution_attempts`,
-  `intent_dispatch_outbox`, and the `execution_attempt_state` /
-  `dispatch_state` enums — with the unique keys that make a duplicated
-  proposal, a duplicate attempt number, a second live attempt, and a second
-  economically consumed attempt impossible. Every table is new, so there is
-  nothing to back-fill and no existing row to reinterpret.
 - `0007_decisions_and_ops_record_families` creates the `decisions` family
   (`candidates`, `candidate_tranches`, `candidate_evaluations`, and the
   `candidate_horizon` / `candidate_outcome` enums) and the `ops` family's
   `heartbeats`. Every table is new, so there is nothing to back-fill and no
+  existing row to reinterpret.
+- `0009_approved_intents_economics_attempts_and_outbox` creates the rest of
+  the `intents` family — `approved_intents` with the executable-economics
+  evidence that passed policy, `intent_cost_components`,
+  `execution_attempts`, `intent_dispatch_outbox`, and the
+  `net_edge_basis` / `cost_charge_basis` / `cost_component_kind` /
+  `execution_attempt_state` / `dispatch_state` enums. Its constraints make a
+  duplicated proposal, a duplicate attempt number, a second live attempt, a
+  second economically consumed attempt, an intent that does not reach its
+  own net-edge hurdle, and a cost total that no component supports all
+  impossible. Every table is new, so there is nothing to back-fill and no
   existing row to reinterpret.
 
 Hand-authored (`drizzle-kit generate --custom`), because `drizzle-kit`
@@ -45,15 +49,27 @@ cannot derive a trigger from the schema:
   left unguarded: evaluations accumulate and readers take the newest, so
   appending is already the correction path there.
 - `0010_intent_lifecycle_guards` rejects every `UPDATE` and `DELETE` against
-  an approved intent, holds an execution attempt to the lifecycle
-  `docs/architecture.md` defines — opened in `SUBMITTING` with nothing spent,
-  leaving `UNKNOWN` only with a reconciliation recorded in the same write,
-  never lowering a confirmed amount, never written again once settled, and
-  never opened at all on an intent an earlier attempt already consumed — and
-  holds the outbox to being enqueued `pending` before any dispatch, with a
-  payload digest that cannot be rewritten and a fencing token that cannot go
-  backwards. Its refusals carry an explicit `CONSTRAINT` name so the store
-  turns each rule into its own reason code rather than one opaque failure.
+  an approved intent and its cost components; requires, at commit, that the
+  components sum to the total incremental cost the net edge was derived
+  from; holds an execution attempt to the lifecycle `docs/architecture.md`
+  defines — opened in `SUBMITTING` with nothing spent, leaving `UNKNOWN`
+  only on a reconciliation *named* in the same write and different from the
+  one that settled it before, never lowering a confirmed amount, never
+  written again once settled, and never opened at all on an intent an
+  earlier attempt already consumed; and holds the outbox to being enqueued
+  `pending` before any dispatch, with a payload digest that cannot be
+  rewritten and a fencing token that cannot go backwards. Its refusals carry
+  an explicit `CONSTRAINT` name so the store turns each rule into its own
+  reason code rather than one opaque failure.
+
+  The consumed-intent check takes a row lock on the intent's existing
+  attempts before it looks, and that is not defensive habit: without it, a
+  fill committed by another transaction after this trigger's snapshot was
+  taken stayed invisible, the insert waited on the live-attempt index
+  instead, and when the fill committed the insert went through — leaving a
+  second dispatchable attempt on an intent whose capital had just been
+  spent. The case is reproduced in
+  `tests/fault-injection/concurrent-intent-consumption.int.test.ts`.
 
 The `0009` and `0010` pair is the family's ordering rule in miniature: the
 composite foreign key from the outbox to `(intent_id, attempt)` makes the

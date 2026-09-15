@@ -1,8 +1,17 @@
 import { assetIdSchema, operatingModeSchema } from "@vigil/contracts";
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 
 import type { VigilDatabase } from "../client";
-import { approvedIntents } from "../schema/intents";
+import {
+  approvedIntents,
+  intentCostComponents,
+  costChargeBasisEnum,
+  costComponentKindEnum,
+  netEdgeBasisEnum,
+  type CostChargeBasisValue,
+  type CostComponentKindValue,
+  type NetEdgeBasisValue,
+} from "../schema/intents";
 import { assetScales, MAX_ASSET_SCALE } from "../schema/journal";
 import { parseIsoInstant } from "./instants";
 import {
@@ -35,7 +44,11 @@ import {
  * - the same approved proposal delivered twice authorizes one spend —
  *   `approved_intents_idempotency_key_key` is a unique index, so the second
  *   delivery collides in the database rather than relying on this module's
- *   lookup having seen the first.
+ *   lookup having seen the first;
+ * - an approved intent cleared its own cost hurdle, and its named cost
+ *   components account for the total that hurdle was judged against — a
+ *   check constraint and a deferred constraint trigger, so an intent whose
+ *   economics does not add up cannot be committed at all.
  *
  * Everything else is boundary validation against `@vigil/contracts`,
  * deliberately a superset of the table's own constraints. A constraint
@@ -104,6 +117,26 @@ export const INTENT_STORE_DIAGNOSTIC_CODES = [
   "OUTCOME_NOT_MONOTONIC",
   /** An id is already taken by a different record. */
   "DUPLICATE_RECORD",
+  /** The economics does not add up, or is not internally consistent. */
+  "INVALID_ECONOMICS",
+  /** The named cost components do not sum to the claimed total incremental cost. */
+  "COST_COMPONENTS_UNBALANCED",
+  /** A cost in an asset other than the numeraire names no conversion source. */
+  "MISSING_CONVERSION_SOURCE",
+  /** The expected net edge does not reach the minimum the decision required. */
+  "NET_EDGE_BELOW_MINIMUM",
+  /** One intent names the same cost kind twice, which would double-count it. */
+  "DUPLICATE_COST_COMPONENT",
+  /** One asset is used at two different scales in a single record. */
+  "INCONSISTENT_SCALE",
+  /**
+   * The request names an attempt or dispatch that exists under different
+   * terms. Distinct from `DUPLICATE_RECORD`: a redelivery of the same work
+   * is a duplicate, while a retry carrying a different payload is a caller
+   * that would otherwise be told its payload was enqueued when a different
+   * one was.
+   */
+  "PAYLOAD_MISMATCH",
   /** A check constraint or a lifecycle trigger rejected the write. */
   "CONSTRAINT_VIOLATION",
 ] as const;
@@ -174,6 +207,42 @@ export function describeIntentDriverRefusal(
         code: "MISSING_PROVENANCE",
         detail: "the intent does not name every version that produced it",
       },
+      approved_intents_net_edge_derived: {
+        code: "INVALID_ECONOMICS",
+        detail: "the expected net edge is not the expected gross less the expected total cost",
+      },
+      approved_intents_net_edge_hurdle: {
+        code: "NET_EDGE_BELOW_MINIMUM",
+        detail: "the intent does not reach the minimum net edge its own decision required, or declares an exemption and a minimum at once",
+      },
+      approved_intents_economics_sane: {
+        code: "INVALID_ECONOMICS",
+        detail: "the intent carries a negative total cost or a notional that is not positive",
+      },
+      approved_intents_quote_precedes_approval: {
+        code: "INVALID_ECONOMICS",
+        detail: "the quote behind this decision was acquired after the decision was made",
+      },
+      approved_intents_costs_itemised: {
+        code: "COST_COMPONENTS_UNBALANCED",
+        detail: "the named cost components do not sum to the total incremental cost the net edge was derived from",
+      },
+      intent_cost_components_itemised: {
+        code: "COST_COMPONENTS_UNBALANCED",
+        detail: "the named cost components do not sum to the total incremental cost the net edge was derived from",
+      },
+      intent_cost_components_conversion_declared: {
+        code: "MISSING_CONVERSION_SOURCE",
+        detail: "a cost charged in an asset other than the numeraire must name what converted it",
+      },
+      intent_cost_components_identity_conversion: {
+        code: "INVALID_ECONOMICS",
+        detail: "a cost already in the numeraire must convert to itself",
+      },
+      intent_cost_components_non_negative: {
+        code: "INVALID_ECONOMICS",
+        detail: "a negative cost would inflate net edge rather than reduce it",
+      },
     };
     const match = named[constraint];
     if (match !== undefined) {
@@ -199,6 +268,12 @@ export function describeIntentDriverRefusal(
   }
 
   if (code === PG_FOREIGN_KEY_VIOLATION) {
+    if (constraint === "intent_cost_components_intent_numeraire_fk") {
+      return {
+        code: "INVALID_ECONOMICS",
+        detail: "the cost component names an intent that is not in durable history, or a numeraire that intent never declared",
+      };
+    }
     if (constraint === "approved_intents_candidate_id_fk") {
       return { code: "UNKNOWN_CANDIDATE", detail: "the candidate this intent names is not in durable history" };
     }
@@ -271,6 +346,72 @@ export type IntentOutputSide = {
   readonly minAcceptableReceiptBase: bigint;
 };
 
+export const COST_COMPONENT_KINDS: Readonly<typeof costComponentKindEnum.enumValues> =
+  costComponentKindEnum.enumValues;
+export const COST_CHARGE_BASES: Readonly<typeof costChargeBasisEnum.enumValues> = costChargeBasisEnum.enumValues;
+export const NET_EDGE_BASES: Readonly<typeof netEdgeBasisEnum.enumValues> = netEdgeBasisEnum.enumValues;
+
+/**
+ * One named cost between expected gross advantage and expected net edge.
+ *
+ * Both amounts are carried on purpose. `nativeAmountBase` is what the venue
+ * actually charges, in the asset it charges it in; `numeraireAmountBase` is
+ * that cost expressed in the intent's numeraire, and is the only figure
+ * that is ever summed. `conversionSource` names what related the two, and
+ * is required exactly when the assets differ — so no total in this family
+ * is ever an addition of amounts in different assets with nothing recorded
+ * about how they were compared.
+ */
+export type IntentCostComponent = {
+  readonly kind: CostComponentKindValue;
+  /** Taken out of the execution price, or billed alongside it. */
+  readonly chargeBasis: CostChargeBasisValue;
+  readonly nativeAssetId: string;
+  readonly nativeScale: number;
+  readonly nativeAmountBase: bigint;
+  readonly numeraireAmountBase: bigint;
+  /** Null exactly when the native asset is the numeraire. */
+  readonly conversionSource: string | null;
+};
+
+/**
+ * The point-in-time evidence that this action was worth doing, as it stood
+ * when policy approved it (`docs/evaluation.md`, point-in-time integrity).
+ *
+ * Every figure is in base units of `numeraireAssetId`. The identities the
+ * database enforces, and this module checks first so a caller gets a reason
+ * code rather than a driver error: net edge is gross less total cost, the
+ * components sum to the total cost, and — unless the decision was
+ * explicitly exempt — net edge reaches `minimumNetEdgeBase`.
+ */
+export type IntentEconomics = {
+  /** The quote or market snapshot the decision was made on. */
+  readonly quoteId: string;
+  /** ISO-8601 UTC; must not be after the approval. */
+  readonly quoteAcquiredAt: string;
+  /** The venue-economics / cost-model version that priced the costs. */
+  readonly costModelVersion: string;
+  readonly numeraireAssetId: string;
+  readonly numeraireScale: number;
+  /** Intended notional, in numeraire base units. */
+  readonly notionalBase: bigint;
+  /** Expected gross advantage before cost; negative for a protective unwind. */
+  readonly expectedGrossBase: bigint;
+  readonly expectedTotalCostBase: bigint;
+  /** Gross less total cost. */
+  readonly expectedNetEdgeBase: bigint;
+  /**
+   * `hurdle` when a configured minimum applied, `protective-exempt` when
+   * none did. An exemption is recorded rather than inferred from a null, so
+   * every intent that skipped the hurdle can be found.
+   */
+  readonly netEdgeBasis: NetEdgeBasisValue;
+  /** Null exactly when `netEdgeBasis` is `protective-exempt`. */
+  readonly minimumNetEdgeBase: bigint | null;
+  /** At most one per kind; a repeated kind is a double-counted cost. */
+  readonly costComponents: readonly IntentCostComponent[];
+};
+
 export type StoreApprovedIntent = {
   readonly intentId: string;
   readonly idempotencyKey: string;
@@ -304,6 +445,8 @@ export type StoreApprovedIntent = {
   /** ISO-8601 UTC. */
   readonly recordedAt: string;
   readonly provenance: IntentProvenance;
+  /** What made this worth doing, as it stood at approval. */
+  readonly economics: IntentEconomics;
 };
 
 export type RecordApprovedIntentResult =
@@ -453,6 +596,202 @@ function checkApprovedIntent(intent: StoreApprovedIntent): IntentRefusal | null 
     }
   }
 
+  return checkEconomics(intent);
+}
+
+/**
+ * The economics, checked before any write.
+ *
+ * Every rule below is also a database constraint. Checking here first is
+ * what turns each of them into its own reason code: a caller that supplied
+ * an unbalanced breakdown and a caller that missed its hurdle have made
+ * different mistakes, and a single `CONSTRAINT_VIOLATION` would tell
+ * neither of them which.
+ */
+function checkEconomics(intent: StoreApprovedIntent): IntentRefusal | null {
+  const economics = intent.economics;
+  const where = `intent ${intent.intentId}`;
+
+  for (const [field, value] of [
+    ["quoteId", economics.quoteId],
+    ["costModelVersion", economics.costModelVersion],
+  ] as const) {
+    if (blank(value)) {
+      return refuseIntentWrite(
+        "INVALID_ECONOMICS",
+        `${where} does not name the ${field} its cost assumptions came from`,
+      );
+    }
+  }
+
+  if (!assetIdSchema.safeParse(economics.numeraireAssetId).success) {
+    return refuseIntentWrite(
+      "INVALID_ASSET",
+      `${where} settles in ${economics.numeraireAssetId}, which is not a canonical asset id`,
+    );
+  }
+
+  if (!validScale(economics.numeraireScale)) {
+    return refuseIntentWrite(
+      "INVALID_SCALE",
+      `${where} carries a numeraire scale of ${economics.numeraireScale}; a scale is a whole number in 0..${MAX_ASSET_SCALE}`,
+    );
+  }
+
+  const quoteAcquiredAt = parseIsoInstant(economics.quoteAcquiredAt);
+  const approvedAt = parseIsoInstant(intent.approvedAt);
+  if (quoteAcquiredAt === null) {
+    return refuseIntentWrite(
+      "INVALID_TIMESTAMP",
+      `${where} was decided on a quote acquired at ${economics.quoteAcquiredAt}, which is not an ISO-8601 UTC instant on a real calendar day`,
+    );
+  }
+  if (approvedAt !== null && quoteAcquiredAt.getTime() > approvedAt.getTime()) {
+    return refuseIntentWrite(
+      "INVALID_ECONOMICS",
+      `${where} was approved at ${intent.approvedAt} on a quote acquired afterwards, at ${economics.quoteAcquiredAt}`,
+    );
+  }
+
+  if (economics.notionalBase <= 0n) {
+    return refuseIntentWrite("INVALID_ECONOMICS", `${where} carries a notional of ${economics.notionalBase.toString()}`);
+  }
+
+  if (economics.expectedTotalCostBase < 0n) {
+    return refuseIntentWrite(
+      "INVALID_ECONOMICS",
+      `${where} carries a negative total cost, which would inflate net edge rather than reduce it`,
+    );
+  }
+
+  if (economics.expectedNetEdgeBase !== economics.expectedGrossBase - economics.expectedTotalCostBase) {
+    return refuseIntentWrite(
+      "INVALID_ECONOMICS",
+      `${where} reports a net edge of ${economics.expectedNetEdgeBase.toString()}, which is not its gross ${economics.expectedGrossBase.toString()} less its cost ${economics.expectedTotalCostBase.toString()}`,
+    );
+  }
+
+  if (!NET_EDGE_BASES.includes(economics.netEdgeBasis)) {
+    return refuseIntentWrite("INVALID_ECONOMICS", `${where} names ${economics.netEdgeBasis}, which is not a net-edge basis`);
+  }
+
+  const hurdle = economics.netEdgeBasis === "hurdle";
+  if (hurdle !== (economics.minimumNetEdgeBase !== null)) {
+    return refuseIntentWrite(
+      "INVALID_ECONOMICS",
+      hurdle
+        ? `${where} was judged against a hurdle but names no minimum net edge`
+        : `${where} declares itself exempt from the net-edge hurdle and names a minimum anyway`,
+    );
+  }
+
+  if (economics.minimumNetEdgeBase !== null && economics.expectedNetEdgeBase < economics.minimumNetEdgeBase) {
+    return refuseIntentWrite(
+      "NET_EDGE_BELOW_MINIMUM",
+      `${where} expects a net edge of ${economics.expectedNetEdgeBase.toString()} against a required minimum of ${economics.minimumNetEdgeBase.toString()}`,
+    );
+  }
+
+  const seen = new Set<string>();
+  let itemised = 0n;
+  for (const component of economics.costComponents) {
+    if (!COST_COMPONENT_KINDS.includes(component.kind)) {
+      return refuseIntentWrite("INVALID_ECONOMICS", `${where} names ${component.kind}, which is not a cost component kind`);
+    }
+    if (!COST_CHARGE_BASES.includes(component.chargeBasis)) {
+      return refuseIntentWrite(
+        "INVALID_ECONOMICS",
+        `${where} charges its ${component.kind} on a basis of ${component.chargeBasis}, which is neither embedded nor separately charged`,
+      );
+    }
+    if (seen.has(component.kind)) {
+      return refuseIntentWrite(
+        "DUPLICATE_COST_COMPONENT",
+        `${where} names its ${component.kind} cost twice, which would count it twice`,
+      );
+    }
+    seen.add(component.kind);
+
+    if (!assetIdSchema.safeParse(component.nativeAssetId).success) {
+      return refuseIntentWrite(
+        "INVALID_ASSET",
+        `${where} charges its ${component.kind} in ${component.nativeAssetId}, which is not a canonical asset id`,
+      );
+    }
+    if (!validScale(component.nativeScale)) {
+      return refuseIntentWrite(
+        "INVALID_SCALE",
+        `${where} carries a ${component.kind} scale of ${component.nativeScale}`,
+      );
+    }
+    if (component.nativeAmountBase < 0n || component.numeraireAmountBase < 0n) {
+      return refuseIntentWrite(
+        "INVALID_ECONOMICS",
+        `${where} carries a negative ${component.kind} cost, which would inflate net edge rather than reduce it`,
+      );
+    }
+
+    const crossesAssets = component.nativeAssetId !== economics.numeraireAssetId;
+    const declared = component.conversionSource !== null && !blank(component.conversionSource);
+    if (crossesAssets && !declared) {
+      return refuseIntentWrite(
+        "MISSING_CONVERSION_SOURCE",
+        `${where} charges its ${component.kind} in ${component.nativeAssetId} and settles in ${economics.numeraireAssetId} without naming what converted between them`,
+      );
+    }
+    if (!crossesAssets && component.conversionSource !== null) {
+      return refuseIntentWrite(
+        "INVALID_ECONOMICS",
+        `${where} names a conversion for its ${component.kind} cost, which is already in the numeraire`,
+      );
+    }
+    if (!crossesAssets && component.nativeAmountBase !== component.numeraireAmountBase) {
+      return refuseIntentWrite(
+        "INVALID_ECONOMICS",
+        `${where} converts its ${component.kind} cost from ${component.nativeAmountBase.toString()} to ${component.numeraireAmountBase.toString()} in the same asset`,
+      );
+    }
+
+    itemised += component.numeraireAmountBase;
+  }
+
+  if (itemised !== economics.expectedTotalCostBase) {
+    return refuseIntentWrite(
+      "COST_COMPONENTS_UNBALANCED",
+      `${where} claims a total incremental cost of ${economics.expectedTotalCostBase.toString()} and names components summing to ${itemised.toString()}`,
+    );
+  }
+
+  return checkScalesAgree(intent);
+}
+
+/**
+ * One asset, one scale — within a single record, before the database's
+ * `asset_scales` foreign keys get a chance to say the same thing less
+ * clearly. A record that used an asset at two scales would register the
+ * first and then be refused for the second, and `SCALE_MISMATCH` would
+ * point at the registry rather than at the two disagreeing fields.
+ */
+function checkScalesAgree(intent: StoreApprovedIntent): IntentRefusal | null {
+  const scales = new Map<string, number>();
+  const used: ReadonlyArray<readonly [string, number]> = [
+    [intent.input.assetId, intent.input.scale],
+    [intent.output.assetId, intent.output.scale],
+    [intent.economics.numeraireAssetId, intent.economics.numeraireScale],
+    ...intent.economics.costComponents.map((component) => [component.nativeAssetId, component.nativeScale] as const),
+  ];
+
+  for (const [assetId, scale] of used) {
+    const seen = scales.get(assetId);
+    if (seen !== undefined && seen !== scale) {
+      return refuseIntentWrite(
+        "INCONSISTENT_SCALE",
+        `intent ${intent.intentId} uses ${assetId} at scale ${seen} and at scale ${scale}; one asset has exactly one scale`,
+      );
+    }
+    scales.set(assetId, scale);
+  }
+
   return null;
 }
 
@@ -479,8 +818,9 @@ export async function recordApprovedIntent(
   const approvedAt = parseIsoInstant(intent.approvedAt);
   const recordedAt = parseIsoInstant(intent.recordedAt);
   const validUntil = parseIsoInstant(intent.validUntil);
-  if (approvedAt === null || recordedAt === null || validUntil === null) {
-    // Unreachable: `checkApprovedIntent` parsed all three. Narrowing them
+  const quoteAcquiredAt = parseIsoInstant(intent.economics.quoteAcquiredAt);
+  if (approvedAt === null || recordedAt === null || validUntil === null || quoteAcquiredAt === null) {
+    // Unreachable: `checkApprovedIntent` parsed all four. Narrowing them
     // again here is cheaper than carrying them out of that function.
     return refuseIntentWrite("INVALID_TIMESTAMP", `intent ${intent.intentId} carries an unparseable timestamp`);
   }
@@ -493,6 +833,11 @@ export async function recordApprovedIntent(
   const scaleRows = [
     { assetId: intent.input.assetId, assetScale: intent.input.scale },
     { assetId: intent.output.assetId, assetScale: intent.output.scale },
+    { assetId: intent.economics.numeraireAssetId, assetScale: intent.economics.numeraireScale },
+    ...intent.economics.costComponents.map((component) => ({
+      assetId: component.nativeAssetId,
+      assetScale: component.nativeScale,
+    })),
   ]
     .filter((row, index, rows) => rows.findIndex((other) => other.assetId === row.assetId) === index)
     .sort((left, right) => {
@@ -537,6 +882,17 @@ export async function recordApprovedIntent(
         chainSimulationPassed: intent.chainValidation?.passed ?? null,
         approvedAt,
         recordedAt,
+        numeraireAssetId: intent.economics.numeraireAssetId,
+        numeraireAssetScale: intent.economics.numeraireScale,
+        quoteId: intent.economics.quoteId,
+        quoteAcquiredAt,
+        costModelVersion: intent.economics.costModelVersion,
+        notionalBase: intent.economics.notionalBase,
+        expectedGrossBase: intent.economics.expectedGrossBase,
+        expectedTotalCostBase: intent.economics.expectedTotalCostBase,
+        expectedNetEdgeBase: intent.economics.expectedNetEdgeBase,
+        netEdgeBasis: intent.economics.netEdgeBasis,
+        minimumNetEdgeBase: intent.economics.minimumNetEdgeBase,
         policyVersion: intent.provenance.policyVersion,
         strategyVersion: intent.provenance.strategyVersion,
         modelVersion: intent.provenance.modelVersion,
@@ -544,6 +900,27 @@ export async function recordApprovedIntent(
         marketSnapshotVersion: intent.provenance.marketSnapshotVersion,
         feeSnapshotVersion: intent.provenance.feeSnapshotVersion,
       });
+
+      // Same transaction, necessarily: the `costs_itemised` constraint
+      // trigger is deferred to commit and compares the components against
+      // the total the intent claims, so an intent whose breakdown is
+      // written later could never be committed at all.
+      if (intent.economics.costComponents.length > 0) {
+        await tx.insert(intentCostComponents).values(
+          intent.economics.costComponents.map((component) => ({
+            intentId: intent.intentId,
+            kind: component.kind,
+            chargeBasis: component.chargeBasis,
+            nativeAssetId: component.nativeAssetId,
+            nativeAssetScale: component.nativeScale,
+            nativeAmountBase: component.nativeAmountBase,
+            numeraireAssetId: intent.economics.numeraireAssetId,
+            numeraireAssetScale: intent.economics.numeraireScale,
+            numeraireAmountBase: component.numeraireAmountBase,
+            conversionSource: component.conversionSource,
+          })),
+        );
+      }
     });
   } catch (error) {
     const driver = describeIntentDriverRefusal(error);
@@ -570,7 +947,56 @@ export async function recordApprovedIntent(
   return { outcome: "recorded", intentId: intent.intentId };
 }
 
-function toStoreApprovedIntent(row: typeof approvedIntents.$inferSelect): StoreApprovedIntent {
+function toCostComponent(row: typeof intentCostComponents.$inferSelect): IntentCostComponent {
+  return {
+    kind: row.kind,
+    chargeBasis: row.chargeBasis,
+    nativeAssetId: row.nativeAssetId,
+    nativeScale: row.nativeAssetScale,
+    nativeAmountBase: row.nativeAmountBase,
+    numeraireAmountBase: row.numeraireAmountBase,
+    conversionSource: row.conversionSource,
+  };
+}
+
+/**
+ * The cost components of several intents at once, keyed by intent.
+ *
+ * One query for the whole set rather than one per intent: the breakdown is
+ * read back beside every intent this module returns, and a per-intent query
+ * would turn a correlation lookup into a query per authorization.
+ */
+async function loadCostComponents(
+  db: VigilDatabase,
+  intentIds: readonly string[],
+): Promise<Map<string, IntentCostComponent[]>> {
+  const byIntent = new Map<string, IntentCostComponent[]>();
+  if (intentIds.length === 0) {
+    return byIntent;
+  }
+
+  const rows = await db
+    .select()
+    .from(intentCostComponents)
+    .where(inArray(intentCostComponents.intentId, [...intentIds]))
+    .orderBy(asc(intentCostComponents.intentId), asc(intentCostComponents.kind));
+
+  for (const row of rows) {
+    const existing = byIntent.get(row.intentId);
+    if (existing === undefined) {
+      byIntent.set(row.intentId, [toCostComponent(row)]);
+    } else {
+      existing.push(toCostComponent(row));
+    }
+  }
+
+  return byIntent;
+}
+
+function toStoreApprovedIntent(
+  row: typeof approvedIntents.$inferSelect,
+  costComponents: readonly IntentCostComponent[],
+): StoreApprovedIntent {
   return {
     intentId: row.intentId,
     idempotencyKey: row.idempotencyKey,
@@ -616,14 +1042,33 @@ function toStoreApprovedIntent(row: typeof approvedIntents.$inferSelect): StoreA
       marketSnapshotVersion: row.marketSnapshotVersion,
       feeSnapshotVersion: row.feeSnapshotVersion,
     },
+    economics: {
+      quoteId: row.quoteId,
+      quoteAcquiredAt: row.quoteAcquiredAt.toISOString(),
+      costModelVersion: row.costModelVersion,
+      numeraireAssetId: row.numeraireAssetId,
+      numeraireScale: row.numeraireAssetScale,
+      notionalBase: row.notionalBase,
+      expectedGrossBase: row.expectedGrossBase,
+      expectedTotalCostBase: row.expectedTotalCostBase,
+      expectedNetEdgeBase: row.expectedNetEdgeBase,
+      netEdgeBasis: row.netEdgeBasis,
+      minimumNetEdgeBase: row.minimumNetEdgeBase,
+      costComponents,
+    },
   };
 }
 
-/** One authorization, or null when nothing was approved under that id. */
+/** One authorization and the economics that justified it, or null. */
 export async function loadApprovedIntent(db: VigilDatabase, intentId: string): Promise<StoreApprovedIntent | null> {
   const rows = await db.select().from(approvedIntents).where(eq(approvedIntents.intentId, intentId)).limit(1);
   const row = rows[0];
-  return row === undefined ? null : toStoreApprovedIntent(row);
+  if (row === undefined) {
+    return null;
+  }
+
+  const components = await loadCostComponents(db, [intentId]);
+  return toStoreApprovedIntent(row, components.get(intentId) ?? []);
 }
 
 /**
@@ -640,5 +1085,10 @@ export async function loadApprovedIntentsByCorrelation(
     .from(approvedIntents)
     .where(eq(approvedIntents.correlationId, correlationId))
     .orderBy(asc(approvedIntents.approvedAt), asc(approvedIntents.intentId));
-  return rows.map(toStoreApprovedIntent);
+
+  const components = await loadCostComponents(
+    db,
+    rows.map((row) => row.intentId),
+  );
+  return rows.map((row) => toStoreApprovedIntent(row, components.get(row.intentId) ?? []));
 }

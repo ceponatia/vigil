@@ -1,5 +1,5 @@
 {
-  "id": "c17ab772-3cb1-45be-936b-758a3ede9f89",
+  "id": "abb93ba6-22a1-42e2-90e8-8cf0ac94dc67",
   "prevId": "fffeef47-0066-4b54-8d4d-1f9b22b8bef3",
   "version": "7",
   "dialect": "postgresql",
@@ -591,6 +591,73 @@
           "primaryKey": false,
           "notNull": true
         },
+        "numeraire_asset_id": {
+          "name": "numeraire_asset_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "numeraire_asset_scale": {
+          "name": "numeraire_asset_scale",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "quote_id": {
+          "name": "quote_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "quote_acquired_at": {
+          "name": "quote_acquired_at",
+          "type": "timestamp (3) with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cost_model_version": {
+          "name": "cost_model_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "notional_base": {
+          "name": "notional_base",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expected_gross_base": {
+          "name": "expected_gross_base",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expected_total_cost_base": {
+          "name": "expected_total_cost_base",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expected_net_edge_base": {
+          "name": "expected_net_edge_base",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "net_edge_basis": {
+          "name": "net_edge_basis",
+          "type": "net_edge_basis",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "minimum_net_edge_base": {
+          "name": "minimum_net_edge_base",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": false
+        },
         "chain_simulation_id": {
           "name": "chain_simulation_id",
           "type": "text",
@@ -742,10 +809,35 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "approved_intents_numeraire_asset_scale_fk": {
+          "name": "approved_intents_numeraire_asset_scale_fk",
+          "tableFrom": "approved_intents",
+          "tableTo": "asset_scales",
+          "columnsFrom": [
+            "numeraire_asset_id",
+            "numeraire_asset_scale"
+          ],
+          "columnsTo": [
+            "asset_id",
+            "asset_scale"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "approved_intents_numeraire_key": {
+          "name": "approved_intents_numeraire_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "intent_id",
+            "numeraire_asset_id",
+            "numeraire_asset_scale"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "approved_intents_identity_present": {
@@ -758,7 +850,27 @@
         },
         "approved_intents_scale_range": {
           "name": "approved_intents_scale_range",
-          "value": "input_asset_scale between 0 and 36 and output_asset_scale between 0 and 36"
+          "value": "input_asset_scale between 0 and 36 and output_asset_scale between 0 and 36 and numeraire_asset_scale between 0 and 36"
+        },
+        "approved_intents_net_edge_derived": {
+          "name": "approved_intents_net_edge_derived",
+          "value": "expected_net_edge_base = expected_gross_base - expected_total_cost_base"
+        },
+        "approved_intents_economics_sane": {
+          "name": "approved_intents_economics_sane",
+          "value": "expected_total_cost_base >= 0 and notional_base > 0"
+        },
+        "approved_intents_net_edge_hurdle": {
+          "name": "approved_intents_net_edge_hurdle",
+          "value": "(net_edge_basis = 'hurdle') = (minimum_net_edge_base is not null) and (minimum_net_edge_base is null or expected_net_edge_base >= minimum_net_edge_base)"
+        },
+        "approved_intents_quote_precedes_approval": {
+          "name": "approved_intents_quote_precedes_approval",
+          "value": "quote_acquired_at <= approved_at"
+        },
+        "approved_intents_economics_provenance_present": {
+          "name": "approved_intents_economics_provenance_present",
+          "value": "length(btrim(quote_id)) > 0 and length(btrim(cost_model_version)) > 0"
         },
         "approved_intents_window": {
           "name": "approved_intents_window",
@@ -1002,11 +1114,148 @@
         },
         "execution_attempts_instants_ordered": {
           "name": "execution_attempts_instants_ordered",
-          "value": "state_changed_at >= submitted_at and (reconciled_at is null or reconciled_at >= submitted_at)"
+          "value": "reconciled_at is null or reconciled_at >= submitted_at"
         },
         "execution_attempts_identity_present": {
           "name": "execution_attempts_identity_present",
           "value": "length(btrim(client_order_id)) > 0 and length(btrim(correlation_id)) > 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.intent_cost_components": {
+      "name": "intent_cost_components",
+      "schema": "",
+      "columns": {
+        "intent_id": {
+          "name": "intent_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "cost_component_kind",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "charge_basis": {
+          "name": "charge_basis",
+          "type": "cost_charge_basis",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "native_asset_id": {
+          "name": "native_asset_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "native_asset_scale": {
+          "name": "native_asset_scale",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "native_amount_base": {
+          "name": "native_amount_base",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "numeraire_asset_id": {
+          "name": "numeraire_asset_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "numeraire_asset_scale": {
+          "name": "numeraire_asset_scale",
+          "type": "smallint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "numeraire_amount_base": {
+          "name": "numeraire_amount_base",
+          "type": "numeric(78, 0)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "conversion_source": {
+          "name": "conversion_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "intent_cost_components_intent_numeraire_fk": {
+          "name": "intent_cost_components_intent_numeraire_fk",
+          "tableFrom": "intent_cost_components",
+          "tableTo": "approved_intents",
+          "columnsFrom": [
+            "intent_id",
+            "numeraire_asset_id",
+            "numeraire_asset_scale"
+          ],
+          "columnsTo": [
+            "intent_id",
+            "numeraire_asset_id",
+            "numeraire_asset_scale"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "intent_cost_components_native_asset_scale_fk": {
+          "name": "intent_cost_components_native_asset_scale_fk",
+          "tableFrom": "intent_cost_components",
+          "tableTo": "asset_scales",
+          "columnsFrom": [
+            "native_asset_id",
+            "native_asset_scale"
+          ],
+          "columnsTo": [
+            "asset_id",
+            "asset_scale"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "intent_cost_components_intent_id_kind_pk": {
+          "name": "intent_cost_components_intent_id_kind_pk",
+          "columns": [
+            "intent_id",
+            "kind"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "intent_cost_components_non_negative": {
+          "name": "intent_cost_components_non_negative",
+          "value": "native_amount_base >= 0 and numeraire_amount_base >= 0"
+        },
+        "intent_cost_components_scale_range": {
+          "name": "intent_cost_components_scale_range",
+          "value": "native_asset_scale between 0 and 36 and numeraire_asset_scale between 0 and 36"
+        },
+        "intent_cost_components_conversion_declared": {
+          "name": "intent_cost_components_conversion_declared",
+          "value": "(native_asset_id = numeraire_asset_id) = (conversion_source is null)"
+        },
+        "intent_cost_components_conversion_source_present": {
+          "name": "intent_cost_components_conversion_source_present",
+          "value": "conversion_source is null or length(btrim(conversion_source)) > 0"
+        },
+        "intent_cost_components_identity_conversion": {
+          "name": "intent_cost_components_identity_conversion",
+          "value": "native_asset_id <> numeraire_asset_id or native_amount_base = numeraire_amount_base"
         }
       },
       "isRLSEnabled": false
@@ -2077,6 +2326,24 @@
         "BLOCKED"
       ]
     },
+    "public.cost_charge_basis": {
+      "name": "cost_charge_basis",
+      "schema": "public",
+      "values": [
+        "embedded",
+        "separately-charged"
+      ]
+    },
+    "public.cost_component_kind": {
+      "name": "cost_component_kind",
+      "schema": "public",
+      "values": [
+        "proportional-fee",
+        "spread",
+        "slippage-allowance",
+        "fixed-costs"
+      ]
+    },
     "public.dispatch_state": {
       "name": "dispatch_state",
       "schema": "public",
@@ -2099,6 +2366,14 @@
         "CANCELED",
         "REJECTED",
         "EXPIRED"
+      ]
+    },
+    "public.net_edge_basis": {
+      "name": "net_edge_basis",
+      "schema": "public",
+      "values": [
+        "hurdle",
+        "protective-exempt"
       ]
     },
     "public.reservation_state": {
