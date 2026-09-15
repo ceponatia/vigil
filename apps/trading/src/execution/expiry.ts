@@ -86,8 +86,6 @@ export type ExpirySweepSummary = {
 export type SweepExpiredReservationsParams = {
   /** ISO-8601 UTC; the instant this sweep is asking about. */
   readonly asOf: string;
-  /** Most holds to examine in one pass. The store caps it. */
-  readonly limit?: number;
   /**
    * The journal entry id each release posts under. Deterministic by default
    * — derived from the reservation's own id — so a replay of a sweep writes
@@ -117,6 +115,12 @@ const EMPTY_SUMMARY: ExpirySweepSummary = {
  * same two `ledger_balances` rows per asset, so a fan-out would mostly queue
  * on those row locks anyway, and a sweep is not on any latency path.
  *
+ * A pass is bounded by `EXPIRED_HOLD_SCAN_LIMIT`, which the store applies to
+ * every scan whether or not a page size is asked for. This layer names no
+ * page size of its own: a smaller one would only slow the backlog draining
+ * across ticks, and an optional nobody passes is untested surface on a
+ * module that moves money.
+ *
  * `occurredAt` is the hold's own `expires_at`, not `asOf`: the economic event
  * is the window closing, which happened when it happened. `asOf` is when this
  * application wrote it down. A sweep that ran late therefore records the same
@@ -126,7 +130,7 @@ export async function sweepExpiredReservations(
   db: VigilDatabase,
   params: SweepExpiredReservationsParams,
 ): Promise<ExpirySweepSummary> {
-  const scan = await loadExpiredReservations(db, { asOf: params.asOf, limit: params.limit });
+  const scan = await loadExpiredReservations(db, { asOf: params.asOf });
   if (scan.outcome === "refused") {
     return {
       ...EMPTY_SUMMARY,
@@ -173,7 +177,6 @@ export type StartReservationExpirySweepParams = {
   readonly intervalMs: number;
   /** Reads the wall clock; injected so the loop itself holds no clock. */
   readonly now: () => string;
-  readonly limit?: number;
   /**
    * Defaults to `sweepExpiredReservations`. Overridable so a test can drive
    * the loop's fail-soft behavior without a database; the loop never depends
@@ -213,7 +216,7 @@ export function startReservationExpirySweep(params: StartReservationExpirySweepP
     const asOf = params.now();
     running = true;
 
-    sweep(params.db, { asOf, limit: params.limit })
+    sweep(params.db, { asOf })
       .then((summary) => {
         for (const refusal of summary.refusals) {
           // Debug, not warn: a hold left standing behind a live attempt is

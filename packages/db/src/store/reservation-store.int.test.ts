@@ -13,6 +13,7 @@ import {
   loadExpiredReservations,
   releaseReservation,
   reserveAvailable,
+  EXPIRED_HOLD_SCAN_LIMIT,
   type ReserveRequest,
 } from "./reservation-store";
 import { openAttempt, storeApprovedIntent } from "../test-support/intent-fixtures";
@@ -615,6 +616,46 @@ describe("loadExpiredReservations", () => {
     const scan = await loadExpiredReservations(db, { asOf: AFTER_EXPIRY });
 
     expect(scan).toEqual({ outcome: "scanned", holds: [] });
+  });
+
+  it("bounds a pass to the page size asked for, and falls back to the cap when that is not a usable one — catches a sweep that drains its whole backlog in one transaction-heavy pass, and a page size of zero silently meaning \"examine nothing\"", async () => {
+    for (const [index, expiresAt] of [
+      "2026-01-02T03:08:00.000Z",
+      "2026-01-02T03:09:00.000Z",
+      "2026-01-02T03:10:00.000Z",
+    ].entries()) {
+      const suffix = String(index + 1);
+      const held = await reserveAvailable(
+        db,
+        request({
+          reservationId: `reservation-page-${suffix}`,
+          intentId: `intent-page-${suffix}`,
+          entryId: `entry-hold-page-${suffix}`,
+          idempotencyKey: `idem-page-${suffix}`,
+          amountBase: 1_000_000n,
+          expiresAt,
+        }),
+      );
+      expect(held.outcome).toBe("reserved");
+    }
+
+    const scanned = async (limit?: number): Promise<readonly string[]> => {
+      const scan =
+        limit === undefined
+          ? await loadExpiredReservations(db, { asOf: AFTER_EXPIRY })
+          : await loadExpiredReservations(db, { asOf: AFTER_EXPIRY, limit });
+      return scan.outcome === "scanned" ? scan.holds.map((hold) => hold.reservationId) : ["<refused>"];
+    };
+
+    expect(await scanned()).toEqual(["reservation-page-1", "reservation-page-2", "reservation-page-3"]);
+    // Oldest expiry first, so a bounded pass drains the longest-abandoned
+    // capital first and the rest follow on later ticks.
+    expect(await scanned(1)).toEqual(["reservation-page-1"]);
+    expect(await scanned(2)).toEqual(["reservation-page-1", "reservation-page-2"]);
+    // Zero is not "examine nothing" — a sweep that quietly did nothing is
+    // indistinguishable from one that found nothing to do.
+    expect(await scanned(0)).toHaveLength(3);
+    expect(await scanned(EXPIRED_HOLD_SCAN_LIMIT + 1)).toHaveLength(3);
   });
 
   it("answers a malformed instant with a reason code rather than a throw — catches schema-legal input reaching the caller as an exception (docs/resilience.md §4)", async () => {
