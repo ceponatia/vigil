@@ -288,7 +288,7 @@ Rejected, expired, failed/reverted, replaced, dropped, and reorganized states fo
 
 Four rules hold across both lifecycles:
 
-- **UNKNOWN is a state, not a failure.** A submission or cancellation timeout produces UNKNOWN, never an assumed success or failure.
+- **UNKNOWN is a state, not a failure.** An ambiguous outcome is never resolved by assumption. A submission or broadcast timeout produces the UNKNOWN state itself. A cancellation timeout produces an UNKNOWN *attempt* result while the order stays in the state that already means the cancellation was requested and not confirmed — `CANCEL_PENDING` in the Exchange lifecycle — because an unconfirmed cancellation has neither taken effect nor been refused. Either way the order releases nothing and accepts no further operation until reconciliation resolves it.
 - **Reconciliation precedes resubmission.** Open orders, transaction history, executions, and balances are reconciled against the venue or chain before any resubmission, replacement, or cancellation retry.
 - **Retries are versioned attempts on the same intent**, never a new authorization to repeat the trade. An `ApprovedEconomicIntent` is immutable and consumable once.
 - **One effective writer, fenced.** Exactly one process holds dispatch/signing authority per financial authority domain at a time. A failover fences the old writer before the new one dispatches; a database lease alone is insufficient if a stale process can still submit.
