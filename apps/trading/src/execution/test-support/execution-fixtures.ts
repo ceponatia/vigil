@@ -2,8 +2,8 @@ import { assetIdSchema, decimalStringSchema, isoUtcTimestampSchema } from "@vigi
 import type { AssetId, DecimalString, IsoUtcTimestamp } from "@vigil/contracts";
 import { createPaperExchange, PAPER_ADAPTER_CAPABILITY_VERSION } from "@vigil/adapter-paper";
 import type { PaperExchange, PaperExchangeConfig } from "@vigil/adapter-paper";
-import { createDbClient, postJournalEntry } from "@vigil/db";
-import type { StoreEntry, VigilDatabase } from "@vigil/db";
+import { createDbClient, postJournalEntry, recordCandidate } from "@vigil/db";
+import type { StoreCandidate, StoreEntry, VigilDatabase } from "@vigil/db";
 import { quoteSnapshotSchema } from "@vigil/market";
 import type { QuoteSnapshot } from "@vigil/market";
 import { parsePolicyConfig } from "@vigil/policy";
@@ -234,13 +234,70 @@ export function proposal(label: string, instrument: Instrument, overrides: Parti
   };
 }
 
-export function dispatchIds(label: string): DispatchIdentities {
+export function dispatchIds(label: string, overrides: Partial<DispatchIdentities> = {}): DispatchIdentities {
   return {
     attemptId: `attempt-${label}`,
     dispatchId: `dispatch-${label}`,
     reservationId: `reservation-${label}`,
     reservationEntryId: `hold-${label}`,
+    blockedEvaluationId: `evaluation-${label}`,
+    ...overrides,
   };
+}
+
+/**
+ * A journaled candidate for an intent to point at.
+ *
+ * Only the cases about a refused gate need one: `approved_intents.candidate_id`
+ * is nullable because a protective action has none, so the ordinary fixtures
+ * leave it null and only a case asserting the skip is journaled wires this
+ * up. Every price is the book `rawQuote` describes, so the candidate and the
+ * quotes driven against it are the same market.
+ */
+export function syntheticCandidate(label: string, instrument: Instrument): StoreCandidate {
+  return {
+    candidateId: `candidate-${label}`,
+    idempotencyKey: `idem-candidate-${label}`,
+    correlationId: `corr-${label}`,
+    strategyId: "strategy-test-0",
+    instrumentId: `${instrument.baseAssetId}/${instrument.quoteAssetId}`,
+    action: "BUY",
+    actionDetail: "SMALL_STARTER",
+    horizon: "swing",
+    entryZoneMin: "200.00",
+    entryZoneMax: "300.00",
+    allowedExtension: "0.50",
+    invalidationPrice: "180.00",
+    invalidationConditions: ["closes below the prior swing low"],
+    expiresAt: "2026-03-01T13:00:00.000Z",
+    benchmarkId: "benchmark-hold-settlement-reserve",
+    marketSnapshot: {
+      quoteAcquiredAt: QUOTE_ACQUIRED_AT,
+      ingestedAt: QUOTE_ACQUIRED_AT,
+      bidPrice: "250.00",
+      askPrice: "250.10",
+    },
+    generatedAt: "2026-03-01T11:59:00.000Z",
+    recordedAt: "2026-03-01T11:59:00.500Z",
+    provenance: {
+      policyVersion: "policy-test-0",
+      strategyVersion: "strategy-test-0",
+      modelVersion: null,
+      portfolioSnapshotVersion: null,
+      marketSnapshotVersion: null,
+    },
+    tranches: [{ index: 0, quantity: "1.0000", triggerPrice: null }],
+  };
+}
+
+/** Writes that candidate and hands back its id, so an intent can name it. */
+export async function recordCandidateFor(db: VigilDatabase, label: string, instrument: Instrument): Promise<string> {
+  const candidate = syntheticCandidate(label, instrument);
+  const written = await recordCandidate(db, candidate);
+  if (written.outcome === "refused") {
+    throw new Error(`fixture candidate did not record (${written.code}): ${written.detail}`);
+  }
+  return written.candidateId;
 }
 
 export function settlementIds(label: string): SettlementIdentities {

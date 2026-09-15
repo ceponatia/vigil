@@ -6,6 +6,7 @@ import type { OrderSide, PaperExchange, PaperOrder } from "@vigil/adapter-paper"
 import {
   loadApprovedIntent,
   markDispatched,
+  recordCandidateEvaluation,
   openExecutionAttempt,
   recordAttemptOutcome,
   reserveAvailable,
@@ -16,6 +17,7 @@ import type { EntryZone, PolicyConfig } from "@vigil/policy";
 import { executionRefusal, fromAdapterRefusal, recordableReasonCode, type ExecutionRefusal } from "./diagnostics";
 import {
   revalidateBeforeDispatch,
+  type DispatchBlocked,
   type DispatchClearance,
   type PortfolioState,
   type RevalidationStage,
@@ -123,6 +125,14 @@ export type DispatchIdentities = {
   readonly reservationId: string;
   /** The `reservation-hold` entry the hold posts. */
   readonly reservationEntryId: string;
+  /**
+   * The `candidate_evaluations` row a refused pre-dispatch gate writes.
+   * Injected like every other id here, and that is what makes the write
+   * idempotent: the same delivery re-run carries the same id and records one
+   * decision, while a genuinely new evaluation gets a new one from the
+   * caller.
+   */
+  readonly blockedEvaluationId: string;
 };
 
 export type Instrument = {
@@ -199,6 +209,11 @@ export type BlockedDispatch = {
    * This field is what it records.
    */
   readonly reasonCode: ReasonCode | null;
+  /**
+   * The `candidate_evaluations` row this skip was journaled as, or `null`
+   * when none was written — see `recordBlockedDecision`.
+   */
+  readonly evaluationId: string | null;
   /** A durable write that refused while recording this block. */
   readonly persistence: ExecutionRefusal | null;
 };
@@ -430,6 +445,7 @@ export async function dispatchAttempt(runtime: ExecutionRuntime, request: Dispat
   });
 
   if (clearance.outcome === "blocked") {
+    const journaled = await recordBlockedDecision(runtime, request, intent, clearance);
     return {
       outcome: "blocked",
       attemptId: null,
@@ -437,7 +453,8 @@ export async function dispatchAttempt(runtime: ExecutionRuntime, request: Dispat
       stage: clearance.stage,
       refusal: clearance.refusal,
       reasonCode: recordableReasonCode(clearance.refusal),
-      persistence: null,
+      evaluationId: journaled.evaluationId,
+      persistence: journaled.persistence,
     };
   }
 
@@ -526,6 +543,12 @@ export async function dispatchAttempt(runtime: ExecutionRuntime, request: Dispat
       stage: "venue",
       refusal: venueRefusal,
       reasonCode: recordableReasonCode(venueRefusal),
+      // Deliberately not journaled as a candidate decision. The gate had
+      // already cleared, so this is the venue disagreeing with this
+      // application's model — an incident about an execution, not a
+      // judgement about the candidate — and a `BLOCKED` evaluation would
+      // claim policy refused something it approved.
+      evaluationId: null,
       persistence: null,
     };
   }
@@ -600,6 +623,81 @@ function describeOpenRefusal(
     return executionRefusal("CHAIN_LIFECYCLE_UNSUPPORTED", `${where}: ${detail}`);
   }
   return executionRefusal("PERSISTENCE_REFUSED", `${where} could not be opened (${code}): ${detail}`);
+}
+
+/**
+ * Journals a refused pre-dispatch gate as the decision it is.
+ *
+ * A skip is not a non-event. `docs/product.md` makes refusing uneconomic
+ * turnover a success criterion, and `docs/evaluation.md`'s opportunity
+ * journal exists so one can be analysed afterwards — which an in-memory
+ * result cannot be, because it dies with the process. So the reason code
+ * goes somewhere durable.
+ *
+ * It goes to `candidate_evaluations`, not onto the authorization.
+ * `docs/architecture.md` puts every decision — "including WAIT, rejected,
+ * expired, and missed entries" — in the `decisions` family, and
+ * `packages/db`'s intent store is explicit that `approved_intents` carries no
+ * `rejection_reason_code` because a row there exists only because policy
+ * approved: "a refusal is a `candidate_evaluations` row with a `BLOCKED`
+ * outcome and a reason code from `docs/policy.md`".
+ *
+ * ## The gap this leaves, which is not a missing line of code
+ *
+ * `candidate_evaluations.candidate_id` is `NOT NULL` behind a foreign key,
+ * and `approved_intents.candidate_id` is nullable **by design**: a
+ * protective action has no candidate, and `docs/resilience.md` §2 forbids a
+ * schema that would block one. So a policy refusal against a protective
+ * unwind has nowhere in this family to go. That is a missing record family
+ * rather than something this function can paper over, and inventing a
+ * candidate row to hang it on would put a fabricated decision into the
+ * journal an operator reads. The refusal still reaches the caller on the
+ * result; it is simply not journaled here, and `evaluationId` is `null` so
+ * nothing can mistake one case for the other.
+ *
+ * A failed write never turns a refusal into anything else: no economic
+ * action is proceeding, so there is nothing for it to gate. It is reported
+ * beside the block.
+ */
+async function recordBlockedDecision(
+  runtime: ExecutionRuntime,
+  request: DispatchRequest,
+  intent: StoreApprovedIntent,
+  clearance: DispatchBlocked,
+): Promise<{ readonly evaluationId: string | null; readonly persistence: ExecutionRefusal | null }> {
+  const candidateId = intent.candidateId;
+  if (candidateId === null) {
+    return { evaluationId: null, persistence: null };
+  }
+
+  const written = await recordCandidateEvaluation(runtime.db, {
+    evaluationId: request.ids.blockedEvaluationId,
+    idempotencyKey: `block:${request.ids.blockedEvaluationId}`,
+    candidateId,
+    outcome: "BLOCKED",
+    // Null for a local diagnostic: the column takes a `REASON_CODES` member
+    // or nothing, and a configuration bug is not a policy judgement about
+    // this candidate.
+    reasonCode: recordableReasonCode(clearance.refusal),
+    detail: clearance.refusal.detail,
+    // The price the gate actually judged — the execution price, which is
+    // what this dispatch would have paid, not the quoted ask.
+    executablePrice: clearance.pricing?.executionPrice ?? null,
+    quoteAcquiredAt: clearance.quoteAcquiredAt,
+    evaluatedAt: clearance.blockedAt,
+    recordedAt: request.now,
+  });
+
+  if (written.outcome === "refused") {
+    return {
+      evaluationId: null,
+      persistence: executionRefusal(
+        "PERSISTENCE_REFUSED",
+        `the skip of intent ${request.intentId} could not be journaled against candidate ${candidateId} (${written.code}): ${written.detail}`,
+      ),
+    };
+  }
+  return { evaluationId: written.evaluationId, persistence: null };
 }
 
 /**

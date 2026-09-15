@@ -191,6 +191,15 @@ export type DispatchBlocked = {
   readonly netEdge: NetEdgeBreakdown | null;
   /** What the venue would have charged, when pricing got that far. */
   readonly pricing: VenuePricingView | null;
+  /**
+   * When the quote this refusal was judged against was acquired, or `null`
+   * when no quote parsed. Carried so a skip can be journaled with the age of
+   * the data behind it — `docs/evaluation.md`'s point-in-time integrity is
+   * not reconstructable after the fact, and "we skipped" without "on what,
+   * and how fresh" is the half of an opportunity-journal row that cannot be
+   * analysed later.
+   */
+  readonly quoteAcquiredAt: IsoUtcTimestamp | null;
   readonly blockedAt: IsoUtcTimestamp;
 };
 
@@ -200,7 +209,11 @@ function blocked(
   stage: RevalidationStage,
   refusal: ExecutionRefusal,
   now: IsoUtcTimestamp,
-  detail: { readonly netEdge?: NetEdgeBreakdown | null; readonly pricing?: VenuePricingView | null } = {},
+  detail: {
+    readonly netEdge?: NetEdgeBreakdown | null;
+    readonly pricing?: VenuePricingView | null;
+    readonly quoteAcquiredAt?: IsoUtcTimestamp | null;
+  } = {},
 ): DispatchBlocked {
   return {
     outcome: "blocked",
@@ -208,6 +221,7 @@ function blocked(
     refusal,
     netEdge: detail.netEdge ?? null,
     pricing: detail.pricing ?? null,
+    quoteAcquiredAt: detail.quoteAcquiredAt ?? null,
     blockedAt: now,
   };
 }
@@ -231,6 +245,7 @@ export function revalidateBeforeDispatch(request: RevalidationRequest): Revalida
     return blocked("quote", policyBlock(evaluated.reasonCode, evaluated.detail), now);
   }
   const quote = evaluated.quote;
+  const acquiredAt = quote.timestamps.quoteAcquiredAt;
 
   // Schema and freshness say the quote is well-formed and current; neither
   // says it prices THIS intent's assets. An instrument id is exactly
@@ -247,19 +262,25 @@ export function revalidateBeforeDispatch(request: RevalidationRequest): Revalida
         `the quote prices "${quote.instrumentId}" but intent ${intent.intentId} trades "${expectedInstrumentId}"; a quote for another instrument never prices this intent`,
       ),
       now,
+      { quoteAcquiredAt: acquiredAt },
     );
   }
 
   const priced = priceExecutable(intent.side, quote, venue);
   if (priced.outcome === "unpriceable") {
-    return blocked("pricing", executionRefusal(priced.failure.reason, priced.failure.detail), now);
+    return blocked("pricing", executionRefusal(priced.failure.reason, priced.failure.detail), now, {
+      quoteAcquiredAt: acquiredAt,
+    });
   }
   const pricing = priced.pricing;
 
   // ---- the policy gates, in `EVALUATION_STAGES` order ---------------------
   const reconciliation = checkAccountReconciled({ state: portfolio.account, now, config: policyConfig });
   if (!reconciliation.eligible) {
-    return blocked("reconciliation", fromPolicyRefusal(reconciliation.refusal), now, { pricing });
+    return blocked("reconciliation", fromPolicyRefusal(reconciliation.refusal), now, {
+      pricing,
+      quoteAcquiredAt: acquiredAt,
+    });
   }
 
   const freshness = checkQuoteFreshness({
@@ -268,7 +289,10 @@ export function revalidateBeforeDispatch(request: RevalidationRequest): Revalida
     config: policyConfig,
   });
   if (!freshness.eligible) {
-    return blocked("quoteFreshness", fromPolicyRefusal(freshness.refusal), now, { pricing });
+    return blocked("quoteFreshness", fromPolicyRefusal(freshness.refusal), now, {
+      pricing,
+      quoteAcquiredAt: acquiredAt,
+    });
   }
 
   // Judged at the price this dispatch would actually pay, NOT at the ask.
@@ -282,7 +306,7 @@ export function revalidateBeforeDispatch(request: RevalidationRequest): Revalida
   // that leaves the account (owner ruling, confirmed on #35).
   const zone = checkEntryZone({ executablePrice: pricing.executionPrice, entryZone: intent.entryZone });
   if (!zone.eligible) {
-    return blocked("entryZone", fromPolicyRefusal(zone.refusal), now, { pricing });
+    return blocked("entryZone", fromPolicyRefusal(zone.refusal), now, { pricing, quoteAcquiredAt: acquiredAt });
   }
 
   // A fresh array, because `CheckExposureParams.caps` is mutable and the
@@ -290,7 +314,7 @@ export function revalidateBeforeDispatch(request: RevalidationRequest): Revalida
   // habit.
   const exposure = checkExposure({ caps: [...portfolio.exposureCaps] });
   if (!exposure.eligible) {
-    return blocked("exposure", fromPolicyRefusal(exposure.refusal), now, { pricing });
+    return blocked("exposure", fromPolicyRefusal(exposure.refusal), now, { pricing, quoteAcquiredAt: acquiredAt });
   }
 
   // ---- net edge, at the authorized quantity -------------------------------
@@ -303,7 +327,7 @@ export function revalidateBeforeDispatch(request: RevalidationRequest): Revalida
         `the thesis exit price "${thesis.expectedExitPriceQuote}" carries finer precision than the venue's money scale (${String(venue.moneyScale)})`,
       ),
       now,
-      { pricing },
+      { pricing, quoteAcquiredAt: acquiredAt },
     );
   }
   const expectedGrossEdgePerUnitQuote = decimalAt(grossEdgeUnits.perUnit, venue.moneyScale);
@@ -318,7 +342,11 @@ export function revalidateBeforeDispatch(request: RevalidationRequest): Revalida
     config: policyConfig,
   });
   if (!netEdge.eligible) {
-    return blocked("netEdge", fromPolicyRefusal(netEdge.refusal), now, { netEdge: netEdge.breakdown, pricing });
+    return blocked("netEdge", fromPolicyRefusal(netEdge.refusal), now, {
+      netEdge: netEdge.breakdown,
+      pricing,
+      quoteAcquiredAt: acquiredAt,
+    });
   }
 
   return {

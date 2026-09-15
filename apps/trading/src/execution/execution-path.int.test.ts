@@ -3,6 +3,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { ACKNOWLEDGE_AND_FILL } from "@vigil/adapter-paper";
 import {
   loadApprovedIntent,
+  loadCandidates,
   loadDispatch,
   loadExecutionAttempts,
   loadJournalEntries,
@@ -16,6 +17,7 @@ import { pollAttempt } from "./settle";
 import {
   MONEY_SCALE,
   NOW,
+  QUOTE_ACQUIRED_AT,
   capital,
   dispatchIds,
   fund,
@@ -26,9 +28,11 @@ import {
   portfolio,
   proposal,
   rawQuote,
+  recordCandidateFor,
   runtime,
   settlementIds,
   syntheticInstrument,
+  instant,
   paperExchange,
   venueConfig,
 } from "./test-support/execution-fixtures";
@@ -444,6 +448,121 @@ describe("dispatchAttempt", () => {
 
     const entries = (await loadJournalEntries(db)).filter((entry) => entry.intentId === authorized.intentId);
     expect(entries.map((entry) => entry.kind).toSorted()).toEqual(["fee", "reservation-hold", "trade"]);
+  });
+
+  it("journals a refused gate as a BLOCKED candidate evaluation, exactly once however often the block is redelivered", async () => {
+    const label = "skipjournal";
+    const instrument = syntheticInstrument(label);
+    await fund(db, instrument.quoteAssetId, MONEY_SCALE, FUNDING_BASE, label);
+    const candidateId = await recordCandidateFor(db, label, instrument);
+
+    const wiring = runtime(db, paperExchange());
+    const authorized = await authorizeProposal(db, {
+      proposal: proposal(label, instrument, { candidateId }),
+      quote: parsedQuote(instrument),
+      now: NOW,
+      operatingMode: "PAPER",
+      venue: VENUE,
+      policyConfig: policyConfig(),
+      portfolio: portfolio(),
+      capital: capital(),
+    });
+    expect(authorized.outcome).toBe("authorized");
+    if (authorized.outcome !== "authorized") {
+      return;
+    }
+
+    const blockedRequest = {
+      intentId: authorized.intentId,
+      attempt: 1,
+      instrument,
+      plan: planTerms(),
+      quote: rawQuote(instrument, { bidPrice: "257.50", askPrice: "257.60" }),
+      portfolio: portfolio(),
+      ids: dispatchIds(label),
+    } as const;
+
+    const first = await dispatchAttempt(wiring, { ...blockedRequest, now: NOW });
+    expect(first.outcome).toBe("blocked");
+    if (first.outcome !== "blocked") {
+      return;
+    }
+    expect(first.reasonCode).toBe("INSUFFICIENT_NET_EDGE");
+    expect(first.evaluationId).toBe(`evaluation-${label}`);
+    expect(first.persistence).toBeNull();
+
+    const afterFirst = (await loadCandidates(db)).find((candidate) => candidate.candidateId === candidateId);
+    expect(afterFirst?.latestEvaluation?.outcome).toBe("BLOCKED");
+    expect(afterFirst?.latestEvaluation?.reasonCode).toBe("INSUFFICIENT_NET_EDGE");
+    // The price the gate actually judged — the execution price this dispatch
+    // would have paid, not the quoted ask.
+    expect(afterFirst?.latestEvaluation?.executablePrice).toBe("257.86");
+    expect(afterFirst?.latestEvaluation?.quoteAcquiredAt).toBe(QUOTE_ACQUIRED_AT);
+    expect(afterFirst?.latestEvaluation?.evaluatedAt).toBe(NOW);
+
+    // The same block redelivered, at a LATER instant. A second row would be
+    // the newer one, so `latestEvaluation` still carrying the first delivery's
+    // instant is what proves only one decision was written — a count would
+    // have needed a query this package has no exported read for.
+    const later = instant("2026-03-01T12:00:30.000Z");
+    const second = await dispatchAttempt(wiring, { ...blockedRequest, now: later });
+    expect(second.outcome).toBe("blocked");
+    if (second.outcome === "blocked") {
+      expect(second.evaluationId).toBe(`evaluation-${label}`);
+      expect(second.persistence).toBeNull();
+    }
+
+    const afterSecond = (await loadCandidates(db)).find((candidate) => candidate.candidateId === candidateId);
+    expect(afterSecond?.latestEvaluation?.evaluatedAt).toBe(NOW);
+
+    // And still nothing durable on the intent side either way.
+    expect(await loadExecutionAttempts(db, authorized.intentId)).toEqual([]);
+    expect(await loadDispatch(db, authorized.intentId, 1)).toBeNull();
+  });
+
+  it("journals nothing when the authorization names no candidate, and says so rather than inventing one", async () => {
+    // A protective action has no candidate by construction, and
+    // `candidate_evaluations.candidate_id` is NOT NULL — so its refusal has
+    // nowhere in this family to go. The refusal still reaches the caller; it
+    // is the durable half that is missing, and `evaluationId` being null is
+    // what keeps the two cases distinguishable.
+    const label = "skipnocandidate";
+    const instrument = syntheticInstrument(label);
+    await fund(db, instrument.quoteAssetId, MONEY_SCALE, FUNDING_BASE, label);
+
+    const wiring = runtime(db, paperExchange());
+    const authorized = await authorizeProposal(db, {
+      proposal: proposal(label, instrument),
+      quote: parsedQuote(instrument),
+      now: NOW,
+      operatingMode: "PAPER",
+      venue: VENUE,
+      policyConfig: policyConfig(),
+      portfolio: portfolio(),
+      capital: capital(),
+    });
+    if (authorized.outcome !== "authorized") {
+      return;
+    }
+    expect(authorized.record.candidateId).toBeNull();
+
+    const blocked = await dispatchAttempt(wiring, {
+      intentId: authorized.intentId,
+      attempt: 1,
+      instrument,
+      plan: planTerms(),
+      quote: rawQuote(instrument, { bidPrice: "257.50", askPrice: "257.60" }),
+      now: NOW,
+      portfolio: portfolio(),
+      ids: dispatchIds(label),
+    });
+
+    expect(blocked.outcome).toBe("blocked");
+    if (blocked.outcome === "blocked") {
+      expect(blocked.reasonCode).toBe("INSUFFICIENT_NET_EDGE");
+      expect(blocked.evaluationId).toBeNull();
+      expect(blocked.persistence).toBeNull();
+    }
   });
 
   it("refuses to dispatch an intent that is not in durable history", async () => {
