@@ -64,6 +64,20 @@
       "when": 1789342753482,
       "tag": "0008_candidate_append_only_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1789480807359,
+      "tag": "0009_approved_intents_attempts_and_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789480832756,
+      "tag": "0010_intent_lifecycle_guards",
+      "breakpoints": true
     }
   ]
 }

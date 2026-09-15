@@ -150,7 +150,15 @@ describe("money and quantity columns", () => {
     const tables = new Set(columns.map((column) => column.table_name));
 
     expect([...tables].sort()).toEqual(
-      expect.arrayContaining(["journal_entries", "journal_lines", "ledger_balances", "reservations"]),
+      expect.arrayContaining([
+        "approved_intents",
+        "execution_attempts",
+        "intent_dispatch_outbox",
+        "journal_entries",
+        "journal_lines",
+        "ledger_balances",
+        "reservations",
+      ]),
     );
   });
 
@@ -175,15 +183,22 @@ describe("money and quantity columns", () => {
     }
   });
 
+  // A table holding amounts in one asset spells the column `asset_scale`;
+  // one holding amounts in two — an intent that spends one asset to acquire
+  // another — spells them `input_asset_scale` and `output_asset_scale`. The
+  // rule being asserted is the same either way, and is about the scale being
+  // present in the row rather than about what it is called: base units with
+  // no scale beside them are an integer nobody can interpret.
   it("pairs every base-unit column's table with an explicit asset scale column — base units without a scale are an uninterpretable integer", async () => {
     const columns = await publicColumns();
     const tablesWithBaseUnits = new Set(
       columns.filter((column) => column.column_name.endsWith("_base")).map((column) => column.table_name),
     );
     const tablesWithScale = new Set(
-      columns.filter((column) => column.column_name === "asset_scale").map((column) => column.table_name),
+      columns.filter((column) => column.column_name.endsWith("asset_scale")).map((column) => column.table_name),
     );
 
+    expect(tablesWithBaseUnits.size).toBeGreaterThan(0);
     for (const table of tablesWithBaseUnits) {
       expect([table, tablesWithScale.has(table)]).toEqual([table, true]);
     }
@@ -247,6 +262,20 @@ describe("idempotency and correlation keys", () => {
         "reservations_intent_id_active_key",
         "reservations_intent_id_attempt_key",
         "reservations_journal_entry_id_key",
+        // The intents family's own keys. `approved_intents` carries two
+        // because an economic action id is an idempotency key in its own
+        // right (AGENTS.md "Database changes"), and the three on
+        // `execution_attempts` are what make a retry a versioned attempt
+        // rather than a second authorization: one row per attempt number,
+        // one live attempt per intent, and one attempt per intent that ever
+        // spends anything.
+        "approved_intents_economic_action_id_key",
+        "approved_intents_idempotency_key_key",
+        "execution_attempts_client_order_id_key",
+        "execution_attempts_intent_id_attempt_key",
+        "execution_attempts_intent_id_consumed_key",
+        "execution_attempts_intent_id_live_key",
+        "intent_dispatch_outbox_intent_id_attempt_key",
       ]),
     );
   });

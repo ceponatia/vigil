@@ -75,6 +75,24 @@ as later slices need to.
   `DELETE` against a posted entry or posting; a correction is a reversing
   entry. `ledger_balances` is a projection of the journal and is updated in
   place.
+- **An approved intent is immutable, and consumable exactly once.** The
+  `intent_lifecycle_guards` trigger rejects every `UPDATE` and `DELETE`
+  against `approved_intents` — total rather than a list of authorizing
+  columns, since a list has to be maintained and the column nobody adds to it
+  is the one that stays mutable. Its lifecycle lives on `execution_attempts`
+  instead: one row per attempt number, at most one live attempt per intent
+  (with `UNKNOWN` counted as live, so reconciliation precedes resubmission),
+  and at most one attempt per intent that ever spends anything. A remainder
+  after a partial fill is a new intent, not a further attempt on the old one.
+- **A dispatch is durable before it happens.** An outbox row is enqueued
+  `pending` — the trigger refuses an insert in any other state — and it
+  points at an attempt, which points at an approved intent, so a dispatch
+  with no authorization behind it has nowhere to be written. It carries a
+  SHA-256 digest of the payload rather than the payload, and a fencing token
+  that can never go backwards, so a writer that has been fenced cannot mark a
+  dispatch it no longer owns. That token is necessary and not sufficient:
+  fencing must remove the outgoing writer's real capability at the venue,
+  which no column can do.
 - **Candidates are append-only.** The same kind of trigger guards
   `candidates` and `candidate_tranches`: a candidate is the record of what
   was believed *before* the outcome was known, so a later judgement is an
@@ -108,6 +126,18 @@ as later slices need to.
 
 ## Forward-declared seams
 
+- **The reservation's authorization.** `reservations.intent_id` carries no
+  foreign key into `approved_intents` yet. It should — capital held for an
+  authorization nobody wrote down is exactly what this family refuses
+  everywhere else — but adding one changes the call order of a merged,
+  tested path, since `reserveAvailable` would begin refusing every caller
+  that has not persisted its intent first. That is the execution slice's
+  contract to settle.
+- **The venue's own order.** An execution attempt is the intent-side record
+  of one try at consuming an authorization: which attempt, what state, how
+  much of the authorization it consumed. The venue's order object, its
+  events, and its individual fills are the `orders` family, which arrives
+  with the slice that needs them and references the attempt.
 - **The reservation lifecycle.** `reservation_state` declares
   `active → released | consumed | expired`, and only `active` is ever
   written: nothing releases, consumes, or expires a hold yet, and
@@ -125,7 +155,18 @@ as later slices need to.
 ## Built modules
 
 - `journal` — journal entries, postings, and the balance projection.
-- `intents` — reservations.
+- `intents` — reservations, approved intents, the versioned execution
+  attempts that consume them, and the dispatch outbox. An attempt carries no
+  asset ids and no provenance of its own: both are the intent's, reached
+  through a `NOT NULL` foreign key that cannot be absent, and a second copy
+  would be a second answer that can disagree with the authorization. It does
+  carry the two scales so its amounts are interpretable from the row itself,
+  and the lifecycle trigger refuses an attempt whose scales are not the
+  intent's. `ApprovedEconomicIntent`'s `rejectionReasonCode` is deliberately
+  not a column here — a row in `approved_intents` exists only because policy
+  approved, and a refusal is a `candidate_evaluations` row in the `decisions`
+  family — and its `reservedAssets` array is the `reservations` rows naming
+  that intent rather than a list that could disagree with the holds taken.
 - `decisions` — candidates, their staged position-plan tranches
   (`candidate_tranches`), and the evaluations that later judge them
   (`candidate_evaluations`, whose `NOT NULL` foreign key is what makes an

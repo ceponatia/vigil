@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 
 import { createDbClient, type VigilDatabase } from "../client";
 import { candidateEvaluations, candidates, candidateTranches } from "../schema/decisions";
-import { reservations } from "../schema/intents";
+import { approvedIntents, executionAttempts, intentDispatchOutbox, reservations } from "../schema/intents";
 import { heartbeats } from "../schema/ops";
 import {
   assetScales,
@@ -110,6 +110,11 @@ export type LedgerTestDb = {
    * (`drizzle/0001_journal_append_only_guard.sql`,
    * `drizzle/0008_candidate_append_only_guard.sql`).
    *
+   * The intents tables are listed children-first — outbox, attempts, then
+   * approved intents — and ahead of `candidates`, which an intent may point
+   * at. `cascade` would cover the ordering anyway; naming it correctly is
+   * what keeps the list readable as the dependency order it actually is.
+   *
    * `asset_scales` goes with the ledger tables: it is referenced by three of
    * them, so one `TRUNCATE` has to name them all, and a suite that left it
    * behind would assert against another suite's registered assets.
@@ -136,7 +141,7 @@ export function openLedgerTestDb(applicationName: string): LedgerTestDb {
     close: client.close,
     reset: async () => {
       await client.db.execute(
-        sql`truncate table ${candidateEvaluations}, ${candidateTranches}, ${candidates}, ${heartbeats}, ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances}, ${assetScales} restart identity cascade`,
+        sql`truncate table ${candidateEvaluations}, ${candidateTranches}, ${intentDispatchOutbox}, ${executionAttempts}, ${approvedIntents}, ${candidates}, ${heartbeats}, ${reservations}, ${journalLines}, ${journalEntries}, ${ledgerBalances}, ${assetScales} restart identity cascade`,
       );
     },
   };
