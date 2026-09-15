@@ -428,7 +428,25 @@ export type OrderSettlement = {
  * rendered at one of the venue's own scales.
  */
 function unspentInputOf(order: PaperOrder, economics: ExecutionEconomics): DecimalString {
-  const consumed = order.side === "BUY" ? (economics.netCapitalConsumed ?? ZERO) : economics.filledQuantity;
+  const consumed = order.side === "BUY" ? economics.netCapitalConsumed : economics.filledQuantity;
+  if (consumed === null) {
+    // Unreachable: `computeExecutionEconomics` sets `netCapitalConsumed` on
+    // both of its BUY branches. Deliberately NOT defaulted to zero, because
+    // zero is the one substitution that would be actively dangerous here: an
+    // absent capital figure would read as "nothing was spent", making the
+    // whole `maxSpend` look unspent, and this value is documented as the
+    // figure the ledger releases. A missing money figure is not a zero money
+    // figure, and the caller cannot tell the two apart from a number.
+    //
+    // A throw rather than a reason code because this package owns the
+    // invariant — nothing crossed a trust boundary to get here — and
+    // `docs/resilience.md` §4 reserves an exception for exactly that: a
+    // programmer error, never a proposal policy declines. The same posture as
+    // the scale guard below and `requireUnits` beneath it.
+    throw new Error(
+      `unspentInputOf: a BUY settlement for ${order.clientOrderId} reports no netCapitalConsumed; the input consumed is not assumed to be zero`,
+    );
+  }
   const scale = Math.max(fractionalDigits(order.envelope.maxSpend), fractionalDigits(consumed));
   const approvedUnits = unitsOf(order.envelope.maxSpend, scale);
   const consumedUnits = unitsOf(consumed, scale);

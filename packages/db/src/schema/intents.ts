@@ -383,26 +383,28 @@ export const approvedIntents = pgTable(
      * `apps/trading/src/execution/dispatch.ts` both cite this paragraph; the
      * value passes from here to the adapter unconverted.
      *
-     * Three reasons the input asset is the right denomination:
+     * **A residual is a tolerance on capital, and this settles it on its
+     * own.** The authorization's magnitude is `max_spend_base`, the
+     * reservation is taken against it, and the release an outcome produces is
+     * `max_spend_base - <input actually consumed>`
+     * (`apps/trading/src/execution/settle.ts`). This column bounds exactly
+     * that figure, so it is denominated in exactly that asset — and the check
+     * constraint below then compares two amounts of one asset, with no price
+     * standing between them. Nothing below is load-bearing; the argument
+     * above does not need help.
      *
-     * 1. **A residual is a capital question.** The authorization's magnitude
-     *    is `max_spend_base`, the reservation is taken against it, and the
-     *    release an outcome produces is `max_spend_base - <input actually
-     *    consumed>` (`apps/trading/src/execution/settle.ts`). The residual is
-     *    the tolerance on exactly that figure, so it belongs in exactly that
-     *    asset — and the check constraint below can then bound the two
-     *    against each other in SQL without a price.
-     * 2. **The output reading would make this column redundant.**
-     *    `min_acceptable_receipt_base` already answers the output-side
-     *    question — "is the position we ended up with worth holding?" Read as
-     *    output units, this column would just be
-     *    `quantity_base - min_acceptable_receipt_base` restated. Read as
-     *    input units it asks a genuinely different question: "did meaningful
-     *    approved capital come back unspent?"
-     * 3. **Dust is judged in money.** "Is the leftover worth chasing?" has a
-     *    stable answer per numeraire and a per-asset, per-price one otherwise;
-     *    `docs/policy.md` groups residual-inventory limits with the other
-     *    money-denominated controls.
+     * Two supporting observations, stated as the weaker claims they are:
+     *
+     * - The output reading would largely duplicate
+     *   `min_acceptable_receipt_base`, which already bounds the output side —
+     *   as a sizing gate before authorization and a worst-case gate before
+     *   submission. An output-denominated residual would ask about the same
+     *   magnitude again, at a later point in the lifecycle. Read as input
+     *   units this column asks something else entirely: did meaningful
+     *   approved capital come back unspent?
+     * - Dust is judged in the numeraire. "Is this leftover worth chasing?"
+     *   has one stable answer per numeraire, and a per-asset, per-price one
+     *   otherwise.
      *
      * For a SELL the input asset IS the traded base asset, so the residual is
      * a quantity of the thing being sold and the same sentence still holds —
