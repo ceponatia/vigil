@@ -127,8 +127,6 @@ export const INTENT_STORE_DIAGNOSTIC_CODES = [
   "NET_EDGE_BELOW_MINIMUM",
   /** One intent names the same cost kind twice, which would double-count it. */
   "DUPLICATE_COST_COMPONENT",
-  /** One asset is used at two different scales in a single record. */
-  "INCONSISTENT_SCALE",
   /**
    * The request names an attempt or dispatch that exists under different
    * terms. Distinct from `DUPLICATE_RECORD`: a redelivery of the same work
@@ -769,8 +767,17 @@ function checkEconomics(intent: StoreApprovedIntent): IntentRefusal | null {
  * One asset, one scale — within a single record, before the database's
  * `asset_scales` foreign keys get a chance to say the same thing less
  * clearly. A record that used an asset at two scales would register the
- * first and then be refused for the second, and `SCALE_MISMATCH` would
- * point at the registry rather than at the two disagreeing fields.
+ * first and then be refused for the second, and the refusal would point at
+ * the registry rather than at the two fields that disagree.
+ *
+ * The code is `SCALE_MISMATCH`, the same one `journal-store.ts` returns from
+ * `describeScaleClash` and from the `_asset_scale_fk` mapping. Both halves
+ * of that store's definition — "posted at two scales, or at a scale it is
+ * not registered with" — are one condition with one name, and giving this
+ * half a second name would leave two stores in this package disagreeing
+ * about what to call the same fault. The *detail* is what distinguishes
+ * them: this one names the two disagreeing fields, the foreign-key mapping
+ * names the registry.
  */
 function checkScalesAgree(intent: StoreApprovedIntent): IntentRefusal | null {
   const scales = new Map<string, number>();
@@ -785,7 +792,7 @@ function checkScalesAgree(intent: StoreApprovedIntent): IntentRefusal | null {
     const seen = scales.get(assetId);
     if (seen !== undefined && seen !== scale) {
       return refuseIntentWrite(
-        "INCONSISTENT_SCALE",
+        "SCALE_MISMATCH",
         `intent ${intent.intentId} uses ${assetId} at scale ${seen} and at scale ${scale}; one asset has exactly one scale`,
       );
     }

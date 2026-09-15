@@ -117,7 +117,12 @@ describe("openExecutionAttempt", () => {
     const first = await openExecutionAttempt(db, openAttempt("intent-1", 1));
     const again = await openExecutionAttempt(db, openAttempt("intent-1", 1));
 
-    expect(first).toEqual(again);
+    // The two answers are deliberately NOT identical, and asserting that
+    // they were is how this test previously failed against a store doing the
+    // right thing. The rows are the same rows — the redelivery is told which
+    // ones won — and the outcome is what says the second call opened nothing.
+    expect(first).toEqual({ outcome: "opened", attemptId: "att-intent-1-1", dispatchId: "disp-intent-1-1" });
+    expect(again).toEqual({ outcome: "duplicate", attemptId: "att-intent-1-1", dispatchId: "disp-intent-1-1" });
     expect(await countAttempts()).toBe(1);
   });
 

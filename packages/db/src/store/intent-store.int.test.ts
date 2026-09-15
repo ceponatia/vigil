@@ -151,17 +151,65 @@ describe("recordApprovedIntent", () => {
     expect(await countIntents()).toBe(0);
   });
 
-  it("refuses an asset used at a second scale — catches two authorizations that disagree about how many decimal places one asset has, after which their amounts cannot be compared at all", async () => {
-    await recordApprovedIntent(db, storeApprovedIntent("intent-scale-a"));
-
+  // Both halves of `SCALE_MISMATCH` — "used at two scales, or at a scale it
+  // is not registered with", the definition `journal-store.ts` already gives
+  // that code — reach this store, and they are caught in different places.
+  // The two cases below are told apart by their detail rather than by their
+  // code, because one name for one condition is the point: two stores in
+  // this package calling the same fault different things is how a caller
+  // ends up handling it twice, or once.
+  it("refuses an authorization that names one asset at two scales within the same record — catches a spend cap and a cost total that disagree about how many decimal places the asset has, where neither figure is comparable to the other", async () => {
     const refused = await recordApprovedIntent(
       db,
-      storeApprovedIntent("intent-scale-b", {
+      storeApprovedIntent("intent-scale-internal", {
+        // The default economics settles in TEST_ASSET at TEST_SCALE, so an
+        // input side one decimal place out puts the same asset at two scales
+        // inside one authorization.
         input: { assetId: TEST_ASSET, scale: TEST_SCALE + 1, maxSpendBase: 1_000n, permittedResidualBase: 0n },
       }),
     );
 
     expect(refused).toMatchObject({ outcome: "refused", code: "SCALE_MISMATCH" });
+    if (refused.outcome === "refused") {
+      expect(refused.detail).toContain(`at scale ${TEST_SCALE + 1}`);
+    }
+    expect(await countIntents()).toBe(0);
+  });
+
+  it("refuses an authorization internally consistent at a scale the registry does not hold for that asset — catches two authorizations that disagree about one asset's decimal places, which the record-local check cannot see and only the asset_scales foreign key can", async () => {
+    await recordApprovedIntent(db, storeApprovedIntent("intent-scale-a"));
+
+    const refused = await recordApprovedIntent(
+      db,
+      storeApprovedIntent("intent-scale-b", {
+        // Everything in this record agrees on TEST_SCALE + 1, so the
+        // boundary check passes and the composite foreign key into
+        // asset_scales is the only thing left to refuse it.
+        input: { assetId: TEST_ASSET, scale: TEST_SCALE + 1, maxSpendBase: 1_000n, permittedResidualBase: 0n },
+        economics: storeIntentEconomics({
+          numeraireScale: TEST_SCALE + 1,
+          expectedGrossBase: 5_100n,
+          expectedTotalCostBase: 2_600n,
+          expectedNetEdgeBase: 2_500n,
+          costComponents: [
+            {
+              kind: "proportional-fee",
+              chargeBasis: "separately-charged",
+              nativeAssetId: TEST_ASSET,
+              nativeScale: TEST_SCALE + 1,
+              nativeAmountBase: 2_600n,
+              numeraireAmountBase: 2_600n,
+              conversionSource: null,
+            },
+          ],
+        }),
+      }),
+    );
+
+    expect(refused).toMatchObject({ outcome: "refused", code: "SCALE_MISMATCH" });
+    if (refused.outcome === "refused") {
+      expect(refused.detail).toContain("registered at a different scale");
+    }
     expect(await countIntents()).toBe(1);
   });
 
