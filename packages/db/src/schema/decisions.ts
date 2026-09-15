@@ -288,6 +288,33 @@ export const candidateTranches = pgTable(
  * hurdle forever however far the market had since moved. That is precisely
  * the decay this application refuses to trade through.
  *
+ * It is a **plan-level** figure, and that is a cardinality judgement rather
+ * than a convenience. One plan is executed by one intent per step, each
+ * approved at its own midpoint; a per-approval market measurement stored on
+ * the shared row would either refuse the second step or silently keep the
+ * first one's number. So this column records the midpoint the terms were
+ * set at, once, and a step's own approval-time figure stays with that step.
+ *
+ * Which leaves it derivable rather than stored, to a stated tolerance:
+ * `approved_intents.expected_gross_base` is the per-unit edge times the
+ * quantity, floored, so dividing it back by `quantity_base` recovers the
+ * per-unit edge — and with `thesis_exit_price` above, the approval-time
+ * midpoint — to within `10^quantity_scale / quantity_units` of a numeraire
+ * base unit. That is one base unit at a whole unit of quantity, ten at a
+ * tenth of one, and it widens as the step shrinks, which is the direction a
+ * staged plan moves. Nothing reads either figure today; a later evaluation
+ * that needs the exact per-step midpoint should store it on the intent
+ * rather than sharpen the division.
+ *
+ * ## The split holds for a staged plan rather than merely surviving one
+ *
+ * Every step of one plan is entered in the same band, toward the same
+ * target — the tranches differ in size and trigger, which is
+ * `candidate_tranches`' half. So a second step's approval arrives with
+ * terms identical to the first's and `recordPositionPlan` answers
+ * `duplicate`, not `PLAN_TERMS_CONFLICT`. The conflict is reserved for what
+ * it is meant to catch: two different theses claiming one plan id.
+ *
  * There is no `candidate_id` here. The candidate a plan came from is
  * already on the intent that executes it, and the correlation id below is
  * what `docs/resilience.md` §10 threads a plan, its intents, its attempts
@@ -318,7 +345,12 @@ export const positionPlans = pgTable(
      * should.
      */
     thesisExitPrice: text("thesis_exit_price").notNull(),
-    /** The midpoint these terms were set against. Evidence — see the header. */
+    /**
+     * The midpoint these terms were set against, recorded once with them.
+     * Evidence and never a dispatch-time input, and plan-level rather than
+     * per-approval — the header gives both reasons, and the tolerance a
+     * per-step midpoint is derivable to instead.
+     */
     formationReferenceMid: text("formation_reference_mid").notNull(),
     /** When the terms were set; the analysis-completion stage of the timestamp family. */
     formedAt: timestamp("formed_at", { withTimezone: true, precision: 3, mode: "date" }).notNull(),

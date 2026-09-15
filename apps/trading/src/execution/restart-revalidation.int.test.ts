@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
 
-import { loadExecutionAttempts, loadPositionPlan, recordApprovedIntent } from "@vigil/db";
+import { loadActiveReservations, loadExecutionAttempts, loadPositionPlan, recordApprovedIntent } from "@vigil/db";
 import type { StoreApprovedIntent } from "@vigil/db";
 
 import { authorizeProposal } from "./authorize";
@@ -136,6 +136,14 @@ describe("revalidation after a restart", () => {
     expect(decayed.stage).toBe("netEdge");
     expect(decayed.reasonCode).toBe("INSUFFICIENT_NET_EDGE");
     expect(await loadExecutionAttempts(restarted.db, authorized.intentId)).toEqual([]);
+    // No hold either, and this is the half that would rot quietly: the plan
+    // is loaded before `reserveAvailable`, and a reordering that moved it
+    // after would leave every ordinary skip holding capital against an
+    // intent no exported path can release — a release needs a settled
+    // attempt that actually spent something. A handful of skips would
+    // strand the funding account while every attempt assertion above stayed
+    // green.
+    expect(await loadActiveReservations(restarted.db, instrument.quoteAssetId)).toEqual([]);
 
     // ---- the control: same runtime, same authorization, unmoved book ----
     const unmoved = await dispatchAttempt(after, {
@@ -157,6 +165,14 @@ describe("revalidation after a restart", () => {
     // would produce this number at BOTH books, which is exactly the bug the
     // decayed half exists to catch.
     expect(unmoved.clearance.expectedGrossEdgePerUnitQuote).toBe("9.95");
+
+    // And the hold the skip did not take, taken now — against the same
+    // asset, through the same read. Without this the empty assertion above
+    // would also pass if `loadActiveReservations` never reported a hold on
+    // this instrument at all.
+    expect(
+      (await loadActiveReservations(restarted.db, instrument.quoteAssetId)).map((held) => held.intentId),
+    ).toEqual([authorized.intentId]);
   });
 
   it("refuses to dispatch an authorization whose plan is not in durable history, holding no capital and opening no attempt — catches the gate inventing terms for an intent it cannot read a band for, which would clear a zone nobody approved; `approved_intents.position_plan_id` has no foreign key behind it yet, so this state is reachable", async () => {
@@ -191,7 +207,8 @@ describe("revalidation after a restart", () => {
     };
     expect((await recordApprovedIntent(approving.db, unplanned)).outcome).toBe("recorded");
 
-    const refused = await dispatchAttempt(runtime(restarted.db, paperExchange()), {
+    const after = runtime(restarted.db, paperExchange());
+    const refused = await dispatchAttempt(after, {
       intentId: unplanned.intentId,
       attempt: 1,
       instrument,
@@ -207,5 +224,25 @@ describe("revalidation after a restart", () => {
     }
     expect(refused.refusal.reason).toEqual({ source: "execution", code: "UNKNOWN_POSITION_PLAN" });
     expect(await loadExecutionAttempts(restarted.db, unplanned.intentId)).toEqual([]);
+    expect(await loadActiveReservations(restarted.db, instrument.quoteAssetId)).toEqual([]);
+
+    // The control for that empty hold list, and for the refusal being about
+    // this intent rather than about this instrument: the sibling
+    // authorization on the SAME asset — the one whose plan the approval did
+    // record — dispatches, and the hold shows up under its id.
+    const planned = await dispatchAttempt(after, {
+      intentId: authorized.intentId,
+      attempt: 1,
+      instrument,
+      quote: rawQuote(instrument),
+      now: NOW,
+      portfolio: portfolio(),
+      ids: dispatchIds(`${label}-planned`),
+    });
+
+    expect(planned.outcome).toBe("dispatched");
+    expect(
+      (await loadActiveReservations(restarted.db, instrument.quoteAssetId)).map((held) => held.intentId),
+    ).toEqual([authorized.intentId]);
   });
 });

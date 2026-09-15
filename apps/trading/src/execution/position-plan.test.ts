@@ -85,7 +85,7 @@ describe("planTermsFor", () => {
     });
   }
 
-  it("does not judge an inverted band itself, and leaves it to the check that refuses one — pins the boundary this module's header claims: a second ordering rule here would give one row two different refusals depending on which check ran first, and the one that fires is the one an operator reads", () => {
+  it("does not judge an inverted band itself, and leaves it to the check whose own parse refuses one — pins the boundary this module's header claims, and pins the reason rather than the verdict: an inverted band is an empty interval, so every price is outside it and `eligible === false` alone would still hold with `entryZoneSchema`'s refine deleted, which is the rule being relied on", () => {
     const inverted = storedPlan("inverted", INSTRUMENT, { entryZoneMin: "300.00", entryZoneMax: "200.00" });
 
     const result = planTermsFor(inverted, INSTRUMENT, "intent-inverted");
@@ -94,9 +94,28 @@ describe("planTermsFor", () => {
       return;
     }
 
-    // …and the band is refused where the rule actually lives, so nothing
-    // dispatches on it. Without this half the case above would be an
-    // assertion that a hole exists.
-    expect(checkEntryZone({ executablePrice: money("250.36"), entryZone: result.terms.entryZone }).eligible).toBe(false);
+    // …and the band is refused where the rule actually lives. `MALFORMED_INPUT`
+    // comes from `entryZoneParamsSchema` failing to parse, which only the
+    // min <= max refine can produce here; an out-of-band price under a
+    // well-formed zone refuses as `OUTSIDE_ENTRY_ZONE` instead. Asserting the
+    // former is what makes this case able to fail, and what makes the
+    // decision not to restate the ordering rule as a SQL constraint over
+    // decimal text load-bearing rather than merely stated.
+    const refused = checkEntryZone({ executablePrice: money("250.36"), entryZone: result.terms.entryZone });
+    expect(refused.eligible).toBe(false);
+    if (refused.eligible) {
+      return;
+    }
+    expect(refused.refusal.reason).toEqual({ source: "input", code: "MALFORMED_INPUT" });
+
+    // The contrast that says the refusal above is about the inversion and not
+    // about the price: the same price, against the same two bounds the right
+    // way round, is eligible.
+    expect(
+      checkEntryZone({
+        executablePrice: money("250.36"),
+        entryZone: { min: money("200.00"), max: money("300.00") },
+      }).eligible,
+    ).toBe(true);
   });
 });
