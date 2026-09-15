@@ -1,8 +1,7 @@
 import { z } from "zod";
-import { decimalStringSchema } from "@vigil/contracts";
 import type { DecimalString } from "@vigil/contracts";
 
-import { policyConfigSchema, refusalForParseError } from "./config";
+import { policyConfigSchema, refusalForParseError, scaleBoundedDecimalSchema } from "./config";
 import { inputRefusal, policyRefusal, type PolicyRefusal } from "./diagnostics";
 import { compareDecimal, divideFloor, floorToScale, isNegative, isPositive, minDecimal, multiplyDecimal } from "./scaled-decimal";
 
@@ -83,17 +82,17 @@ const WORKING_SCALE_GUARD_DIGITS = 12;
  */
 export const sizingInputsSchema = z.strictObject({
   /** Unreserved capital the account can actually spend, in quote currency. */
-  fundsAvailableQuote: decimalStringSchema,
+  fundsAvailableQuote: scaleBoundedDecimalSchema,
   /** Remaining headroom under the binding exposure cap, in quote currency — `checkExposure`'s `headroomQuote`. */
-  exposureHeadroomQuote: decimalStringSchema,
+  exposureHeadroomQuote: scaleBoundedDecimalSchema,
   /** Quantity the venue can actually fill at or inside the executable price, in base units. */
-  executableLiquidityBase: decimalStringSchema,
+  executableLiquidityBase: scaleBoundedDecimalSchema,
   /** Planned adverse loss this trade may cost if the stop is hit, in quote currency. */
-  adverseLossBudgetQuote: decimalStringSchema,
+  adverseLossBudgetQuote: scaleBoundedDecimalSchema,
   /** Quote-currency loss per unit of base asset if the stop is hit — entry price less stop price. */
-  stopDistanceQuote: decimalStringSchema,
+  stopDistanceQuote: scaleBoundedDecimalSchema,
   /** The price the size is computed against, quote currency per unit of base asset. */
-  executablePrice: decimalStringSchema,
+  executablePrice: scaleBoundedDecimalSchema,
 });
 
 export type SizingInputs = z.infer<typeof sizingInputsSchema>;
@@ -200,6 +199,27 @@ export function sizeTrade(params: SizeTradeParams): SizingResult {
       refusal: inputRefusal(
         "NEGATIVE_SIZE_BOUND",
         `sizing bound "${negativeBound[0]}" is ${negativeBound[1]}; a negative bound is corrupt state, not a very small size`,
+      ),
+      breakdown: null,
+    };
+  }
+
+  // Exposure headroom is the one bound whose zero is not a real bound.
+  // Zero funds, zero liquidity, and a zero loss budget are all legitimate
+  // states that should skip with MINIMUM_NOTIONAL. But `checkExposure`
+  // refuses a cap with no headroom before it ever returns one, so a zero
+  // arriving here means that gate was skipped. Answering it with a policy
+  // code would file a breached cap — or a missing check — as a
+  // minimum-size skip, losing both the cap's name and the fact that the
+  // gate never ran. The money outcome is the same either way; the
+  // journal's reason code is what this protects. `sizeTrade` is on the
+  // public surface, so a caller can reach it without `evaluateProposal`.
+  if (!isPositive(inputs.exposureHeadroomQuote)) {
+    return {
+      outcome: "refused",
+      refusal: inputRefusal(
+        "NON_POSITIVE_EXPOSURE_HEADROOM",
+        `exposure headroom is ${inputs.exposureHeadroomQuote}; checkExposure refuses a cap with no headroom before returning one, so a non-positive headroom here means the exposure gate was skipped`,
       ),
       breakdown: null,
     };

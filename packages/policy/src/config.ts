@@ -2,7 +2,7 @@ import { z } from "zod";
 import { decimalStringSchema } from "@vigil/contracts";
 
 import { inputRefusal, type PolicyRefusal } from "./diagnostics";
-import { isNegative, isPositive } from "./scaled-decimal";
+import { isNegative, isPositive, scaleOf } from "./scaled-decimal";
 
 /**
  * config.ts — the injected limit set, and the guard that refuses a
@@ -45,6 +45,33 @@ import { isNegative, isPositive } from "./scaled-decimal";
  * many digits the arithmetic walks, and approves nothing.
  */
 export const MAX_QUANTITY_SCALE = 36;
+
+/**
+ * A decimal string this package will do arithmetic on, bounded to a scale
+ * the arithmetic can walk cheaply.
+ *
+ * `decimalStringSchema` constrains shape, not size: it accepts a value with
+ * an unbounded number of fractional digits. That is fine for a value that is
+ * only compared, but `divideFloor` raises `10n ** BigInt(denominatorScale +
+ * scale)`, where `denominatorScale` comes straight from the caller's string.
+ * A pathological price off a venue feed therefore turns a sizing call into
+ * arbitrarily large bigint work, stalling the allocator rather than refusing
+ * it — and if `apps/trading` ever runs policy on the same event loop as
+ * protective actions, a stall reaches `docs/resilience.md` §2, not only §1.
+ *
+ * The bound reuses `MAX_QUANTITY_SCALE`, the same representational ceiling
+ * `packages/ledger/src/base-units.ts` puts on asset scale. It is a
+ * representational guard, not an owner limit, and it approves nothing.
+ *
+ * Deliberately local to this package: the underlying gap in
+ * `decimalStringSchema` is workspace-wide and belongs to
+ * `packages/contracts`, but `packages/policy` is the one on the money path,
+ * so it does not wait for that fix to stop trusting an unbounded string.
+ */
+export const scaleBoundedDecimalSchema = decimalStringSchema.refine(
+  (value) => scaleOf(value) <= MAX_QUANTITY_SCALE,
+  { error: `must carry at most ${String(MAX_QUANTITY_SCALE)} fractional digits` },
+);
 
 const nonNegativeDecimalSchema = decimalStringSchema.refine((value) => !isNegative(value), {
   error: "must be zero or greater",

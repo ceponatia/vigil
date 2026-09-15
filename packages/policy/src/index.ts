@@ -24,6 +24,7 @@
 export {
   parsePolicyConfig,
   policyConfigSchema,
+  scaleBoundedDecimalSchema,
   MAX_QUANTITY_SCALE,
 } from "./config";
 export type { PolicyConfig, PolicyConfigResult } from "./config";

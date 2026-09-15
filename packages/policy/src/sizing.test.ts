@@ -182,6 +182,28 @@ describe("sizeTrade — below the minimum is a skip carrying MINIMUM_NOTIONAL", 
     }
   });
 
+  it("sizes a quantity sitting exactly ON the minimum quantity — docs/policy.md skips what 'falls below' the minimum, so the boundary itself is tradable and must not be skipped", () => {
+    // Liquidity 0.5 is the binding bound and equals minimumQuantity exactly.
+    // minimumNotionalQuote is dropped to 1 so only the quantity comparison
+    // is on trial here.
+    const result = size({ executableLiquidityBase: dec("0.5") }, { minimumNotionalQuote: "1" });
+    expect(result.outcome).toBe("sized");
+    if (result.outcome === "sized") {
+      expect(result.size.quantityBase).toBe("0.5");
+      expect(result.size.breakdown.bindingBounds).toEqual(["executableLiquidity"]);
+    }
+  });
+
+  it("sizes a notional sitting exactly ON the minimum notional — same boundary, the other comparison", () => {
+    // 0.5 at a price of 100 is a notional of exactly 50. minimumQuantity is
+    // dropped to 0.001 so the quantity comparison cannot be what decides it.
+    const result = size({ executableLiquidityBase: dec("0.5") }, { minimumQuantity: "0.001" });
+    expect(result.outcome).toBe("sized");
+    if (result.outcome === "sized") {
+      expect(result.size.notionalQuote).toBe("50");
+    }
+  });
+
   it("treats zero available funds as a skip with the binding bound named, not a crash and not an unbounded size", () => {
     const result = size({ fundsAvailableQuote: dec("0") });
     expect(result.outcome).toBe("refused");
@@ -234,6 +256,62 @@ describe("sizeTrade — refuses corrupt inputs as diagnostics, not policy decisi
       }
     },
   );
+
+  it("refuses a ZERO exposure headroom as a skipped gate, not as a MINIMUM_NOTIONAL skip — checkExposure never returns a zero headroom, so a zero arriving here means the exposure gate did not run, and filing that under a policy code would lose both the cap's name and the fact the check was missed", () => {
+    const result = size({ exposureHeadroomQuote: dec("0") });
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.refusal.reason.source).toBe("input");
+      expect(result.refusal.reason.code).toBe("NON_POSITIVE_EXPOSURE_HEADROOM");
+      expect(result.refusal.reason.code).not.toBe("MINIMUM_NOTIONAL");
+    }
+  });
+
+  it("still reports a NEGATIVE exposure headroom as a corrupt bound, so the two headroom failures stay distinguishable", () => {
+    const result = size({ exposureHeadroomQuote: dec("-1") });
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.refusal.reason.code).toBe("NEGATIVE_SIZE_BOUND");
+    }
+  });
+
+  it("leaves the other three bounds alone at zero — no funds, no liquidity, and no loss budget are all real states that skip with MINIMUM_NOTIONAL rather than reporting a skipped gate", () => {
+    for (const overrides of [
+      { fundsAvailableQuote: dec("0") },
+      { executableLiquidityBase: dec("0") },
+      { adverseLossBudgetQuote: dec("0") },
+    ]) {
+      const result = size(overrides);
+      expect(result.outcome).toBe("refused");
+      if (result.outcome === "refused") {
+        expect(result.refusal.reason.source).toBe("policy");
+        expect(result.refusal.reason.code).toBe("MINIMUM_NOTIONAL");
+      }
+    }
+  });
+
+  it("refuses a decimal carrying more fractional digits than the arithmetic will walk, rather than stalling the allocator in bigint math on a pathological venue value", () => {
+    const pathological = dec(`0.${"0".repeat(200)}1`);
+    const result = size({ executablePrice: pathological });
+    expect(result.outcome).toBe("refused");
+    if (result.outcome === "refused") {
+      expect(result.refusal.reason.source).toBe("input");
+      expect(result.refusal.reason.code).toBe("MALFORMED_INPUT");
+    }
+  });
+
+  it("accepts a decimal exactly AT the scale bound, so the guard rejects only what it must — an off-by-one here would refuse legitimate venue precision", () => {
+    const atBound = dec(`0.${"0".repeat(35)}1`); // exactly 36 fractional digits
+    // A stop distance this small makes the adverse-loss bound enormous, so
+    // funds available (10 units) is still the binding bound and the trade
+    // sizes normally. The point is that the scale guard let it through.
+    const result = size({ stopDistanceQuote: atBound });
+    expect(result.outcome).toBe("sized");
+    if (result.outcome === "sized") {
+      expect(result.size.quantityBase).toBe("10");
+      expect(result.size.breakdown.bindingBounds).toEqual(["fundsAvailable"]);
+    }
+  });
 
   it("refuses a malformed limit set as a config problem, distinguishable from a caller problem", () => {
     const result = sizeTrade({

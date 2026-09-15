@@ -66,6 +66,12 @@ export const POLICY_DIAGNOSTIC_CODES = [
   "NON_POSITIVE_PRICE",
   /** The adverse-loss stop distance was zero or negative, so the loss budget bounds no size at all. */
   "NON_POSITIVE_STOP_DISTANCE",
+  /**
+   * Exposure headroom reached sizing at zero. `checkExposure` refuses a
+   * cap with no headroom before it ever returns one, so a zero here means
+   * the exposure gate was skipped — a caller bug, not a cap decision.
+   */
+  "NON_POSITIVE_EXPOSURE_HEADROOM",
   /** A cost component was negative. A negative "cost" is a rebate that would inflate net edge past its threshold. */
   "NEGATIVE_COST_COMPONENT",
   /** A sizing bound was negative. The minimum of a set containing a negative is not a tradable size. */
@@ -89,7 +95,20 @@ export type RefusalReason =
 
 export type PolicyRefusal = {
   readonly reason: RefusalReason;
-  /** Operator-facing context. Never contains a secret, key, or credential. */
+  /**
+   * Operator-facing context, for the opportunity journal and the
+   * authenticated control UI. Never contains a secret, key, seed, or
+   * credential.
+   *
+   * It is **not safe to log verbatim.** Several refusals deliberately
+   * embed balance-like amounts so a reader can see the arithmetic:
+   * `checkExposure` names the current exposure and the cap it was measured
+   * against, and `sizeTrade` names funds available, sized quantities, and
+   * notionals. `docs/resilience.md` §10 bars a personal balance from a
+   * structured log line. Persist this on the record and render it behind
+   * authentication; log the reason code and the correlation ID instead of
+   * piping `detail` into a `pino` line.
+   */
   readonly detail: string;
 };
 
