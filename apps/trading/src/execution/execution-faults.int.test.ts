@@ -14,6 +14,7 @@ import {
   dispatchIds,
   fund,
   instant,
+  money,
   openExecutionTestDb,
   paperExchange,
   parsedQuote,
@@ -225,7 +226,7 @@ describe("partial exchange fill followed by cancellation", () => {
       submission: { kind: "ACKNOWLEDGE" },
       // Four tenths of the order fills; the rest rests, and is what the
       // cancellation below actually cancels.
-      executions: { kind: "STEPS", steps: [{ quantity: "0.4000", afterMs: 0 }] },
+      executions: { kind: "STEPS", steps: [{ quantity: money("0.4000"), afterMs: 0 }] },
       cancellation: { kind: "CONFIRM" },
     });
     const order = await dispatch(scene, label);
