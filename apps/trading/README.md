@@ -38,20 +38,57 @@ elsewhere, and nothing that can move money also calls a model provider.
 - `strategy/` — invocation of `@vigil/strategies` candidates on a schedule.
 - `allocator/` — portfolio/risk allocation across concurrent candidates.
 - `execution/` — the adapter boundary; wires in `@vigil/adapter-paper` (and
-  later a live adapter) behind one execution interface.
+  later a live adapter) behind one execution interface. **Built.** See
+  "The execution domain" below.
 - `outbox/` — durable dispatch: an approved intent is written once and
   retried as versioned attempts, never re-approved.
 - `reconcile/` — periodic reconciliation against venue/chain truth.
 - `health/` — heartbeats and the staleness checks that drive fail-closed
   behavior.
 
-Every directory above but `health/` is described, not created — `market/`,
-`strategy/`, `allocator/`, `execution/`, `outbox/`, and `reconcile/` arrive
-with BOOT-06.
+Every directory above but `health/` and `execution/` is described, not
+created — `market/`, `strategy/`, `allocator/`, `outbox/`, and `reconcile/`
+arrive with the rest of BOOT-06.
+
+## The execution domain
+
+`src/execution/` carries one approved intent from a policy decision through a
+simulated fill:
+
+```text
+authorize.ts        evaluateProposal, then the durable ApprovedEconomicIntent
+dispatch.ts         reserve -> attempt + outbox -> REVALIDATE -> submit
+revalidate.ts       the fresh-quote / net-edge gate every dispatch runs
+settle.ts           poll, cancel, reconcile; confirmed economics and the journal
+recover.ts          the read a restart owes an unresolved dispatch
+venue.ts            the injected venue cost model, with no default for any field
+venue-economics.ts  the exact arithmetic and the policy cost translation
+```
+
+Two properties are worth knowing before reading any of it.
+
+**Everything is injected.** An `ExecutionRuntime` carries the database, the
+exchange, the venue cost model, the limit set, and the writer identity; the
+domain reads no environment variable and no clock. That is why `main.ts` does
+not start it: a venue fee rate, a slippage cap, and a flat execution cost are
+owner-approved numbers, and this build has none to read. Wiring the domain
+into the process needs those configuration variables to exist first.
+
+**The price handed to `@vigil/policy` is the venue's execution price**, not
+the ask, so the spread and the slippage cap are both `embedded` in the cost
+model policy consumes and the proportional fee lands on the notional the
+venue actually charges it on. `venue-economics.ts` states the full table and
+why the other wiring under-bounds the fee.
+
+Two things this domain deliberately does not do: it authorizes entry actions
+only (an exit needs a position basis and realized-P&L accounting that does
+not exist yet), and it builds no cancellation retry, scheduler, or incident —
+what a chase driver needs from here is that an unresolved cancellation is
+durably visible as `CANCEL_PENDING`, which it is.
 
 ## Status
 
-`src/main.ts` and `health/` exist (planning ID BOOT-07): config parsing,
+`src/main.ts`, `health/` and `execution/` exist: config parsing,
 a database connection, structured pino logging, and a heartbeat loop that
 writes this instance's operating mode and last-quote age on an interval —
 what `apps/control`'s Runtime health section reads. `loadTradingConfig`
