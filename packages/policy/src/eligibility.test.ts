@@ -8,6 +8,8 @@ import {
   checkQuoteFreshness,
 } from "./eligibility";
 import type { ExposureCap, NetEdgeCosts } from "./eligibility";
+import type { DecimalString } from "@vigil/contracts";
+
 import { dec, testConfig, ts } from "./test-support/fixtures";
 
 const config = testConfig();
@@ -166,6 +168,36 @@ describe("checkEntryZone", () => {
     if (!result.eligible) {
       expect(result.refusal.reason.code).toBe("OUTSIDE_ENTRY_ZONE");
     }
+  });
+
+  // checkEntryZone had no never-throws coverage at all, which is how the
+  // zod 4 refine defect stayed invisible here. entryZoneSchema's refine is
+  // object-level, and in zod 4 an object-level refine runs even when one of
+  // its own fields failed its string check — so `compareDecimal`, which is
+  // arithmetic and throws on an unrecognized shape, was reachable with a
+  // value like "1e-3". A throw inside a refine escapes safeParse entirely.
+  const shapeInvalid = ["1e-3", "+1", " 1", "1.", ""] as const;
+
+  it.each(shapeInvalid)("refuses a shape-invalid min (%j) as a diagnostic instead of throwing out of the check", (bad) => {
+    const params = { executablePrice: dec("105"), entryZone: { min: bad as unknown as DecimalString, max: dec("110") } };
+    expect(() => checkEntryZone(params)).not.toThrow();
+    const result = checkEntryZone(params);
+    expect(result.eligible).toBe(false);
+    if (!result.eligible) {
+      expect(result.refusal.reason.source).toBe("input");
+    }
+  });
+
+  it.each(shapeInvalid)("refuses a shape-invalid max (%j) without throwing", (bad) => {
+    const params = { executablePrice: dec("105"), entryZone: { min: dec("100"), max: bad as unknown as DecimalString } };
+    expect(() => checkEntryZone(params)).not.toThrow();
+    expect(checkEntryZone(params).eligible).toBe(false);
+  });
+
+  it.each(shapeInvalid)("refuses a shape-invalid executablePrice (%j) without throwing", (bad) => {
+    const params = { executablePrice: bad as unknown as DecimalString, entryZone: { min: dec("100"), max: dec("110") } };
+    expect(() => checkEntryZone(params)).not.toThrow();
+    expect(checkEntryZone(params).eligible).toBe(false);
   });
 
   it("refuses an inverted zone as malformed input, not as a policy decision about the price", () => {

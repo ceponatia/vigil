@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { DecimalString } from "@vigil/contracts";
 
 import {
   addDecimal,
@@ -6,6 +7,7 @@ import {
   divideFloor,
   floorToScale,
   fromScaled,
+  isDecomposable,
   isNegative,
   isPositive,
   isZero,
@@ -163,5 +165,80 @@ describe("minDecimal", () => {
   it("returns the smaller by value", () => {
     expect(minDecimal(dec("9"), dec("10"))).toBe("9");
     expect(minDecimal(dec("10"), dec("9"))).toBe("9");
+  });
+});
+
+
+// Regression for the PR #41 CI failure, and for the reasoning error behind
+// it. In Zod 4 a `.refine()` callback is NOT downstream of the base parse:
+// zod aggregates issues rather than short-circuiting, so a refine runs on a
+// value that just failed its own string check, an object-level refine runs
+// when one of its fields failed, and a `throw` from inside a refine escapes
+// `safeParse` entirely instead of becoming an issue. Every predicate a
+// refine can reach must therefore be total over `string`.
+//
+// The bad implementation this kills is the original one: these predicates
+// called a `decompose` that threw on an unrecognized shape, so
+// `parsePolicyConfig({ minimumQuantity: "1e-3" })` threw out of a trust
+// boundary instead of returning a MALFORMED_POLICY_CONFIG refusal
+// (docs/resilience.md §4).
+//
+// Every value here is UNDECOMPOSABLE — `decompose` would throw on it. That
+// is a narrower set than "invalid on the wire": `"-0"` fails
+// `@vigil/contracts`' `DECIMAL_STRING_PATTERN` but decomposes perfectly
+// well, so the predicates answer honestly about it (`isNegative("-0")` and
+// `isZero("-0")` are both true) rather than returning the `false` this list
+// expects. Do not add `"-0"` here; the schema-level suites in
+// `config.test.ts` are where wire-invalid-but-decomposable values belong.
+const SHAPE_INVALID = ["1e-3", "+1", " 1", "1.", "", "abc", "1,000", ".5", "--1", "Infinity", "NaN"];
+
+describe("trust-boundary-safe predicates are total over string", () => {
+  it.each(SHAPE_INVALID)("isDecomposable(%j) reports false without throwing", (value) => {
+    expect(() => isDecomposable(value)).not.toThrow();
+    expect(isDecomposable(value)).toBe(false);
+  });
+
+  it.each(SHAPE_INVALID)("isNegative / isZero / isPositive all answer false for %j without throwing", (value) => {
+    expect(() => isNegative(value)).not.toThrow();
+    expect(() => isZero(value)).not.toThrow();
+    expect(() => isPositive(value)).not.toThrow();
+    expect(isNegative(value)).toBe(false);
+    expect(isZero(value)).toBe(false);
+    expect(isPositive(value)).toBe(false);
+  });
+
+  it("isPositive is derived from the parts, not as !isNegative && !isZero — that composition would report every undecomposable value as a positive amount, since both predicates now answer false", () => {
+    for (const value of SHAPE_INVALID) {
+      expect(!isNegative(value) && !isZero(value)).toBe(true); // the trap
+      expect(isPositive(value)).toBe(false); // the actual answer
+    }
+  });
+
+  it.each(SHAPE_INVALID)("scaleOf(%j) is NaN without throwing, so a `<= MAX` refine fails rather than passing at scale 0", (value) => {
+    expect(() => scaleOf(value)).not.toThrow();
+    expect(Number.isNaN(scaleOf(value))).toBe(true);
+    expect(scaleOf(value) <= 36).toBe(false);
+  });
+
+  it("still answers correctly for well-formed values — totality must not have blunted the predicates", () => {
+    expect(isDecomposable("1.5")).toBe(true);
+    expect(isNegative("-1")).toBe(true);
+    expect(isNegative("1")).toBe(false);
+    expect(isZero("0.000")).toBe(true);
+    expect(isZero("0.001")).toBe(false);
+    expect(isPositive("0.001")).toBe(true);
+    expect(isPositive("0")).toBe(false);
+    expect(isPositive("-1")).toBe(false);
+    expect(scaleOf("250.10")).toBe(2);
+  });
+});
+
+describe("arithmetic helpers stay strict", () => {
+  it("compareDecimal still throws on an undecomposable value — it has no safe member of -1|0|1 to return, and widening it to null would be worse, since `null <= 0` is true in JavaScript", () => {
+    expect(() => compareDecimal("1e-3" as unknown as DecimalString, dec("1"))).toThrow();
+  });
+
+  it("null would genuinely be the wrong sentinel — this is the JavaScript fact that rules that design out", () => {
+    expect((null as unknown as number) <= 0).toBe(true);
   });
 });

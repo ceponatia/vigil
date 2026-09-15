@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { parsePolicyConfig, MAX_QUANTITY_SCALE } from "./config";
+import { parsePolicyConfig, policyConfigSchema, scaleBoundedDecimalSchema, MAX_QUANTITY_SCALE } from "./config";
+import { entryZoneSchema } from "./eligibility";
+import { sizingInputsSchema } from "./sizing";
 import { RAW_TEST_CONFIG } from "./test-support/fixtures";
 
 const withField = (overrides: Readonly<Record<string, unknown>>): Record<string, unknown> => ({
@@ -120,4 +122,126 @@ describe("parsePolicyConfig — never throws", () => {
       expect(parsePolicyConfig(raw).outcome).toBe("refused");
     },
   );
+});
+
+
+/**
+ * Regression for the PR #41 CI failure. `"1e-3"` correctly fails
+ * `DECIMAL_STRING_PATTERN`, but Zod 4 aggregates issues instead of
+ * short-circuiting, so the `.refine()` attached to that string check runs
+ * anyway — on the rejected value. The predicates it called then threw out of
+ * `parsePolicyConfig`, because a `throw` inside a refine escapes `safeParse`
+ * rather than becoming an issue. That is a docs/resilience.md §4 violation
+ * at a trust boundary: schema-illegal input must produce a refusal.
+ *
+ * Verified against zod 4.6.2 rather than assumed, because assuming zod 3's
+ * short-circuit semantics is precisely what produced the defect.
+ */
+const SHAPE_INVALID_MONEY = ["1e-3", "+1", " 1", "1.", "-0", "", "abc"];
+
+describe("every money refine refuses a shape-invalid string instead of throwing", () => {
+  it.each(SHAPE_INVALID_MONEY)(
+    "parsePolicyConfig refuses minimumQuantity %j (positiveDecimalSchema -> isPositive) without throwing",
+    (value) => {
+      expect(() => parsePolicyConfig(withField({ minimumQuantity: value }))).not.toThrow();
+      const result = parsePolicyConfig(withField({ minimumQuantity: value }));
+      expect(result.outcome).toBe("refused");
+      if (result.outcome === "refused") {
+        expect(result.refusal.reason.code).toBe("MALFORMED_POLICY_CONFIG");
+      }
+    },
+  );
+
+  it.each(SHAPE_INVALID_MONEY)(
+    "parsePolicyConfig refuses minimumNetEdgeQuote %j (nonNegativeDecimalSchema -> isNegative) without throwing",
+    (value) => {
+      expect(() => parsePolicyConfig(withField({ minimumNetEdgeQuote: value }))).not.toThrow();
+      expect(parsePolicyConfig(withField({ minimumNetEdgeQuote: value })).outcome).toBe("refused");
+    },
+  );
+
+  it.each(SHAPE_INVALID_MONEY)(
+    "scaleBoundedDecimalSchema refuses %j without throwing (scaleOf -> NaN, so the bound comparison is false)",
+    (value) => {
+      expect(() => scaleBoundedDecimalSchema.safeParse(value)).not.toThrow();
+      expect(scaleBoundedDecimalSchema.safeParse(value).success).toBe(false);
+    },
+  );
+
+  it.each(SHAPE_INVALID_MONEY)(
+    "entryZoneSchema refuses a shape-invalid min (%j) without throwing — in zod 4 this object-level refine runs even though the field failed, so compareDecimal must be gated behind isDecomposable",
+    (value) => {
+      const zone = { min: value, max: "2" };
+      expect(() => entryZoneSchema.safeParse(zone)).not.toThrow();
+      expect(entryZoneSchema.safeParse(zone).success).toBe(false);
+    },
+  );
+
+  it.each(SHAPE_INVALID_MONEY)("entryZoneSchema refuses a shape-invalid max (%j) without throwing", (value) => {
+    const zone = { min: "1", max: value };
+    expect(() => entryZoneSchema.safeParse(zone)).not.toThrow();
+    expect(entryZoneSchema.safeParse(zone).success).toBe(false);
+  });
+
+  it.each(SHAPE_INVALID_MONEY)(
+    "sizingInputsSchema refuses a shape-invalid executablePrice (%j) without throwing",
+    (value) => {
+      const inputs = {
+        fundsAvailableQuote: "1000",
+        exposureHeadroomQuote: "5000",
+        executableLiquidityBase: "80",
+        adverseLossBudgetQuote: "250",
+        stopDistanceQuote: "5",
+        executablePrice: value,
+      };
+      expect(() => sizingInputsSchema.safeParse(inputs)).not.toThrow();
+      expect(sizingInputsSchema.safeParse(inputs).success).toBe(false);
+    },
+  );
+});
+
+/**
+ * The net that catches the NEXT refine, not just today's four. Any schema
+ * this package exports must survive a shape-invalid string in any field
+ * without throwing — so a refine added by #35 or a later slice that calls an
+ * arithmetic helper directly fails here rather than in production.
+ */
+describe("no exported schema throws on a shape-invalid string in any field", () => {
+  // Typed structurally rather than as a union of three zod schema types:
+  // all this needs is "something with a safeParse", and a union of distinct
+  // ZodType instances makes the method call needlessly awkward to type.
+  type ParsesAnything = { readonly safeParse: (value: unknown) => { readonly success: boolean } };
+
+  const cases: readonly (readonly [string, ParsesAnything, Readonly<Record<string, unknown>>])[] = [
+    ["policyConfigSchema", policyConfigSchema, { ...RAW_TEST_CONFIG }],
+    [
+      "sizingInputsSchema",
+      sizingInputsSchema,
+      {
+        fundsAvailableQuote: "1000",
+        exposureHeadroomQuote: "5000",
+        executableLiquidityBase: "80",
+        adverseLossBudgetQuote: "250",
+        stopDistanceQuote: "5",
+        executablePrice: "100",
+      },
+    ],
+    ["entryZoneSchema", entryZoneSchema, { min: "1", max: "2" }],
+  ];
+
+  it.each(cases)("%s tolerates a poisoned field in every position", (_name, schema, valid) => {
+    for (const key of Object.keys(valid)) {
+      for (const bad of SHAPE_INVALID_MONEY) {
+        const poisoned = { ...valid, [key]: bad };
+        expect(() => schema.safeParse(poisoned)).not.toThrow();
+        expect(schema.safeParse(poisoned).success).toBe(false);
+      }
+    }
+  });
+
+  it("the valid baselines themselves still parse, so the loop above is not vacuously green on an already-broken fixture", () => {
+    for (const [, schema, valid] of cases) {
+      expect(schema.safeParse(valid).success).toBe(true);
+    }
+  });
 });

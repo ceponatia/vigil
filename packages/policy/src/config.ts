@@ -69,14 +69,31 @@ export const MAX_QUANTITY_SCALE = 36;
  * so it does not wait for that fix to stop trusting an unbounded string.
  */
 export const scaleBoundedDecimalSchema = decimalStringSchema.refine(
+  // `scaleOf` is trust-boundary-safe: it returns NaN for an undecomposable
+  // value, and `NaN <= MAX_QUANTITY_SCALE` is false, so a value that failed
+  // the base pattern fails this refine too rather than throwing inside it.
   (value) => scaleOf(value) <= MAX_QUANTITY_SCALE,
   { error: `must carry at most ${String(MAX_QUANTITY_SCALE)} fractional digits` },
 );
 
+/**
+ * Every refine in this file is handed values that may have failed the base
+ * string check — in Zod 4 a refine is not downstream of the parse it is
+ * attached to (see `scaled-decimal.ts`'s module comment). All three below
+ * call only trust-boundary-safe predicates, which are total over `string`
+ * and cannot throw on an undecomposable value.
+ *
+ * `isNegative` answers `false` for garbage, so `!isNegative(garbage)` is
+ * `true` and this refine passes — which is fine and intended: the base
+ * pattern has already rejected the value, so the object is refused either
+ * way, and this refine adds no confusing second issue about the sign of
+ * something that is not a number.
+ */
 const nonNegativeDecimalSchema = decimalStringSchema.refine((value) => !isNegative(value), {
   error: "must be zero or greater",
 });
 
+/** `isPositive` answers `false` for garbage, so this refine fails closed on it. */
 const positiveDecimalSchema = decimalStringSchema.refine((value) => isPositive(value), {
   error: "must be strictly greater than zero",
 });

@@ -4,7 +4,7 @@ import type { DecimalString } from "@vigil/contracts";
 
 import { policyConfigSchema, refusalForParseError } from "./config";
 import { inputRefusal, policyRefusal, type PolicyRefusal } from "./diagnostics";
-import { addDecimal, compareDecimal, isNegative, isPositive, multiplyDecimal, subtractDecimal } from "./scaled-decimal";
+import { addDecimal, compareDecimal, isDecomposable, isNegative, isPositive, multiplyDecimal, subtractDecimal } from "./scaled-decimal";
 
 /**
  * eligibility.ts — the five checks that stand between a proposal and a
@@ -244,7 +244,19 @@ export const entryZoneSchema = z
     min: decimalStringSchema,
     max: decimalStringSchema,
   })
-  .refine((zone) => compareDecimal(zone.min, zone.max) <= 0, { error: "entry zone min must be <= max" });
+  .refine(
+    (zone) =>
+      // `compareDecimal` is arithmetic, not trust-boundary-safe, and in
+      // Zod 4 this object-level refine runs even when `min` or `max` failed
+      // its own string check — verified against zod 4.6.2, not assumed.
+      // So the ordering question is only asked once both sides are actually
+      // decomposable. Answering `true` when one is not is correct: that
+      // field's own error already rejects the object, and a second issue
+      // claiming "min must be <= max" about a non-number would only
+      // mislead whoever reads the refusal detail.
+      !isDecomposable(zone.min) || !isDecomposable(zone.max) || compareDecimal(zone.min, zone.max) <= 0,
+    { error: "entry zone min must be <= max" },
+  );
 
 export type EntryZone = z.infer<typeof entryZoneSchema>;
 
