@@ -353,12 +353,14 @@ function storeEvaluationFrom(evaluation: EntryEvaluationRecord, recordedAt: stri
  * against.
  *
  * A translation that DID re-derive it — the obvious bad implementation — is
- * caught by the ELIGIBLE case below, not by the chasing one. Re-derived from
- * the entry quote, the same rule gives [247.61, 249.11], and that dispatch's
- * executable price of 249.86 sits above it: the authorization refuses and
- * `expect(authorized.outcome).toBe("authorized")` fails. The stored plan's
- * terms are asserted against the candidate's own bounds for the same reason,
- * so the zone's identity is pinned and not merely its effect.
+ * caught by the ELIGIBLE case below, not by the chasing one, and in three
+ * places there. Re-derived from the entry quote, the same rule gives
+ * [247.61, 249.11], and that dispatch's executable price of 249.86 sits
+ * above it, so the authorization refuses. Three assertions fail on that: the
+ * `authorized` outcome itself, the stored plan's bounds measured against the
+ * candidate's own, and the `admitted` control closing the chasing case,
+ * which runs the same translation against the entry quote. The stored-plan
+ * assertion pins the zone's identity, not merely its effect.
  *
  * That mutation is structurally invisible to any chasing case built on this
  * strategy, which is worth stating so nobody adds one expecting it to help.
@@ -668,13 +670,15 @@ describe("the vertical PAPER replay (composed by this test; apps/trading wires n
     // declining to make the call.
     //
     // What this case distinguishes, exactly: a translation whose approved
-    // band reaches the price this dispatch would actually pay. That price is
-    // 251.22 — the 250.96 ask plus the venue's 10bp cap, rounded up — against
-    // an approved maximum of 250.46, a gap of 0.76. Any band widened past
-    // that authorizes a spend and fails here: an unbounded or default-
-    // permissive zone, a band taken from the candidate's invalidation price
-    // upward, or one re-centred on the current price with a tolerance of
-    // 0.76 or more.
+    // band has a MAXIMUM reaching the price this dispatch would actually
+    // pay. Only the maximum decides it — the floor is irrelevant, so a band
+    // taken from the invalidation price upward, [246.96, 250.46], refuses
+    // exactly as [248.96, 250.46] does. That price is 251.22: the 250.96 ask
+    // plus the venue's 10bp cap, rounded up, against an approved maximum of
+    // 250.46. Any band whose maximum reaches 251.22 authorizes a spend and
+    // fails here — an unbounded or default-permissive zone, or one re-centred
+    // on the current price, which needs a tolerance of only 0.26 to get there
+    // from 250.96.
     //
     // What it does NOT distinguish, stated so the next reader does not
     // over-claim it: a band widened only by the candidate's own
