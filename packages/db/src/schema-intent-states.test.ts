@@ -4,7 +4,13 @@ import {
   executionAttemptStateEnum,
   LIVE_EXECUTION_ATTEMPT_STATES,
   TERMINAL_EXECUTION_ATTEMPT_STATES,
-} from "./intents";
+} from "./schema/intents";
+
+// Lives beside src/, NOT under src/schema/: drizzle.config.ts globs
+// `packages/db/src/schema/*.ts`, so a test file in that directory is loaded
+// as if it were a schema module — which makes `pnpm db:generate` fail
+// outright on `vitest` being require()d from a CommonJS bin. The same note
+// stands at the top of `schema-invariants.int.test.ts`, for the same reason.
 
 /**
  * The defect this file kills: a tenth execution attempt state added to the
